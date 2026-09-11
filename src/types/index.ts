@@ -1,5 +1,5 @@
 /**
- * Core domain types for the CodeDoc Generator.
+ * Core domain types for Codice.
  *
  * The pipeline is:
  *   ProjectFolder -> DiscoveredFile -> SelectedFile -> HighlightedFile

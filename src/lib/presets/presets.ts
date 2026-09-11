@@ -1,149 +1,35 @@
+/**
+ * Legacy compatibility shim.
+ *
+ * The original `Preset` type and `BUILT_IN_PRESETS` array have been replaced
+ * by the richer `DocumentPreset` model in `documentPreset.ts` and
+ * `builtInPresets.ts`. This module forwards to the new system so any
+ * external code that still imports from here keeps working.
+ */
+
 import type { Preset } from '@/types';
+import { BUILT_IN_DOCUMENT_PRESETS, DEFAULT_DOCUMENT_PRESET_ID } from './builtInPresets';
+import { presetToOptions } from './presetToOptions';
 
-/** Built-in presets that configure the document options. */
-export const BUILT_IN_PRESETS: Preset[] = [
-  {
-    id: 'university',
-    label: 'University Submission',
-    description:
-      'Serif headings, readable code blocks, line numbers, table of contents and page breaks between files. Ideal for coursework submissions.',
-    builtIn: true,
-    syntaxTheme: 'github-light',
-    options: {
-      pageSize: 'A4',
-      landscape: false,
-      margins: { top: 25, right: 20, bottom: 25, left: 25 },
-      codeBackground: '#f6f8fa',
-      codeBorderColor: '#d0d7de',
-      codeBorderWidth: 0.5,
-      codePadding: 8,
-      codeFont: 'Courier New',
-      codeFontSize: 9,
-      codeLineHeight: 1.25,
-      headingFont: 'Times New Roman',
-      bodyFont: 'Times New Roman',
-      bodyFontSize: 12,
-      showLineNumbers: true,
-      showFileHeaders: true,
-      pageBreakBetweenFiles: true,
-      includeToc: true,
-      includeFrontMatter: true,
-      wrapLongLines: true,
-      includeProjectStructure: true,
-      syntaxTheme: 'github-light',
-      pageHeader: null,
-      pageFooter: 'Page {page} of {pages}',
-    },
-    metadata: {
-      title: 'Project Report',
-      author: 'Student Name',
-    },
-  },
-  {
-    id: 'developer',
-    label: 'Developer Documentation',
-    description:
-      'Modern typography with compact code blocks. Light and dark syntax themes. Includes path labels but no TOC.',
-    builtIn: true,
-    syntaxTheme: 'github-dark',
-    options: {
-      pageSize: 'A4',
-      landscape: false,
-      margins: { top: 18, right: 18, bottom: 18, left: 18 },
-      codeBackground: '#24292e',
-      codeBorderColor: null,
-      codeBorderWidth: 0,
-      codePadding: 8,
-      codeFont: 'JetBrains Mono',
-      codeFontSize: 8.5,
-      codeLineHeight: 1.2,
-      headingFont: 'Inter',
-      bodyFont: 'Inter',
-      bodyFontSize: 11,
-      showLineNumbers: true,
-      showFileHeaders: true,
-      pageBreakBetweenFiles: false,
-      includeToc: false,
-      includeFrontMatter: false,
-      wrapLongLines: false,
-      includeProjectStructure: true,
-      syntaxTheme: 'github-dark',
-      pageHeader: null,
-      pageFooter: '{page}',
-    },
-  },
-  {
-    id: 'minimal',
-    label: 'Minimal',
-    description:
-      'Simple headings, no decoration, maximum code density. Good for archiving a small project as a single document.',
-    builtIn: true,
-    syntaxTheme: 'github-light',
-    options: {
-      pageSize: 'A4',
-      landscape: false,
-      margins: { top: 15, right: 15, bottom: 15, left: 15 },
-      codeBackground: '#ffffff',
-      codeBorderColor: '#e5e7eb',
-      codeBorderWidth: 0.5,
-      codePadding: 4,
-      codeFont: 'Courier New',
-      codeFontSize: 8,
-      codeLineHeight: 1.15,
-      headingFont: 'Helvetica',
-      bodyFont: 'Helvetica',
-      bodyFontSize: 10,
-      showLineNumbers: false,
-      showFileHeaders: true,
-      pageBreakBetweenFiles: false,
-      includeToc: false,
-      includeFrontMatter: false,
-      wrapLongLines: false,
-      includeProjectStructure: false,
-      syntaxTheme: 'github-light',
-      pageHeader: null,
-      pageFooter: null,
-    },
-  },
-  {
-    id: 'landscape',
-    label: 'Landscape Wide-Code',
-    description:
-      'Landscape A4 layout for files with very long lines. Smaller font size and tighter spacing.',
-    builtIn: true,
-    syntaxTheme: 'github-dark',
-    options: {
-      pageSize: 'A4',
-      landscape: true,
-      margins: { top: 15, right: 15, bottom: 15, left: 15 },
-      codeBackground: '#24292e',
-      codeBorderColor: null,
-      codeBorderWidth: 0,
-      codePadding: 6,
-      codeFont: 'JetBrains Mono',
-      codeFontSize: 7.5,
-      codeLineHeight: 1.15,
-      headingFont: 'Inter',
-      bodyFont: 'Inter',
-      bodyFontSize: 10,
-      showLineNumbers: true,
-      showFileHeaders: true,
-      pageBreakBetweenFiles: true,
-      includeToc: true,
-      includeFrontMatter: true,
-      wrapLongLines: false,
-      includeProjectStructure: true,
-      syntaxTheme: 'github-dark',
-      pageHeader: null,
-      pageFooter: 'Page {page}',
-    },
-  },
-];
+/** Convert new DocumentPreset to legacy Preset shape. */
+function toLegacyPreset(p: typeof BUILT_IN_DOCUMENT_PRESETS[number]): Preset {
+  return {
+    id: p.id,
+    label: p.name,
+    description: p.description,
+    options: presetToOptions(p),
+    metadata: p.metadata,
+    syntaxTheme: p.syntaxTheme,
+    builtIn: p.builtIn,
+  };
+}
 
-/** Default preset id. */
-export const DEFAULT_PRESET_ID = 'university';
+export const BUILT_IN_PRESETS: Preset[] =
+  BUILT_IN_DOCUMENT_PRESETS.map(toLegacyPreset);
 
-/** Find a built-in preset by id. */
+export const DEFAULT_PRESET_ID = DEFAULT_DOCUMENT_PRESET_ID;
+
 export function getPreset(id: string): Preset | undefined {
-  return BUILT_IN_PRESETS.find((p) => p.id === id);
+  const found = BUILT_IN_DOCUMENT_PRESETS.find((p) => p.id === id);
+  return found ? toLegacyPreset(found) : undefined;
 }

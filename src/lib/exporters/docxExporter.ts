@@ -49,7 +49,7 @@ import { formatBytes } from '@/lib/fileDiscovery';
 
 /** Build a filename for the export. */
 function buildFilename(options: ExportOptions): string {
-  return `${options.filename || 'codedoc'}.docx`;
+  return `${options.filename || 'codice'}.docx`;
 }
 
 /** Convert hex (#rrggbb) to a docx-compatible hex string without #. */

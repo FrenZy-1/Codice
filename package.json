@@ -1,9 +1,9 @@
 {
-  "name": "codedoc-generator",
+  "name": "codice",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.2.0",
   "type": "module",
-  "description": "Browser-based tool to generate DOCX/PDF/ODT documents from source code project folders",
+  "description": "Codice — browser-based tool that turns project folders into polished DOCX, PDF, and ODT documents. Local-first, no telemetry.",
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",

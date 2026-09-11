@@ -125,8 +125,8 @@ function buildStylesXml(options: DocumentOptions): string {
 /** Build the meta.xml content. */
 function buildMetaXml(model: DocumentModel): string {
   const md = model.metadata;
-  const title = md.title ?? 'CodeDoc Document';
-  const author = md.author ?? 'CodeDoc Generator';
+  const title = md.title ?? 'Codice Document';
+  const author = md.author ?? 'Codice';
   const date = new Date(model.generatedAt).toISOString();
   return `<?xml version="1.0" encoding="UTF-8"?>
 <office:document-meta
@@ -138,7 +138,7 @@ function buildMetaXml(model: DocumentModel): string {
     <dc:title>${xmlEscape(title)}</dc:title>
     <dc:creator>${xmlEscape(author)}</dc:creator>
     <dc:date>${date}</dc:date>
-    <meta:generator>CodeDoc Generator</meta:generator>
+    <meta:generator>Codice</meta:generator>
   </office:meta>
 </office:document-meta>`;
 }
@@ -453,7 +453,7 @@ export const odtExporter: DocumentExporter = {
     const elapsed = performance.now() - start;
     return {
       blob,
-      filename: `${options.filename || 'codedoc'}.odt`,
+      filename: `${options.filename || 'codice'}.odt`,
       format: 'odt',
       elapsedMs: elapsed,
     };

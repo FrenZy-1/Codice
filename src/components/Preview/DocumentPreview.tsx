@@ -10,12 +10,14 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { useAppState } from '@/hooks/useAppState';
 import { getTheme } from '@/lib/themes/syntaxThemes';
 import { highlightFile, getThemeColors } from '@/lib/highlight/highlighter';
+import { fontStack } from '@/lib/fonts/fontCatalog';
 import type { HighlightedFile } from '@/types';
 import { formatBytes } from '@/lib/fileDiscovery';
 import { languageLabel } from '@/lib/languageDetection';
+import { presetToOptions } from '@/lib/presets/presetToOptions';
 
 const PAGE_DIMENSIONS_PX: Record<string, [number, number]> = {
-  A4: [794, 1123], // 210x297mm at 96dpi
+  A4: [794, 1123],
   Letter: [816, 1056],
   Legal: [816, 1344],
   A3: [1123, 1587],
@@ -32,21 +34,20 @@ export function DocumentPreview() {
   }>({ background: '#24292e', foreground: '#e1e4e8' });
   const containerRef = useRef<HTMLDivElement>(null);
 
-  const opts = state.options;
-  const theme = getTheme(opts.syntaxTheme);
+  const preset = state.preset;
+  const opts = useMemo(() => presetToOptions(preset), [preset]);
+  const theme = getTheme(preset.syntaxTheme);
 
-  // Update theme colors when syntax theme changes.
   useEffect(() => {
     let cancelled = false;
-    getThemeColors(opts.syntaxTheme).then((c) => {
+    getThemeColors(preset.syntaxTheme).then((c) => {
       if (!cancelled) setThemeColors(c);
     });
     return () => {
       cancelled = true;
     };
-  }, [opts.syntaxTheme]);
+  }, [preset.syntaxTheme]);
 
-  // Gather all selected files across projects.
   const allSelected = useMemo(() => {
     const result: Array<{
       projectLabel: string;
@@ -74,7 +75,6 @@ export function DocumentPreview() {
     return result;
   }, [state.projects, getSelectedFiles]);
 
-  // Highlight files lazily — only the first N to keep the preview fast.
   const PREVIEW_LIMIT = 25;
   const filesToPreview = allSelected.slice(0, PREVIEW_LIMIT);
 
@@ -84,7 +84,6 @@ export function DocumentPreview() {
       for (const item of filesToPreview) {
         if (cancelled) return;
         if (highlightedCache[item.fileId]) continue;
-        // Find the file's handle in state.
         const project = state.projects.find((p) => p.id === item.projectId);
         const file = project?.files.find((f) => f.id === item.fileId);
         if (!file?.fileHandle) continue;
@@ -95,7 +94,7 @@ export function DocumentPreview() {
             item.relativePath,
             item.language,
             text,
-            opts.syntaxTheme,
+            preset.syntaxTheme,
           );
           if (!cancelled) {
             setHighlightedCache((prev) => ({
@@ -113,11 +112,11 @@ export function DocumentPreview() {
       cancelled = true;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [filesToPreview.map((f) => f.fileId).join(','), opts.syntaxTheme]);
+  }, [filesToPreview.map((f) => f.fileId).join(','), preset.syntaxTheme]);
 
-  const [pageW, pageH] = PAGE_DIMENSIONS_PX[opts.pageSize] ?? PAGE_DIMENSIONS_PX.A4;
-  const effectiveW = opts.landscape ? pageH : pageW;
-  const effectiveH = opts.landscape ? pageW : pageH;
+  const [pageW, pageH] = PAGE_DIMENSIONS_PX[preset.page.size] ?? PAGE_DIMENSIONS_PX.A4;
+  const effectiveW = preset.page.landscape ? pageH : pageW;
+  const effectiveH = preset.page.landscape ? pageW : pageH;
 
   const scaleFactor = useMemo(() => {
     if (!containerRef.current) return 0.7;
@@ -149,75 +148,105 @@ export function DocumentPreview() {
   return (
     <div
       ref={containerRef}
-      className="flex-1 overflow-auto bg-[#0d1117] p-6"
+      className="flex-1 overflow-auto bg-app p-6"
       style={{
         backgroundImage:
-          'radial-gradient(circle, rgba(255,255,255,0.03) 1px, transparent 1px)',
+          'radial-gradient(circle, rgba(128,128,128,0.07) 1px, transparent 1px)',
         backgroundSize: '20px 20px',
       }}
     >
       <div className="mx-auto" style={{ width: effectiveW * scaleFactor }}>
         <div
-          className="bg-white shadow-2xl mx-auto"
+          className="shadow-2xl mx-auto"
           style={{
             width: effectiveW,
             minHeight: effectiveH,
             transform: `scale(${scaleFactor})`,
             transformOrigin: 'top left',
             marginBottom: (effectiveH - effectiveH * scaleFactor) * -1 + 24,
-            padding: `${opts.margins.top * 3.78}px ${opts.margins.right * 3.78}px ${opts.margins.bottom * 3.78}px ${opts.margins.left * 3.78}px`,
-            fontFamily: opts.bodyFont,
-            fontSize: opts.bodyFontSize,
-            color: '#1f2937',
+            padding: `${preset.page.marginTopMm * 3.78}px ${preset.page.marginRightMm * 3.78}px ${preset.page.marginBottomMm * 3.78}px ${preset.page.marginLeftMm * 3.78}px`,
+            fontFamily: fontStack(preset.typography.bodyFont),
+            fontSize: preset.typography.bodyFontSizePt,
+            color: preset.colors.primaryText,
+            background: preset.colors.background,
           }}
         >
-          {opts.includeFrontMatter && state.metadata.title && (
+          {preset.titlePage.enabled && state.metadata.title && (
             <div className="text-center" style={{ marginTop: 100 }}>
-              <div
-                style={{
-                  fontFamily: opts.headingFont,
-                  fontSize: 32,
-                  fontWeight: 'bold',
-                  color: '#0f172a',
-                }}
-              >
-                {state.metadata.title}
-              </div>
-              {state.metadata.author && (
-                <div style={{ fontSize: 16, color: '#4b5563', marginTop: 12 }}>
+              {preset.titlePage.showTitle && (
+                <div
+                  style={{
+                    fontFamily: fontStack(preset.headings.title.font),
+                    fontSize: preset.headings.title.sizePt,
+                    fontWeight: preset.headings.title.weight,
+                    fontStyle: preset.headings.title.italic ? 'italic' : 'normal',
+                    color: preset.headings.title.color,
+                    textAlign: preset.headings.title.alignment,
+                  }}
+                >
+                  {state.metadata.title}
+                </div>
+              )}
+              {preset.titlePage.showAuthor && state.metadata.author && (
+                <div
+                  style={{
+                    fontSize: preset.typography.bodyFontSizePt + 2,
+                    color: preset.colors.secondaryText,
+                    marginTop: 12,
+                  }}
+                >
                   {state.metadata.author}
                 </div>
               )}
-              {state.metadata.course && (
-                <div style={{ fontSize: 14, color: '#6b7280', marginTop: 6 }}>
+              {preset.titlePage.showCourse && state.metadata.course && (
+                <div
+                  style={{
+                    fontSize: preset.typography.bodyFontSizePt,
+                    color: preset.colors.mutedText,
+                    marginTop: 6,
+                  }}
+                >
                   {state.metadata.course}
                 </div>
               )}
-              {state.metadata.university && (
-                <div style={{ fontSize: 14, color: '#6b7280', marginTop: 4 }}>
+              {preset.titlePage.showUniversity && state.metadata.university && (
+                <div
+                  style={{
+                    fontSize: preset.typography.bodyFontSizePt,
+                    color: preset.colors.mutedText,
+                    marginTop: 4,
+                  }}
+                >
                   {state.metadata.university}
                 </div>
               )}
-              <div
-                style={{
-                  fontSize: 11,
-                  color: '#9ca3af',
-                  marginTop: 32,
-                }}
-              >
-                Generated: {new Date().toLocaleString()}
-              </div>
-              {state.metadata.version && (
-                <div style={{ fontSize: 11, color: '#9ca3af', marginTop: 4 }}>
+              {preset.titlePage.showDate && (
+                <div
+                  style={{
+                    fontSize: 11,
+                    color: preset.colors.mutedText,
+                    marginTop: 32,
+                  }}
+                >
+                  Generated: {new Date().toLocaleString()}
+                </div>
+              )}
+              {preset.titlePage.showVersion && state.metadata.version && (
+                <div
+                  style={{
+                    fontSize: 11,
+                    color: preset.colors.mutedText,
+                    marginTop: 4,
+                  }}
+                >
                   Version: {state.metadata.version}
                 </div>
               )}
-              {state.metadata.description && (
+              {preset.titlePage.showDescription && state.metadata.description && (
                 <div
                   style={{
                     fontSize: 12,
-                    color: '#4b5563',
-                    marginTop: 24,
+                    color: preset.colors.secondaryText,
                     maxWidth: 400,
                     margin: '24px auto 0',
                   }}
@@ -229,27 +258,28 @@ export function DocumentPreview() {
             </div>
           )}
 
-          {opts.includeToc && (
+          {preset.includeToc && (
             <div style={{ marginBottom: 24 }}>
-              <h1
+              <div
                 style={{
-                  fontFamily: opts.headingFont,
-                  fontSize: 22,
-                  fontWeight: 'bold',
+                  fontFamily: fontStack(preset.headings.h1.font),
+                  fontSize: preset.headings.h1.sizePt,
+                  fontWeight: preset.headings.h1.weight,
+                  color: preset.headings.h1.color,
                   marginBottom: 12,
-                  color: '#0f172a',
                 }}
               >
                 Table of Contents
-              </h1>
+              </div>
               {projectGroups.map((g, gi) => (
                 <div key={g.projectId}>
                   <div
                     style={{
-                      fontFamily: opts.headingFont,
+                      fontFamily: fontStack(preset.headings.h1.font),
                       fontWeight: 'bold',
                       fontSize: 13,
                       marginTop: 8,
+                      color: preset.colors.primaryText,
                     }}
                   >
                     {gi + 1}. {g.projectLabel}
@@ -259,7 +289,7 @@ export function DocumentPreview() {
                       key={f.fileId}
                       style={{
                         fontSize: 11,
-                        color: '#4b5563',
+                        color: preset.colors.secondaryText,
                         marginLeft: 16,
                         marginTop: 2,
                       }}
@@ -275,37 +305,40 @@ export function DocumentPreview() {
 
           {projectGroups.map((g, gi) => (
             <div key={g.projectId} style={{ marginTop: gi === 0 ? 0 : 24 }}>
-              <h1
+              <div
                 style={{
-                  fontFamily: opts.headingFont,
-                  fontSize: 22,
-                  fontWeight: 'bold',
-                  marginTop: 16,
-                  marginBottom: 12,
-                  color: '#0f172a',
+                  fontFamily: fontStack(preset.projectHeaders.font),
+                  fontSize: preset.projectHeaders.sizePt,
+                  fontWeight: preset.projectHeaders.weight,
+                  color: preset.projectHeaders.color,
+                  textTransform: preset.projectHeaders.uppercase
+                    ? 'uppercase'
+                    : 'none',
+                  marginTop: preset.projectHeaders.spaceBeforePt,
+                  marginBottom: preset.projectHeaders.spaceAfterPt,
                 }}
               >
                 {gi + 1}. {g.projectLabel}
-              </h1>
+              </div>
 
-              {opts.includeProjectStructure && (
+              {preset.includeProjectStructure && (
                 <div style={{ marginBottom: 16 }}>
-                  <h2
+                  <div
                     style={{
-                      fontFamily: opts.headingFont,
-                      fontSize: 16,
-                      fontWeight: 'bold',
+                      fontFamily: fontStack(preset.headings.h2.font),
+                      fontSize: preset.headings.h2.sizePt,
+                      fontWeight: preset.headings.h2.weight,
+                      color: preset.headings.h2.color,
                       marginBottom: 8,
-                      color: '#0f172a',
                     }}
                   >
                     Project Structure
-                  </h2>
+                  </div>
                   <div
                     style={{
-                      fontFamily: opts.codeFont,
-                      fontSize: opts.codeFontSize - 1,
-                      color: '#4b5563',
+                      fontFamily: fontStack(preset.code.font),
+                      fontSize: preset.code.fontSizePt - 1,
+                      color: preset.colors.secondaryText,
                       whiteSpace: 'pre',
                       lineHeight: 1.3,
                     }}
@@ -315,18 +348,18 @@ export function DocumentPreview() {
                 </div>
               )}
 
-              <h2
+              <div
                 style={{
-                  fontFamily: opts.headingFont,
-                  fontSize: 16,
-                  fontWeight: 'bold',
+                  fontFamily: fontStack(preset.headings.h2.font),
+                  fontSize: preset.headings.h2.sizePt,
+                  fontWeight: preset.headings.h2.weight,
+                  color: preset.headings.h2.color,
                   marginTop: 16,
                   marginBottom: 8,
-                  color: '#0f172a',
                 }}
               >
                 Source Files
-              </h2>
+              </div>
 
               {g.files.map((f, fi) => {
                 const highlighted = highlightedCache[f.fileId];
@@ -334,40 +367,57 @@ export function DocumentPreview() {
                   <div
                     key={f.fileId}
                     style={{
-                      marginTop: opts.pageBreakBetweenFiles && fi > 0 ? 24 : 8,
+                      marginTop:
+                        preset.pageBreakBetweenFiles && fi > 0 ? 24 : 8,
                       pageBreakBefore:
-                        opts.pageBreakBetweenFiles && fi > 0 ? 'always' : 'auto',
+                        preset.pageBreakBetweenFiles && fi > 0
+                          ? 'always'
+                          : 'auto',
                     }}
                   >
-                    <h3
+                    <div
                       style={{
-                        fontFamily: opts.headingFont,
-                        fontSize: 13,
-                        fontWeight: 'bold',
-                        color: '#1e293b',
+                        fontFamily: fontStack(preset.headings.h3.font),
+                        fontSize: preset.headings.h3.sizePt,
+                        fontWeight: preset.headings.h3.weight,
+                        color: preset.headings.h3.color,
                         marginTop: 8,
                       }}
                     >
                       {gi + 1}.{fi + 1}  {f.relativePath}
-                    </h3>
-                    {opts.showFileHeaders && (
+                    </div>
+                    {preset.fileHeaders.show && (
                       <div
                         style={{
-                          fontFamily: opts.codeFont,
-                          fontSize: opts.codeFontSize - 1,
-                          fontWeight: 'bold',
-                          color: '#586069',
-                          borderBottom: '0.5px solid #d0d7de',
+                          fontFamily: fontStack(preset.fileHeaders.font),
+                          fontSize: preset.fileHeaders.fontSizePt,
+                          fontWeight: preset.fileHeaders.bold ? 'bold' : 'normal',
+                          color: preset.fileHeaders.textColor,
+                          background:
+                            preset.fileHeaders.background === 'transparent'
+                              ? undefined
+                              : preset.fileHeaders.background,
+                          borderBottom: preset.fileHeaders.borderBottom
+                            ? `0.5px solid ${preset.fileHeaders.borderColor}`
+                            : undefined,
                           paddingBottom: 4,
                           marginBottom: 6,
                         }}
                       >
-                        {f.relativePath}    ·    {languageLabel(f.language)}    ·    {formatBytes(f.sizeBytes)}
+                        {[
+                          preset.fileHeaders.showRelativePath && f.relativePath,
+                          preset.fileHeaders.showLanguageLabel &&
+                            languageLabel(f.language),
+                          preset.fileHeaders.showFileSize &&
+                            formatBytes(f.sizeBytes),
+                        ]
+                          .filter(Boolean)
+                          .join('    ·    ')}
                       </div>
                     )}
                     <CodeBlock
                       highlighted={highlighted}
-                      options={opts}
+                      preset={preset}
                       themeColors={themeColors}
                     />
                   </div>
@@ -397,7 +447,7 @@ export function DocumentPreview() {
               style={{
                 padding: 48,
                 textAlign: 'center',
-                color: '#9ca3af',
+                color: preset.colors.mutedText,
                 fontSize: 14,
               }}
             >
@@ -413,24 +463,24 @@ export function DocumentPreview() {
 
 function CodeBlock({
   highlighted,
-  options,
+  preset,
   themeColors,
 }: {
   highlighted?: HighlightedFile;
-  options: ReturnType<typeof useAppState>['state']['options'];
+  preset: ReturnType<typeof useAppState>['state']['preset'];
   themeColors: { background: string; foreground: string };
 }) {
   if (!highlighted) {
     return (
       <div
         style={{
-          padding: options.codePadding,
+          padding: preset.code.paddingPt,
           background: themeColors.background,
           color: themeColors.foreground,
-          fontFamily: options.codeFont,
-          fontSize: options.codeFontSize,
-          lineHeight: options.codeLineHeight,
-          borderRadius: 2,
+          fontFamily: fontStack(preset.code.font),
+          fontSize: preset.code.fontSizePt,
+          lineHeight: preset.code.lineHeight,
+          borderRadius: preset.code.borderRadiusPt,
         }}
       >
         <div style={{ opacity: 0.5 }}>Loading…</div>
@@ -445,23 +495,24 @@ function CodeBlock({
       style={{
         background: themeColors.background,
         color: themeColors.foreground,
-        fontFamily: options.codeFont,
-        fontSize: options.codeFontSize,
-        lineHeight: options.codeLineHeight,
-        padding: options.codePadding,
-        borderRadius: 2,
-        border: options.codeBorderColor
-          ? `${options.codeBorderWidth}px solid ${options.codeBorderColor}`
+        fontFamily: fontStack(preset.code.font),
+        fontSize: preset.code.fontSizePt,
+        lineHeight: preset.code.lineHeight,
+        padding: preset.code.paddingPt,
+        borderRadius: preset.code.borderRadiusPt,
+        border: preset.code.borderColor
+          ? `${preset.code.borderWidthPt}px solid ${preset.code.borderColor}`
           : undefined,
         overflow: 'hidden',
       }}
     >
       {highlighted.lines.map((line) => (
         <div key={line.lineNumber} style={{ display: 'flex' }}>
-          {options.showLineNumbers && (
+          {preset.code.showLineNumbers && (
             <span
               style={{
-                color: '#7d8590',
+                color: preset.code.lineNumberColor,
+                background: preset.code.lineNumberBackground ?? undefined,
                 width: `${lineNumberWidth + 1}ch`,
                 marginRight: 8,
                 userSelect: 'none',
@@ -474,9 +525,9 @@ function CodeBlock({
           )}
           <span
             style={{
-              whiteSpace: options.wrapLongLines ? 'pre-wrap' : 'pre',
-              wordBreak: options.wrapLongLines ? 'break-word' : 'normal',
-              overflow: options.wrapLongLines ? 'hidden' : 'auto',
+              whiteSpace: preset.code.wrapLongLines ? 'pre-wrap' : 'pre',
+              wordBreak: preset.code.wrapLongLines ? 'break-word' : 'normal',
+              overflow: preset.code.wrapLongLines ? 'hidden' : 'auto',
             }}
           >
             {line.tokens.length === 0 ? (

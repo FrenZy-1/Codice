@@ -38,7 +38,6 @@ export function ProjectsSidebar({ selectedProjectId, onSelectProject }: Props) {
     [state.projects, selectedProjectId],
   );
 
-  // Compute available extensions across the selected project.
   const extensions = useMemo(() => {
     if (!selectedProject) return [];
     const set = new Set<string>();
@@ -60,7 +59,7 @@ export function ProjectsSidebar({ selectedProjectId, onSelectProject }: Props) {
 
   return (
     <div className="flex h-full flex-col">
-      <div className="border-b border-[#30363d] p-3">
+      <div className="border-b border-app p-3">
         <ProjectUpload
           onProjectAdded={(id) => {
             onSelectProject(id);
@@ -71,7 +70,7 @@ export function ProjectsSidebar({ selectedProjectId, onSelectProject }: Props) {
 
       <div className="flex-1 overflow-auto">
         {state.projects.length === 0 ? (
-          <div className="p-6 text-center text-sm text-[#6e7681]">
+          <div className="p-6 text-center text-sm text-muted">
             No projects yet. Drop a folder above to get started.
           </div>
         ) : (
@@ -103,13 +102,13 @@ export function ProjectsSidebar({ selectedProjectId, onSelectProject }: Props) {
       </div>
 
       {selectedProject && (
-        <div className="border-t border-[#30363d]">
+        <div className="border-t border-app">
           <div className="space-y-2 p-3">
             <div className="flex items-center gap-2">
               <div className="relative flex-1">
                 <Search
                   size={14}
-                  className="absolute left-2 top-1/2 -translate-y-1/2 text-[#6e7681]"
+                  className="absolute left-2 top-1/2 -translate-y-1/2 text-muted"
                 />
                 <input
                   type="text"
@@ -133,16 +132,16 @@ export function ProjectsSidebar({ selectedProjectId, onSelectProject }: Props) {
                 ))}
               </select>
             </div>
-            <label className="flex items-center gap-2 text-xs text-[#7d8590] cursor-pointer">
+            <label className="flex items-center gap-2 text-xs text-secondary cursor-pointer">
               <input
                 type="checkbox"
                 checked={showExcluded}
                 onChange={(e) => setShowExcluded(e.target.checked)}
-                className="h-3.5 w-3.5 accent-brand-500"
+                className="h-3.5 w-3.5"
               />
               Show excluded files
             </label>
-            <div className="text-xs text-[#6e7681]">
+            <div className="text-xs text-muted">
               {getSelectedFiles(selectedProject.id).size} selected of{' '}
               {selectedProject.files.length} files ·{' '}
               {formatBytes(
@@ -156,7 +155,7 @@ export function ProjectsSidebar({ selectedProjectId, onSelectProject }: Props) {
               )}
             </div>
           </div>
-          <div className="max-h-96 overflow-auto border-t border-[#30363d]">
+          <div className="max-h-96 overflow-auto border-t border-app">
             <FileTree
               project={selectedProject}
               searchQuery={searchQuery}
@@ -165,16 +164,16 @@ export function ProjectsSidebar({ selectedProjectId, onSelectProject }: Props) {
             />
           </div>
           {selectedProject.warnings.length > 0 && (
-            <div className="border-t border-[#30363d] p-2 space-y-1 max-h-32 overflow-auto">
+            <div className="border-t border-app p-2 space-y-1 max-h-32 overflow-auto">
               {selectedProject.warnings.slice(0, 5).map((w, i) => (
                 <div
                   key={i}
                   className={`flex items-start gap-1.5 text-xs ${
                     w.severity === 'warn'
-                      ? 'text-[#d29922]'
+                      ? 'text-warning'
                       : w.severity === 'error'
-                        ? 'text-[#f85149]'
-                        : 'text-[#7d8590]'
+                        ? 'text-error'
+                        : 'text-secondary'
                   }`}
                 >
                   {w.severity === 'warn' ? (
@@ -186,7 +185,7 @@ export function ProjectsSidebar({ selectedProjectId, onSelectProject }: Props) {
                 </div>
               ))}
               {selectedProject.warnings.length > 5 && (
-                <div className="text-xs text-[#6e7681]">
+                <div className="text-xs text-muted">
                   … and {selectedProject.warnings.length - 5} more
                 </div>
               )}
@@ -223,12 +222,13 @@ function ProjectRow({
     <div
       className={`rounded-md border transition-colors ${
         isSelected
-          ? 'border-brand-500/50 bg-brand-500/5'
-          : 'border-transparent hover:border-[#30363d]'
+          ? 'border-[var(--color-accent)]'
+          : 'border-transparent hover:border-app'
       }`}
+      style={isSelected ? { background: 'color-mix(in srgb, var(--color-accent) 8%, transparent)' } : undefined}
     >
       <div
-        className="flex items-center gap-1.5 px-2 py-1.5 cursor-pointer"
+        className="flex items-center gap-1.5 px-2 py-1.5 cursor-pointer hover-surface"
         onClick={() => {
           onSelect();
           if (!isExpanded) onToggleExpand();
@@ -239,7 +239,7 @@ function ProjectRow({
             e.stopPropagation();
             onToggleExpand();
           }}
-          className="text-[#7d8590] hover:text-[#e6edf3]"
+          className="text-secondary hover:text-primary"
         >
           {isExpanded ? (
             <ChevronDown size={14} />
@@ -247,7 +247,7 @@ function ProjectRow({
             <ChevronRight size={14} />
           )}
         </button>
-        <span className="text-[#7d8590]">
+        <span className="text-secondary">
           <FolderCog size={14} />
         </span>
         {isEditing ? (
@@ -283,7 +283,7 @@ function ProjectRow({
           />
         ) : (
           <span
-            className="flex-1 truncate text-sm text-[#e6edf3] font-medium"
+            className="flex-1 truncate text-sm text-primary font-medium"
             onDoubleClick={(e) => {
               e.stopPropagation();
               setIsEditing(true);
@@ -293,7 +293,7 @@ function ProjectRow({
             {project.label}
           </span>
         )}
-        <span className="badge bg-[#21262d] text-[#7d8590]">
+        <span className="badge">
           {selectedCount}/{project.files.length}
         </span>
         <button
@@ -301,7 +301,7 @@ function ProjectRow({
             e.stopPropagation();
             onRemove();
           }}
-          className="text-[#7d8590] hover:text-[#f85149]"
+          className="text-secondary hover:text-error"
           title="Remove project"
         >
           <Trash size={14} />

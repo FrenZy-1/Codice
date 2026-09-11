@@ -1,6 +1,6 @@
 # Sample Project
 
-A tiny Gradle-based Java project for testing CodeDoc Generator.
+A tiny Gradle-based Java project for testing Codice.
 
 ## Structure
 
@@ -16,5 +16,5 @@ sample-project/
 
 ## Usage
 
-Drag this entire folder onto the CodeDoc Generator upload area to see how
+Drag this entire folder onto the Codice upload area to see how
 the app handles a typical Gradle project.

@@ -583,7 +583,7 @@ export const pdfExporter: DocumentExporter = {
     const elapsed = performance.now() - start;
     return {
       blob,
-      filename: `${options.filename || 'codedoc'}.pdf`,
+      filename: `${options.filename || 'codice'}.pdf`,
       format: 'pdf',
       elapsedMs: elapsed,
     };

@@ -2,13 +2,16 @@
  * Generate real .docx / .pdf / .odt files from the sample project and save
  * them to /home/z/my-project/download/ so the user can download and inspect.
  *
+ * Uses the new DocumentPreset model.
+ *
  * Run with: npx tsx scripts/generate-sample.ts
  */
 
 import { docxExporter } from '../src/lib/exporters/docxExporter';
 import { pdfExporter } from '../src/lib/exporters/pdfExporter';
 import { odtExporter } from '../src/lib/exporters/odtExporter';
-import { defaultDocumentOptions } from '../src/lib/defaultOptions';
+import { BUILT_IN_DOCUMENT_PRESETS } from '../src/lib/presets/builtInPresets';
+import { presetToOptions } from '../src/lib/presets/presetToOptions';
 import type { DocumentModel, HighlightedFile } from '../src/types';
 import { writeFileSync, mkdirSync } from 'node:fs';
 
@@ -38,18 +41,18 @@ function makeHighlighted(
 }
 
 async function main() {
-  const options = defaultDocumentOptions();
-  options.syntaxTheme = 'github-light';
+  const preset = BUILT_IN_DOCUMENT_PRESETS[0]; // University
+  const options = presetToOptions(preset);
 
   const model: DocumentModel = {
     metadata: {
       title: 'Sample Java Project — Documentation',
-      author: 'CodeDoc Generator',
+      author: 'Codice',
       course: 'CS 101',
       university: 'Demo University',
       version: '1.0',
       description:
-        'Auto-generated documentation for the sample Gradle project included in the CodeDoc Generator repository.',
+        'Auto-generated documentation for the sample Gradle project included in the Codice repository.',
     },
     options,
     projects: [
@@ -75,7 +78,7 @@ async function main() {
               'markdown',
               `# Sample Project
 
-A tiny Gradle-based Java project for testing CodeDoc Generator.
+A tiny Gradle-based Java project for testing Codice.
 
 ## Structure
 
@@ -91,7 +94,7 @@ sample-project/
 
 ## Usage
 
-Drag this entire folder onto the CodeDoc Generator upload area to see how
+Drag this entire folder onto the Codice upload area to see how
 the app handles a typical Gradle project.`,
             ),
             sizeBytes: 512,
@@ -241,7 +244,7 @@ class MainTest {
     const exporter = { docx: docxExporter, pdf: pdfExporter, odt: odtExporter }[format];
     const result = await exporter.export(model, {
       format,
-      filename: `codedoc-sample-${format}`,
+      filename: `codice-sample-${format}`,
     });
     const buf = Buffer.from(await result.blob.arrayBuffer());
     const outPath = `${outDir}/${result.filename}`;

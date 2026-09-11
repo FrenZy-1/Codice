@@ -1,9 +1,9 @@
 /**
  * File tree component.
  *
- * Renders a hierarchical, virtualized-friendly tree of discovered files with
- * checkboxes for selection. Supports search, filtering by extension, and
- * expand/collapse per directory.
+ * Renders a hierarchical tree of discovered files with checkboxes for
+ * selection. Supports search, filtering by extension, and expand/collapse
+ * per directory.
  */
 
 import { useMemo, useState, useCallback } from 'react';
@@ -64,11 +64,8 @@ function sortTree(node: TreeNode) {
 
 interface FileTreeProps {
   project: ProjectEntry;
-  /** Filter by search query (matches path). */
   searchQuery: string;
-  /** Filter by extension (e.g. ".ts"). Empty string = no filter. */
   extensionFilter: string;
-  /** Whether to show excluded files in the tree. */
   showExcluded: boolean;
 }
 
@@ -118,10 +115,8 @@ export function FileTree({
     return t;
   }, [filteredFiles]);
 
-  // Auto-expand directories that match the search query.
   const effectiveExpanded = useMemo(() => {
     if (searchQuery || extensionFilter) {
-      // Expand everything when filtering.
       const all = new Set<string>();
       const walk = (node: TreeNode) => {
         for (const child of node.children.values()) {
@@ -147,9 +142,7 @@ export function FileTree({
   }, []);
 
   const isFileSelected = useCallback(
-    (file: DiscoveredFile): boolean => {
-      return selectedIds.has(file.id);
-    },
+    (file: DiscoveredFile): boolean => selectedIds.has(file.id),
     [selectedIds],
   );
 
@@ -192,7 +185,6 @@ export function FileTree({
     if (node.isDir) {
       const isExpanded = effectiveExpanded.has(node.path) || depth === 0;
       const childArray = Array.from(node.children.values());
-      // For the root, render children directly without a row.
       if (depth === 0) {
         return (
           <div key={`root-${node.path}`}>
@@ -200,7 +192,6 @@ export function FileTree({
           </div>
         );
       }
-      // Determine directory selection state.
       let allSelected = true;
       let noneSelected = true;
       const visit = (n: TreeNode) => {
@@ -219,11 +210,11 @@ export function FileTree({
       return (
         <div key={`dir-${node.path}`}>
           <div
-            className="group flex items-center gap-1 rounded px-1.5 py-0.5 hover:bg-[#21262d] cursor-pointer"
+            className="group flex items-center gap-1 rounded px-1.5 py-0.5 cursor-pointer hover-surface"
             style={{ paddingLeft: depth * 12 + 6 }}
             onClick={() => toggleExpand(node.path)}
           >
-            <span className="text-[#7d8590]">
+            <span className="text-secondary">
               {isExpanded ? (
                 <ChevronDown size={14} />
               ) : (
@@ -241,15 +232,15 @@ export function FileTree({
                 toggleDir(node, e.target.checked);
               }}
               onClick={(e) => e.stopPropagation()}
-              className="h-3.5 w-3.5 accent-brand-500"
+              className="h-3.5 w-3.5"
             />
-            <span className="text-[#7d8590]">
+            <span className="text-secondary">
               {isExpanded ? <FolderOpen size={14} /> : <Folder size={14} />}
             </span>
-            <span className="text-sm text-[#e6edf3] font-medium">
+            <span className="text-sm text-primary font-medium">
               {node.name}
             </span>
-            <span className="ml-auto pr-2 text-xs text-[#6e7681]">
+            <span className="ml-auto pr-2 text-xs text-muted">
               {childArray.length}
             </span>
           </div>
@@ -262,7 +253,6 @@ export function FileTree({
       );
     }
 
-    // File node
     const file = node.file!;
     const isSelected = isFileSelected(file);
     const isExcluded =
@@ -271,7 +261,7 @@ export function FileTree({
     return (
       <div
         key={`file-${file.id}`}
-        className={`group flex items-center gap-1.5 rounded px-1.5 py-0.5 hover:bg-[#21262d] ${
+        className={`group flex items-center gap-1.5 rounded px-1.5 py-0.5 hover-surface ${
           isExcluded ? 'opacity-50' : ''
         }`}
         style={{ paddingLeft: depth * 12 + 22 }}
@@ -280,24 +270,24 @@ export function FileTree({
           type="checkbox"
           checked={isSelected}
           onChange={(e) => toggleFile(file, e.target.checked)}
-          className="h-3.5 w-3.5 accent-brand-500"
+          className="h-3.5 w-3.5"
         />
-        <span className="text-[#7d8590]">
+        <span className="text-secondary">
           <File size={13} />
         </span>
-        <span className="text-sm text-[#e6edf3] truncate flex-1" title={file.name}>
+        <span className="text-sm text-primary truncate flex-1" title={file.name}>
           {file.name}
         </span>
         {file.language && (
-          <span className="text-[10px] text-[#6e7681] uppercase tracking-wide hidden md:inline">
+          <span className="text-[10px] text-muted uppercase tracking-wide hidden md:inline">
             {languageLabel(file.language)}
           </span>
         )}
-        <span className="text-[10px] text-[#6e7681] pr-2 tabular-nums">
+        <span className="text-[10px] text-muted pr-2 tabular-nums">
           {formatBytes(file.size)}
         </span>
         {isExcluded && (
-          <span className="text-[10px] text-[#d29922] pr-2">
+          <span className="text-[10px] text-warning pr-2">
             {file.exclusionReason ?? 'excluded'}
           </span>
         )}
@@ -307,7 +297,7 @@ export function FileTree({
 
   if (filteredFiles.length === 0) {
     return (
-      <div className="px-3 py-6 text-center text-sm text-[#6e7681]">
+      <div className="px-3 py-6 text-center text-sm text-muted">
         No files match the current filters.
       </div>
     );
