@@ -1,0 +1,108 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --color-bg: #0d1117;
+    --color-bg-elevated: #161b22;
+    --color-bg-input: #0d1117;
+    --color-border: #30363d;
+    --color-border-muted: #21262d;
+    --color-text: #e6edf3;
+    --color-text-muted: #7d8590;
+    --color-text-subtle: #6e7681;
+    --color-accent: #2f81f7;
+    --color-accent-hover: #388bfd;
+    --color-success: #3fb950;
+    --color-warning: #d29922;
+    --color-danger: #f85149;
+  }
+
+  html,
+  body,
+  #root {
+    height: 100%;
+    margin: 0;
+  }
+
+  body {
+    font-family:
+      'Inter',
+      system-ui,
+      -apple-system,
+      'Segoe UI',
+      sans-serif;
+    background-color: var(--color-bg);
+    color: var(--color-text);
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    font-feature-settings: 'cv02', 'cv03', 'cv04', 'cv11';
+  }
+
+  * {
+    box-sizing: border-box;
+  }
+
+  ::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+  ::-webkit-scrollbar-track {
+    background: var(--color-bg);
+  }
+  ::-webkit-scrollbar-thumb {
+    background: var(--color-border);
+    border-radius: 4px;
+    border: 2px solid var(--color-bg);
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background: #484f58;
+  }
+
+  :focus-visible {
+    outline: 2px solid var(--color-accent);
+    outline-offset: -1px;
+  }
+
+  button {
+    font-family: inherit;
+  }
+}
+
+@layer components {
+  .btn {
+    @apply inline-flex items-center justify-center gap-2 rounded-md px-3 py-1.5 text-sm font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed;
+  }
+  .btn-primary {
+    @apply btn bg-brand-600 text-white hover:bg-brand-500;
+  }
+  .btn-secondary {
+    @apply btn border border-[#30363d] bg-[#21262d] text-[#e6edf3] hover:bg-[#30363d];
+  }
+  .btn-ghost {
+    @apply btn text-[#7d8590] hover:bg-[#21262d] hover:text-[#e6edf3];
+  }
+  .btn-danger {
+    @apply btn text-[#f85149] hover:bg-[#f85149]/10;
+  }
+
+  .input {
+    @apply w-full rounded-md border border-[#30363d] bg-[#0d1117] px-3 py-1.5 text-sm text-[#e6edf3] placeholder:text-[#6e7681] focus:border-brand-500 focus:outline-none;
+  }
+  .select {
+    @apply input pr-8;
+  }
+
+  .panel {
+    @apply border border-[#30363d] bg-[#161b22] rounded-lg;
+  }
+
+  .label {
+    @apply text-xs font-medium uppercase tracking-wide text-[#7d8590];
+  }
+
+  .badge {
+    @apply inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium;
+  }
+}
