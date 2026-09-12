@@ -1,4 +1,6 @@
 {
+  "version": 2,
+  "exportedAt": "2026-09-12T00:00:00.000Z",
   "name": "Coursework Java Style",
   "description": "Serif typography with GitHub Light code theme, page breaks between files, TOC and front matter. Tailored for university Java coursework submissions.",
   "syntaxTheme": "github-light",
@@ -14,26 +16,49 @@
     "pageHeader": null,
     "pageFooter": "Page {page} of {pages}"
   },
+  "layout": {
+    "bodyParagraphSpacingPt": 6,
+    "bodyLineSpacing": 1.4,
+    "sectionSpacingPt": 18,
+    "codeBlockSpacingBeforePt": 4,
+    "codeBlockSpacingAfterPt": 8,
+    "headingSpacingBeforePt": 12,
+    "headingSpacingAfterPt": 6,
+    "titlePageVerticalOffsetPt": 120,
+    "fileHeaderSpacingPt": 6,
+    "projectHeaderSpacingBeforePt": 12,
+    "projectHeaderSpacingAfterPt": 6
+  },
+  "pageBreaks": {
+    "afterTitlePage": true,
+    "beforeProject": true,
+    "beforeFile": true,
+    "beforeH1": false
+  },
   "typography": {
     "bodyFont": "Times New Roman",
     "bodyFontSizePt": 12,
     "bodyColor": "#1f2328",
+    "bodyWeight": "normal",
     "paragraphSpacingPt": 6,
     "lineSpacing": 1.4
   },
   "headings": {
-    "title": { "font": "Times New Roman", "sizePt": 28, "weight": "bold", "italic": false, "color": "#0f172a", "alignment": "center", "spaceBeforePt": 0, "spaceAfterPt": 12, "numbered": false },
-    "h1": { "font": "Times New Roman", "sizePt": 20, "weight": "bold", "italic": false, "color": "#0f172a", "alignment": "left", "spaceBeforePt": 12, "spaceAfterPt": 6, "numbered": true },
-    "h2": { "font": "Times New Roman", "sizePt": 15, "weight": "bold", "italic": false, "color": "#0f172a", "alignment": "left", "spaceBeforePt": 10, "spaceAfterPt": 5, "numbered": true },
-    "h3": { "font": "Times New Roman", "sizePt": 12, "weight": "bold", "italic": false, "color": "#1e293b", "alignment": "left", "spaceBeforePt": 8, "spaceAfterPt": 4, "numbered": true },
-    "h4": { "font": "Times New Roman", "sizePt": 11, "weight": "semibold", "italic": false, "color": "#1e293b", "alignment": "left", "spaceBeforePt": 6, "spaceAfterPt": 3, "numbered": true }
+    "title": { "font": "Times New Roman", "sizePt": 28, "weight": "bold", "italic": false, "color": "#0f172a", "alignment": "center", "spaceBeforePt": 0, "spaceAfterPt": 12, "numbered": false, "lineHeight": 1.3, "indentPt": 0, "keepWithNext": true, "pageBreakBefore": false },
+    "h1": { "font": "Times New Roman", "sizePt": 20, "weight": "bold", "italic": false, "color": "#0f172a", "alignment": "left", "spaceBeforePt": 12, "spaceAfterPt": 6, "numbered": true, "lineHeight": 1.3, "indentPt": 0, "keepWithNext": true, "pageBreakBefore": false },
+    "h2": { "font": "Times New Roman", "sizePt": 15, "weight": "bold", "italic": false, "color": "#0f172a", "alignment": "left", "spaceBeforePt": 10, "spaceAfterPt": 5, "numbered": true, "lineHeight": 1.3, "indentPt": 0, "keepWithNext": true, "pageBreakBefore": false },
+    "h3": { "font": "Times New Roman", "sizePt": 12, "weight": "bold", "italic": false, "color": "#1e293b", "alignment": "left", "spaceBeforePt": 8, "spaceAfterPt": 4, "numbered": true, "lineHeight": 1.3, "indentPt": 0, "keepWithNext": true, "pageBreakBefore": false },
+    "h4": { "font": "Times New Roman", "sizePt": 11, "weight": "semibold", "italic": false, "color": "#1e293b", "alignment": "left", "spaceBeforePt": 6, "spaceAfterPt": 3, "numbered": true, "lineHeight": 1.3, "indentPt": 0, "keepWithNext": true, "pageBreakBefore": false }
   },
   "code": {
     "font": "Courier New",
     "fontSizePt": 9,
+    "fontWeight": "normal",
     "lineHeight": 1.3,
     "textColor": "#24292e",
     "backgroundColor": "#f6f8fa",
+    "useSyntaxThemeBackground": true,
+    "borderStyle": "solid",
     "borderColor": "#d0d7de",
     "borderWidthPt": 0.5,
     "borderRadiusPt": 0,
@@ -41,6 +66,7 @@
     "showLineNumbers": true,
     "lineNumberColor": "#9198a1",
     "lineNumberBackground": null,
+    "lineNumberWidthChars": 0,
     "wrapLongLines": true,
     "blockSpacingBeforePt": 4,
     "blockSpacingAfterPt": 8
@@ -58,7 +84,8 @@
     "borderColor": "#d0d7de",
     "font": "Courier New",
     "fontSizePt": 8,
-    "bold": true
+    "bold": true,
+    "spacingAfterPt": 6
   },
   "projectHeaders": {
     "showTitle": true,
@@ -70,7 +97,18 @@
     "color": "#0f172a",
     "spaceBeforePt": 12,
     "spaceAfterPt": 6,
-    "uppercase": false
+    "uppercase": false,
+    "alignment": "left"
+  },
+  "projectStructure": {
+    "enabled": true,
+    "font": "Courier New",
+    "fontSizePt": 8,
+    "color": "#59636e",
+    "lineHeight": 1.3,
+    "indentPerLevelPt": 12,
+    "showFileSizes": false,
+    "dirsFirst": true
   },
   "titlePage": {
     "enabled": true,
@@ -81,7 +119,9 @@
     "showUniversity": true,
     "showDate": true,
     "showVersion": true,
-    "showDescription": true
+    "showDescription": true,
+    "alignment": "center",
+    "verticalOffsetPt": 120
   },
   "colors": {
     "background": "#ffffff",
@@ -102,16 +142,18 @@
     "warning": "#9a6700",
     "error": "#cf222e"
   },
+  "misc": {
+    "includeToc": true,
+    "includeProjectStructure": true,
+    "pageBreakBetweenFiles": true,
+    "numberHeadings": true,
+    "showFileMetadata": true
+  },
   "metadata": {
     "title": "Java Programming Coursework",
     "author": "Your Name",
     "course": "CS 101 — Introduction to Java",
     "university": "Your University",
     "version": "1.0"
-  },
-  "includeToc": true,
-  "includeProjectStructure": true,
-  "pageBreakBetweenFiles": true,
-  "version": 1,
-  "exportedAt": "2026-09-11T00:00:00.000Z"
+  }
 }

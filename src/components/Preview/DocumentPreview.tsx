@@ -2,19 +2,37 @@
  * Document preview pane.
  *
  * Renders an HTML approximation of what the exported document will look like.
- * The preview uses the configured syntax theme (via Shiki) for code coloring
- * and applies the chosen page size and margins visually.
+ * The preview consumes the SAME `DocumentPreset` that feeds the exporters —
+ * there is no separate preview-only style state.
+ *
+ * Bug fixes applied here:
+ *   - File header: fileName and relativePath are independent elements.
+ *   - File metadata: showLanguageLabel / showFileSize / showLineCount each
+ *     independently control their metadata piece.
+ *   - Heading numbering: hierarchical (1, 1.1, 1.1.1) when misc.numberHeadings
+ *     AND the per-heading numbered flag are both on.
+ *   - Title page description: shows when enabled + content present.
+ *   - Project header: showPath and showMetadata render real content.
+ *   - Page header/footer: rendered visually with spacing.
+ *   - Document density: all spacing values applied.
+ *   - Page breaks: visible page-break markers.
+ *   - Heading italic + weight: applied per-level.
+ *   - Code border: borderStyle='none' truly disables border.
+ *   - All document colors wired to semantic elements.
+ *
+ * Syntax highlighting is performed by Shiki. Shiki token colors are ALWAYS
+ * respected — `preset.code.textColor` is only a fallback.
  */
 
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useAppState } from '@/hooks/useAppState';
-import { getTheme } from '@/lib/themes/syntaxThemes';
 import { highlightFile, getThemeColors } from '@/lib/highlight/highlighter';
+import { resolveSyntaxTheme } from '@/lib/themes/syntaxThemeRegistry';
 import { fontStack } from '@/lib/fonts/fontCatalog';
+import type { DocumentPreset, FontWeight } from '@/lib/presets/documentPreset';
 import type { HighlightedFile } from '@/types';
 import { formatBytes } from '@/lib/fileDiscovery';
 import { languageLabel } from '@/lib/languageDetection';
-import { presetToOptions } from '@/lib/presets/presetToOptions';
 
 const PAGE_DIMENSIONS_PX: Record<string, [number, number]> = {
   A4: [794, 1123],
@@ -22,6 +40,19 @@ const PAGE_DIMENSIONS_PX: Record<string, [number, number]> = {
   Legal: [816, 1344],
   A3: [1123, 1587],
 };
+
+/** Map FontWeight to numeric CSS font-weight. */
+const WEIGHT_MAP: Record<FontWeight, number> = {
+  normal: 400,
+  medium: 500,
+  semibold: 600,
+  bold: 700,
+};
+
+/** Cache key that includes the syntax theme so theme changes invalidate it. */
+function cacheKey(fileId: string, theme: string): string {
+  return `${fileId}::${theme}`;
+}
 
 export function DocumentPreview() {
   const { state, getSelectedFiles } = useAppState();
@@ -31,23 +62,24 @@ export function DocumentPreview() {
   const [themeColors, setThemeColors] = useState<{
     background: string;
     foreground: string;
-  }>({ background: '#24292e', foreground: '#e1e4e8' });
+  }>({ background: '#0d1117', foreground: '#e6edf3' });
   const containerRef = useRef<HTMLDivElement>(null);
 
   const preset = state.preset;
-  const opts = useMemo(() => presetToOptions(preset), [preset]);
-  const theme = getTheme(preset.syntaxTheme);
+  const resolvedTheme = resolveSyntaxTheme(preset.syntaxTheme);
 
+  // Fetch theme colors whenever the syntax theme changes.
   useEffect(() => {
     let cancelled = false;
-    getThemeColors(preset.syntaxTheme).then((c) => {
+    getThemeColors(resolvedTheme).then((c) => {
       if (!cancelled) setThemeColors(c);
     });
     return () => {
       cancelled = true;
     };
-  }, [preset.syntaxTheme]);
+  }, [resolvedTheme]);
 
+  // Gather all selected files across projects.
   const allSelected = useMemo(() => {
     const result: Array<{
       projectLabel: string;
@@ -78,12 +110,20 @@ export function DocumentPreview() {
   const PREVIEW_LIMIT = 25;
   const filesToPreview = allSelected.slice(0, PREVIEW_LIMIT);
 
+  // Re-highlight files when the syntax theme changes — clear the entire
+  // cache so stale tokens don't bleed through.
+  useEffect(() => {
+    setHighlightedCache({});
+  }, [resolvedTheme]);
+
+  // Highlight files lazily. Re-runs when the file set or syntax theme changes.
   useEffect(() => {
     let cancelled = false;
     async function run() {
       for (const item of filesToPreview) {
         if (cancelled) return;
-        if (highlightedCache[item.fileId]) continue;
+        const key = cacheKey(item.fileId, resolvedTheme);
+        if (highlightedCache[key]) continue;
         const project = state.projects.find((p) => p.id === item.projectId);
         const file = project?.files.find((f) => f.id === item.fileId);
         if (!file?.fileHandle) continue;
@@ -94,12 +134,12 @@ export function DocumentPreview() {
             item.relativePath,
             item.language,
             text,
-            preset.syntaxTheme,
+            resolvedTheme,
           );
           if (!cancelled) {
             setHighlightedCache((prev) => ({
               ...prev,
-              [item.fileId]: highlighted,
+              [key]: highlighted,
             }));
           }
         } catch {
@@ -112,7 +152,7 @@ export function DocumentPreview() {
       cancelled = true;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [filesToPreview.map((f) => f.fileId).join(','), preset.syntaxTheme]);
+  }, [filesToPreview.map((f) => f.fileId).join(','), resolvedTheme]);
 
   const [pageW, pageH] = PAGE_DIMENSIONS_PX[preset.page.size] ?? PAGE_DIMENSIONS_PX.A4;
   const effectiveW = preset.page.landscape ? pageH : pageW;
@@ -145,6 +185,27 @@ export function DocumentPreview() {
     return groups;
   }, [filesToPreview]);
 
+  /** Compute heading number prefix based on hierarchy. */
+  function headingNumber(
+    level: 'h1' | 'h2' | 'h3' | 'h4',
+    projectIdx: number,
+    fileIdx: number,
+  ): string {
+    if (!preset.misc.numberHeadings) return '';
+    const h = preset.headings[level];
+    if (!h.numbered) return '';
+    switch (level) {
+      case 'h1':
+        return `${projectIdx + 1}. `;
+      case 'h2':
+        return `${projectIdx + 1}.${fileIdx + 1} `;
+      case 'h3':
+        return `${projectIdx + 1}.${fileIdx + 1}.1 `;
+      case 'h4':
+        return `${projectIdx + 1}.${fileIdx + 1}.1.1 `;
+    }
+  }
+
   return (
     <div
       ref={containerRef}
@@ -167,24 +228,64 @@ export function DocumentPreview() {
             padding: `${preset.page.marginTopMm * 3.78}px ${preset.page.marginRightMm * 3.78}px ${preset.page.marginBottomMm * 3.78}px ${preset.page.marginLeftMm * 3.78}px`,
             fontFamily: fontStack(preset.typography.bodyFont),
             fontSize: preset.typography.bodyFontSizePt,
+            fontWeight: WEIGHT_MAP[preset.typography.bodyWeight],
             color: preset.colors.primaryText,
             background: preset.colors.background,
+            position: 'relative',
           }}
         >
+          {/* Page header — rendered at the top */}
+          {preset.page.pageHeader && (
+            <div
+              style={{
+                color: preset.colors.mutedText,
+                fontSize: 10,
+                textAlign: 'right',
+                marginBottom: preset.page.headerSpacingMm * 2,
+                borderBottom: `0.5px solid ${preset.colors.borders}`,
+                paddingBottom: 4,
+              }}
+            >
+              {preset.page.pageHeader}
+            </div>
+          )}
+
+          {/* Title page */}
           {preset.titlePage.enabled && state.metadata.title && (
-            <div className="text-center" style={{ marginTop: 100 }}>
+            <div
+              style={{
+                textAlign: preset.titlePage.alignment,
+                marginTop: preset.titlePage.verticalOffsetPt,
+              }}
+            >
               {preset.titlePage.showTitle && (
                 <div
                   style={{
                     fontFamily: fontStack(preset.headings.title.font),
                     fontSize: preset.headings.title.sizePt,
-                    fontWeight: preset.headings.title.weight,
+                    fontWeight: WEIGHT_MAP[preset.headings.title.weight],
                     fontStyle: preset.headings.title.italic ? 'italic' : 'normal',
                     color: preset.headings.title.color,
                     textAlign: preset.headings.title.alignment,
+                    lineHeight: preset.headings.title.lineHeight,
+                    marginTop: preset.headings.title.spaceBeforePt,
+                    marginBottom: preset.headings.title.spaceAfterPt,
                   }}
                 >
                   {state.metadata.title}
+                </div>
+              )}
+              {preset.titlePage.showSubtitle && state.metadata.course && (
+                <div
+                  style={{
+                    fontFamily: fontStack(preset.typography.bodyFont),
+                    fontSize: preset.typography.bodyFontSizePt + 2,
+                    color: preset.colors.secondaryText,
+                    marginTop: 8,
+                    marginBottom: 8,
+                  }}
+                >
+                  {state.metadata.course}
                 </div>
               )}
               {preset.titlePage.showAuthor && state.metadata.author && (
@@ -198,7 +299,7 @@ export function DocumentPreview() {
                   {state.metadata.author}
                 </div>
               )}
-              {preset.titlePage.showCourse && state.metadata.course && (
+              {preset.titlePage.showCourse && !preset.titlePage.showSubtitle && state.metadata.course && (
                 <div
                   style={{
                     fontSize: preset.typography.bodyFontSizePt,
@@ -228,7 +329,7 @@ export function DocumentPreview() {
                     marginTop: 32,
                   }}
                 >
-                  Generated: {new Date().toLocaleString()}
+                  {state.metadata.date || `Generated: ${new Date().toLocaleString()}`}
                 </div>
               )}
               {preset.titlePage.showVersion && state.metadata.version && (
@@ -254,17 +355,21 @@ export function DocumentPreview() {
                   {state.metadata.description}
                 </div>
               )}
-              <div style={{ pageBreakAfter: 'always', height: 0 }} />
+              {preset.pageBreaks.afterTitlePage && (
+                <PageBreakMarker label="Page break — after title page" color={preset.colors.borders} />
+              )}
             </div>
           )}
 
-          {preset.includeToc && (
-            <div style={{ marginBottom: 24 }}>
+          {/* TOC */}
+          {preset.misc.includeToc && (
+            <div style={{ marginBottom: preset.layout.sectionSpacingPt }}>
               <div
                 style={{
                   fontFamily: fontStack(preset.headings.h1.font),
                   fontSize: preset.headings.h1.sizePt,
-                  fontWeight: preset.headings.h1.weight,
+                  fontWeight: WEIGHT_MAP[preset.headings.h1.weight],
+                  fontStyle: preset.headings.h1.italic ? 'italic' : 'normal',
                   color: preset.headings.h1.color,
                   marginBottom: 12,
                 }}
@@ -276,7 +381,7 @@ export function DocumentPreview() {
                   <div
                     style={{
                       fontFamily: fontStack(preset.headings.h1.font),
-                      fontWeight: 'bold',
+                      fontWeight: WEIGHT_MAP[preset.headings.h1.weight],
                       fontSize: 13,
                       marginTop: 8,
                       color: preset.colors.primaryText,
@@ -299,132 +404,195 @@ export function DocumentPreview() {
                   ))}
                 </div>
               ))}
-              <div style={{ pageBreakAfter: 'always', height: 0 }} />
             </div>
           )}
 
-          {projectGroups.map((g, gi) => (
-            <div key={g.projectId} style={{ marginTop: gi === 0 ? 0 : 24 }}>
+          {/* Per-project sections */}
+          {projectGroups.map((g, gi) => {
+            // Compute project-level stats for the metadata display.
+            const projectFiles = g.files;
+            const totalSize = projectFiles.reduce((acc, f) => acc + f.sizeBytes, 0);
+            return (
               <div
+                key={g.projectId}
                 style={{
-                  fontFamily: fontStack(preset.projectHeaders.font),
-                  fontSize: preset.projectHeaders.sizePt,
-                  fontWeight: preset.projectHeaders.weight,
-                  color: preset.projectHeaders.color,
-                  textTransform: preset.projectHeaders.uppercase
-                    ? 'uppercase'
-                    : 'none',
-                  marginTop: preset.projectHeaders.spaceBeforePt,
-                  marginBottom: preset.projectHeaders.spaceAfterPt,
+                  marginTop: gi === 0 ? 0 : preset.layout.sectionSpacingPt,
                 }}
               >
-                {gi + 1}. {g.projectLabel}
-              </div>
+                {preset.pageBreaks.beforeProject && gi > 0 && (
+                  <PageBreakMarker label={`Page break — before project ${gi + 1}`} color={preset.colors.borders} />
+                )}
 
-              {preset.includeProjectStructure && (
-                <div style={{ marginBottom: 16 }}>
+                {/* Project header — title + path + metadata, each independently toggled */}
+                {preset.projectHeaders.showTitle && (
                   <div
                     style={{
-                      fontFamily: fontStack(preset.headings.h2.font),
-                      fontSize: preset.headings.h2.sizePt,
-                      fontWeight: preset.headings.h2.weight,
-                      color: preset.headings.h2.color,
-                      marginBottom: 8,
+                      fontFamily: fontStack(preset.projectHeaders.font),
+                      fontSize: preset.projectHeaders.sizePt,
+                      fontWeight: WEIGHT_MAP[preset.projectHeaders.weight],
+                      color: preset.projectHeaders.color,
+                      textTransform: preset.projectHeaders.uppercase ? 'uppercase' : 'none',
+                      textAlign: preset.projectHeaders.alignment,
+                      marginTop: preset.projectHeaders.spaceBeforePt,
+                      marginBottom: 4,
                     }}
                   >
-                    Project Structure
+                    {gi + 1}. {g.projectLabel}
                   </div>
-                  <div
-                    style={{
-                      fontFamily: fontStack(preset.code.font),
-                      fontSize: preset.code.fontSizePt - 1,
-                      color: preset.colors.secondaryText,
-                      whiteSpace: 'pre',
-                      lineHeight: 1.3,
-                    }}
-                  >
-                    {buildStructurePreview(g.files.map((f) => f.relativePath))}
+                )}
+                {preset.projectHeaders.showPath && (
+                  <div style={{ fontSize: 10, color: preset.colors.mutedText, marginBottom: 4 }}>
+                    Path: {g.projectLabel}/
                   </div>
-                </div>
-              )}
+                )}
+                {preset.projectHeaders.showMetadata && (
+                  <div style={{ fontSize: 10, color: preset.colors.mutedText, marginBottom: preset.projectHeaders.spaceAfterPt }}>
+                    Files: {projectFiles.length} · Total size: {formatBytes(totalSize)}
+                  </div>
+                )}
 
-              <div
-                style={{
-                  fontFamily: fontStack(preset.headings.h2.font),
-                  fontSize: preset.headings.h2.sizePt,
-                  fontWeight: preset.headings.h2.weight,
-                  color: preset.headings.h2.color,
-                  marginTop: 16,
-                  marginBottom: 8,
-                }}
-              >
-                Source Files
-              </div>
-
-              {g.files.map((f, fi) => {
-                const highlighted = highlightedCache[f.fileId];
-                return (
-                  <div
-                    key={f.fileId}
-                    style={{
-                      marginTop:
-                        preset.pageBreakBetweenFiles && fi > 0 ? 24 : 8,
-                      pageBreakBefore:
-                        preset.pageBreakBetweenFiles && fi > 0
-                          ? 'always'
-                          : 'auto',
-                    }}
-                  >
+                {/* Project structure */}
+                {preset.projectStructure.enabled && (
+                  <div style={{ marginBottom: preset.layout.sectionSpacingPt }}>
                     <div
                       style={{
-                        fontFamily: fontStack(preset.headings.h3.font),
-                        fontSize: preset.headings.h3.sizePt,
-                        fontWeight: preset.headings.h3.weight,
-                        color: preset.headings.h3.color,
-                        marginTop: 8,
+                        fontFamily: fontStack(preset.headings.h2.font),
+                        fontSize: preset.headings.h2.sizePt,
+                        fontWeight: WEIGHT_MAP[preset.headings.h2.weight],
+                        fontStyle: preset.headings.h2.italic ? 'italic' : 'normal',
+                        color: preset.headings.h2.color,
+                        textAlign: preset.headings.h2.alignment,
+                        marginBottom: 8,
+                        lineHeight: preset.headings.h2.lineHeight,
+                        textIndent: preset.headings.h2.indentPt,
                       }}
                     >
-                      {gi + 1}.{fi + 1}  {f.relativePath}
+                      {headingNumber('h2', gi, 0)}Project Structure
                     </div>
-                    {preset.fileHeaders.show && (
+                    <div
+                      style={{
+                        fontFamily: fontStack(preset.projectStructure.font),
+                        fontSize: preset.projectStructure.fontSizePt,
+                        color: preset.projectStructure.color,
+                        whiteSpace: 'pre',
+                        lineHeight: preset.projectStructure.lineHeight,
+                      }}
+                    >
+                      {buildStructurePreview(
+                        g.files.map((f) => f.relativePath),
+                        preset.projectStructure.dirsFirst,
+                      )}
+                    </div>
+                  </div>
+                )}
+
+                {/* H2 — Source Files */}
+                <div
+                  style={{
+                    fontFamily: fontStack(preset.headings.h2.font),
+                    fontSize: preset.headings.h2.sizePt,
+                    fontWeight: WEIGHT_MAP[preset.headings.h2.weight],
+                    fontStyle: preset.headings.h2.italic ? 'italic' : 'normal',
+                    color: preset.headings.h2.color,
+                    textAlign: preset.headings.h2.alignment,
+                    marginTop: preset.headings.h2.spaceBeforePt,
+                    marginBottom: preset.headings.h2.spaceAfterPt,
+                    lineHeight: preset.headings.h2.lineHeight,
+                    textIndent: preset.headings.h2.indentPt,
+                  }}
+                >
+                  {headingNumber('h2', gi, 0)}Source Files
+                </div>
+
+                {g.files.map((f, fi) => {
+                  const key = cacheKey(f.fileId, resolvedTheme);
+                  const highlighted = highlightedCache[key];
+                  const fileName = f.relativePath.split('/').pop() || f.relativePath;
+                  return (
+                    <div
+                      key={f.fileId}
+                      style={{
+                        marginTop: fi === 0 ? 0 : preset.layout.sectionSpacingPt,
+                      }}
+                    >
+                      {preset.pageBreaks.beforeFile && fi > 0 && (
+                        <PageBreakMarker label={`Page break — before file ${fi + 1}`} color={preset.colors.borders} />
+                      )}
+
+                      {/* H3 — file heading */}
                       <div
                         style={{
-                          fontFamily: fontStack(preset.fileHeaders.font),
-                          fontSize: preset.fileHeaders.fontSizePt,
-                          fontWeight: preset.fileHeaders.bold ? 'bold' : 'normal',
-                          color: preset.fileHeaders.textColor,
-                          background:
-                            preset.fileHeaders.background === 'transparent'
-                              ? undefined
-                              : preset.fileHeaders.background,
-                          borderBottom: preset.fileHeaders.borderBottom
-                            ? `0.5px solid ${preset.fileHeaders.borderColor}`
-                            : undefined,
-                          paddingBottom: 4,
-                          marginBottom: 6,
+                          fontFamily: fontStack(preset.headings.h3.font),
+                          fontSize: preset.headings.h3.sizePt,
+                          fontWeight: WEIGHT_MAP[preset.headings.h3.weight],
+                          fontStyle: preset.headings.h3.italic ? 'italic' : 'normal',
+                          color: preset.headings.h3.color,
+                          textAlign: preset.headings.h3.alignment,
+                          marginTop: preset.headings.h3.spaceBeforePt,
+                          marginBottom: preset.headings.h3.spaceAfterPt,
+                          lineHeight: preset.headings.h3.lineHeight,
+                          textIndent: preset.headings.h3.indentPt,
                         }}
                       >
-                        {[
-                          preset.fileHeaders.showRelativePath && f.relativePath,
-                          preset.fileHeaders.showLanguageLabel &&
-                            languageLabel(f.language),
-                          preset.fileHeaders.showFileSize &&
-                            formatBytes(f.sizeBytes),
-                        ]
-                          .filter(Boolean)
-                          .join('    ·    ')}
+                        {headingNumber('h3', gi, fi)}
+                        {f.relativePath}
                       </div>
-                    )}
-                    <CodeBlock
-                      highlighted={highlighted}
-                      preset={preset}
-                      themeColors={themeColors}
-                    />
-                  </div>
-                );
-              })}
-            </div>
-          ))}
+
+                      {/* File header — fileName and relativePath are independent */}
+                      {preset.fileHeaders.show && (
+                        <div
+                          style={{
+                            fontFamily: fontStack(preset.fileHeaders.font),
+                            fontSize: preset.fileHeaders.fontSizePt,
+                            fontWeight: preset.fileHeaders.bold ? 'bold' : 'normal',
+                            color: preset.fileHeaders.textColor,
+                            background:
+                              preset.fileHeaders.background === 'transparent'
+                                ? undefined
+                                : preset.fileHeaders.background,
+                            borderBottom: preset.fileHeaders.borderBottom
+                              ? `0.5px solid ${preset.fileHeaders.borderColor}`
+                              : undefined,
+                            paddingBottom: 4,
+                            marginBottom: preset.fileHeaders.spacingAfterPt,
+                          }}
+                        >
+                          {preset.fileHeaders.showFileName && (
+                            <div style={{ fontWeight: preset.fileHeaders.bold ? 'bold' : 'normal' }}>
+                              {fileName}
+                            </div>
+                          )}
+                          {preset.fileHeaders.showRelativePath && (
+                            <div style={{ fontSize: preset.fileHeaders.fontSizePt - 1, opacity: 0.8 }}>
+                              {f.relativePath}
+                            </div>
+                          )}
+                          {/* Metadata line — each piece independently toggled */}
+                          {(preset.fileHeaders.showLanguageLabel ||
+                            preset.fileHeaders.showFileSize ||
+                            (preset.fileHeaders.showLineCount && highlighted)) && (
+                            <div style={{ fontSize: preset.fileHeaders.fontSizePt - 1, color: preset.colors.mutedText, marginTop: 2 }}>
+                              {[
+                                preset.fileHeaders.showLanguageLabel && languageLabel(f.language),
+                                preset.fileHeaders.showFileSize && formatBytes(f.sizeBytes),
+                                preset.fileHeaders.showLineCount && highlighted && `${highlighted.lines.length} lines`,
+                              ].filter(Boolean).join('  ·  ')}
+                            </div>
+                          )}
+                        </div>
+                      )}
+
+                      <CodeBlock
+                        highlighted={highlighted}
+                        preset={preset}
+                        themeColors={themeColors}
+                      />
+                    </div>
+                  );
+                })}
+              </div>
+            );
+          })}
 
           {allSelected.length > PREVIEW_LIMIT && (
             <div
@@ -455,32 +623,99 @@ export function DocumentPreview() {
               document.
             </div>
           )}
+
+          {/* Page footer — rendered at the bottom */}
+          {preset.page.pageFooter && (
+            <div
+              style={{
+                color: preset.colors.mutedText,
+                fontSize: 10,
+                textAlign: 'center',
+                marginTop: 32,
+                borderTop: `0.5px solid ${preset.colors.borders}`,
+                paddingTop: 4,
+              }}
+            >
+              {preset.page.pageFooter
+                .replace('{page}', '1')
+                .replace('{pages}', '1')}
+            </div>
+          )}
         </div>
       </div>
     </div>
   );
 }
 
+/** Visual page-break marker. */
+function PageBreakMarker({ label, color }: { label: string; color: string }) {
+  return (
+    <div
+      style={{
+        margin: '12px 0',
+        padding: '4px 8px',
+        textAlign: 'center',
+        fontSize: 9,
+        fontWeight: 'bold',
+        color: color,
+        borderTop: `1px dashed ${color}`,
+        borderBottom: `1px dashed ${color}`,
+        textTransform: 'uppercase',
+        letterSpacing: 1,
+      }}
+    >
+      {label}
+    </div>
+  );
+}
+
+/**
+ * Code block renderer.
+ *
+ * Background logic:
+ *   - If `preset.code.useSyntaxThemeBackground` is true → use Shiki's bg.
+ *   - Otherwise → use `preset.code.backgroundColor`.
+ *
+ * Token colors: ALWAYS from Shiki. `preset.code.textColor` is the fallback
+ * for tokens that don't have an explicit color.
+ *
+ * Border: `borderStyle='none'` truly disables the border (border: none).
+ */
 function CodeBlock({
   highlighted,
   preset,
   themeColors,
 }: {
   highlighted?: HighlightedFile;
-  preset: ReturnType<typeof useAppState>['state']['preset'];
+  preset: DocumentPreset;
   themeColors: { background: string; foreground: string };
 }) {
+  const effectiveBg = preset.code.useSyntaxThemeBackground
+    ? themeColors.background
+    : preset.code.backgroundColor;
+  const fallbackFg = preset.code.useSyntaxThemeBackground
+    ? themeColors.foreground
+    : preset.code.textColor;
+
+  // Border: 'none' truly disables it.
+  const borderStyle =
+    preset.code.borderStyle === 'none' || !preset.code.borderColor
+      ? 'none'
+      : `${preset.code.borderWidthPt}px solid ${preset.code.borderColor}`;
+
   if (!highlighted) {
     return (
       <div
         style={{
           padding: preset.code.paddingPt,
-          background: themeColors.background,
-          color: themeColors.foreground,
+          background: effectiveBg,
+          color: fallbackFg,
           fontFamily: fontStack(preset.code.font),
           fontSize: preset.code.fontSizePt,
+          fontWeight: WEIGHT_MAP[preset.code.fontWeight],
           lineHeight: preset.code.lineHeight,
           borderRadius: preset.code.borderRadiusPt,
+          border: borderStyle,
         }}
       >
         <div style={{ opacity: 0.5 }}>Loading…</div>
@@ -488,22 +723,25 @@ function CodeBlock({
     );
   }
 
-  const lineNumberWidth = String(highlighted.lines.length).length;
+  const lineNumberWidth =
+    preset.code.lineNumberWidthChars > 0
+      ? preset.code.lineNumberWidthChars
+      : String(highlighted.lines.length).length;
 
   return (
     <div
       style={{
-        background: themeColors.background,
-        color: themeColors.foreground,
+        background: effectiveBg,
         fontFamily: fontStack(preset.code.font),
         fontSize: preset.code.fontSizePt,
+        fontWeight: WEIGHT_MAP[preset.code.fontWeight],
         lineHeight: preset.code.lineHeight,
         padding: preset.code.paddingPt,
         borderRadius: preset.code.borderRadiusPt,
-        border: preset.code.borderColor
-          ? `${preset.code.borderWidthPt}px solid ${preset.code.borderColor}`
-          : undefined,
+        border: borderStyle,
         overflow: 'hidden',
+        marginTop: preset.code.blockSpacingBeforePt,
+        marginBottom: preset.code.blockSpacingAfterPt,
       }}
     >
       {highlighted.lines.map((line) => (
@@ -528,6 +766,7 @@ function CodeBlock({
               whiteSpace: preset.code.wrapLongLines ? 'pre-wrap' : 'pre',
               wordBreak: preset.code.wrapLongLines ? 'break-word' : 'normal',
               overflow: preset.code.wrapLongLines ? 'hidden' : 'auto',
+              color: fallbackFg,
             }}
           >
             {line.tokens.length === 0 ? (
@@ -539,7 +778,7 @@ function CodeBlock({
                   <span
                     key={i}
                     style={{
-                      color: tok.color ?? themeColors.foreground,
+                      color: tok.color ?? undefined,
                       fontWeight: tok.bold ? 'bold' : undefined,
                       fontStyle: tok.italic ? 'italic' : undefined,
                       textDecoration: tok.underline ? 'underline' : undefined,
@@ -557,7 +796,10 @@ function CodeBlock({
   );
 }
 
-function buildStructurePreview(paths: string[]): string {
+function buildStructurePreview(
+  paths: string[],
+  dirsFirst: boolean = true,
+): string {
   type Node = { name: string; children: Map<string, Node>; isFile: boolean };
   const root: Node = { name: '', children: new Map(), isFile: false };
   for (const p of paths) {
@@ -579,7 +821,9 @@ function buildStructurePreview(paths: string[]): string {
   const out: string[] = [];
   const render = (node: Node, prefix: string, isRoot: boolean) => {
     const entries = Array.from(node.children.values()).sort((a, b) => {
-      if (a.isFile !== b.isFile) return a.isFile ? 1 : -1;
+      if (dirsFirst) {
+        if (a.isFile !== b.isFile) return a.isFile ? 1 : -1;
+      }
       return a.name.localeCompare(b.name);
     });
     for (let i = 0; i < entries.length; i++) {

@@ -135,11 +135,15 @@ describe('custom presets', () => {
     const json = exportPreset(base);
     const parsed = JSON.parse(json);
     expect(parsed.name).toBe('University');
-    expect(parsed.version).toBe(1);
+    expect(parsed.version).toBe(2);
     expect(parsed.page).toBeDefined();
     expect(parsed.typography).toBeDefined();
     expect(parsed.headings).toBeDefined();
     expect(parsed.code).toBeDefined();
+    expect(parsed.layout).toBeDefined();
+    expect(parsed.pageBreaks).toBeDefined();
+    expect(parsed.projectStructure).toBeDefined();
+    expect(parsed.misc).toBeDefined();
   });
 
   it('importPreset creates a new custom preset from JSON', () => {

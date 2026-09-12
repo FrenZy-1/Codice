@@ -1,74 +1,34 @@
+/**
+ * Legacy compatibility shim for the old `SYNTAX_THEMES` export.
+ *
+ * New code should use `syntaxThemeRegistry.ts` which derives the theme list
+ * from Shiki's actual `bundledThemes` export. This shim keeps the old
+ * `getTheme()` function working for any code that still references it.
+ */
+
+import { getSyntaxThemeCatalog, findSyntaxTheme, type SyntaxThemeOption } from './syntaxThemeRegistry';
 import type { SyntaxTheme } from '@/types';
 
-/** Built-in syntax themes. */
-export const SYNTAX_THEMES: SyntaxTheme[] = [
-  {
-    id: 'github-dark',
-    label: 'GitHub Dark',
-    dark: true,
-    background: '#24292e',
-    foreground: '#e1e4e8',
-    shikiTheme: 'github-dark',
-  },
-  {
-    id: 'github-light',
-    label: 'GitHub Light',
-    dark: false,
-    background: '#ffffff',
-    foreground: '#24292e',
-    shikiTheme: 'github-light',
-  },
-  {
-    id: 'one-dark-pro',
-    label: 'One Dark Pro',
-    dark: true,
-    background: '#282c34',
-    foreground: '#abb2bf',
-    shikiTheme: 'one-dark-pro',
-  },
-  {
-    id: 'dracula',
-    label: 'Dracula',
-    dark: true,
-    background: '#282a36',
-    foreground: '#f8f8f2',
-    shikiTheme: 'dracula',
-  },
-  {
-    id: 'monokai',
-    label: 'Monokai',
-    dark: true,
-    background: '#272822',
-    foreground: '#f8f8f2',
-    shikiTheme: 'monokai',
-  },
-  {
-    id: 'solarized-light',
-    label: 'Solarized Light',
-    dark: false,
-    background: '#fdf6e3',
-    foreground: '#657b83',
-    shikiTheme: 'solarized-light',
-  },
-  {
-    id: 'solarized-dark',
-    label: 'Solarized Dark',
-    dark: true,
-    background: '#002b36',
-    foreground: '#93a1a1',
-    shikiTheme: 'solarized-dark',
-  },
-  {
-    id: 'nord',
-    label: 'Nord',
-    dark: true,
-    background: '#2e3440',
-    foreground: '#d8dee9',
-    shikiTheme: 'nord',
-  },
-];
+/** Convert a SyntaxThemeOption to the legacy SyntaxTheme shape. */
+function toLegacyTheme(opt: SyntaxThemeOption): SyntaxTheme {
+  return {
+    id: opt.id,
+    label: opt.name,
+    dark: opt.dark,
+    // These are filled with placeholder values — new code should call
+    // getThemeColors() from the highlighter to get actual bg/fg.
+    background: opt.dark ? '#0d1117' : '#ffffff',
+    foreground: opt.dark ? '#e6edf3' : '#1f2328',
+    shikiTheme: opt.id,
+  };
+}
+
+/** All available syntax themes (derived from Shiki). */
+export const SYNTAX_THEMES: SyntaxTheme[] =
+  getSyntaxThemeCatalog().map(toLegacyTheme);
 
 /** Look up a theme by id. */
 export function getTheme(id: string): SyntaxTheme {
-  return SYNTAX_THEMES.find((t) => t.id === id) ?? SYNTAX_THEMES[0];
+  const found = findSyntaxTheme(id);
+  return found ? toLegacyTheme(found) : SYNTAX_THEMES[0];
 }

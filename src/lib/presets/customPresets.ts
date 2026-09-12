@@ -3,6 +3,9 @@
  *
  * Built-in presets are immutable. When a user wants to modify a built-in,
  * we duplicate it into a custom preset with a new id.
+ *
+ * Supports v1 and v2 preset JSON. Older presets are migrated to v2 on load
+ * using `migratePreset()`, which fills in defaults for new fields.
  */
 
 import type {
@@ -10,23 +13,40 @@ import type {
   DocumentPresetExport,
 } from './documentPreset';
 import { BUILT_IN_DOCUMENT_PRESETS } from './builtInPresets';
+import { migratePreset } from './presetMigration';
 
-const STORAGE_KEY = 'codice-custom-presets-v1';
+const STORAGE_KEY = 'codice-custom-presets-v2';
 
 /** Generate a short unique id. */
 function genId(): string {
   return `custom-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
 }
 
-/** Load all custom presets from localStorage. */
+/** Load all custom presets from localStorage, migrating v1 presets. */
 export function loadCustomPresets(): DocumentPreset[] {
   try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    if (!raw) return [];
+    // Try v2 storage first.
+    let raw = localStorage.getItem(STORAGE_KEY);
+    if (!raw) {
+      // Migrate from v1 storage key if present.
+      const v1Raw = localStorage.getItem('codice-custom-presets-v1');
+      if (v1Raw) {
+        const v1Parsed = JSON.parse(v1Raw);
+        if (Array.isArray(v1Parsed)) {
+          const migrated = v1Parsed
+            .map((p) => migratePreset(p))
+            .map((p) => ({ ...p, builtIn: false }));
+          localStorage.setItem(STORAGE_KEY, JSON.stringify(migrated));
+          localStorage.removeItem('codice-custom-presets-v1');
+          return migrated;
+        }
+      }
+      return [];
+    }
     const parsed = JSON.parse(raw);
     if (!Array.isArray(parsed)) return [];
     return parsed
-      .filter((p): p is DocumentPreset => p && typeof p === 'object' && p.id && p.name)
+      .map((p) => migratePreset(p))
       .map((p) => ({ ...p, builtIn: false }));
   } catch {
     return [];
@@ -57,20 +77,19 @@ export function findPreset(id: string): DocumentPreset | undefined {
 /** Save a new custom preset. Returns the saved preset (with new id). */
 export function saveCustomPreset(preset: DocumentPreset): DocumentPreset {
   const custom = loadCustomPresets();
-  const newPreset: DocumentPreset = {
+  const newPreset: DocumentPreset = migratePreset({
     ...preset,
     id: genId(),
     builtIn: false,
-  };
+  });
   custom.push(newPreset);
   persistCustomPresets(custom);
   return newPreset;
 }
 
-/** Update an existing custom preset by id. Throws if id is unknown or built-in. */
+/** Update an existing custom preset by id. */
 export function updateCustomPreset(preset: DocumentPreset): DocumentPreset {
   if (preset.builtIn || BUILT_IN_DOCUMENT_PRESETS.some((p) => p.id === preset.id)) {
-    // Built-ins are immutable — duplicate as new custom preset.
     return saveCustomPreset(preset);
   }
   const custom = loadCustomPresets();
@@ -78,7 +97,7 @@ export function updateCustomPreset(preset: DocumentPreset): DocumentPreset {
   if (idx < 0) {
     return saveCustomPreset(preset);
   }
-  custom[idx] = { ...preset, builtIn: false };
+  custom[idx] = migratePreset({ ...preset, builtIn: false });
   persistCustomPresets(custom);
   return custom[idx];
 }
@@ -108,54 +127,43 @@ export function duplicatePreset(source: DocumentPreset, newName?: string): Docum
   });
 }
 
-/** Export a preset as a JSON-serializable object. */
+/** Export a preset as JSON (v2 format). */
 export function exportPreset(preset: DocumentPreset): string {
   const exported: DocumentPresetExport = {
+    version: 2,
+    exportedAt: new Date().toISOString(),
     name: preset.name,
     description: preset.description,
     syntaxTheme: preset.syntaxTheme,
     page: preset.page,
+    layout: preset.layout,
+    pageBreaks: preset.pageBreaks,
     typography: preset.typography,
     headings: preset.headings,
     code: preset.code,
     fileHeaders: preset.fileHeaders,
     projectHeaders: preset.projectHeaders,
+    projectStructure: preset.projectStructure,
     titlePage: preset.titlePage,
     colors: preset.colors,
+    misc: preset.misc,
     metadata: preset.metadata,
-    includeToc: preset.includeToc,
-    includeProjectStructure: preset.includeProjectStructure,
-    pageBreakBetweenFiles: preset.pageBreakBetweenFiles,
-    version: 1,
-    exportedAt: new Date().toISOString(),
   };
   return JSON.stringify(exported, null, 2);
 }
 
-/** Import a preset from JSON. Returns the saved preset. */
+/** Import a preset from JSON (supports v1 and v2). Returns the saved preset. */
 export function importPreset(json: string, fallbackName?: string): DocumentPreset {
   const parsed = JSON.parse(json);
   if (!parsed || typeof parsed !== 'object') {
     throw new Error('Invalid preset JSON');
   }
-  const preset: DocumentPreset = {
+  // migratePreset handles both v1 (no version field) and v2 (version: 2).
+  const migrated = migratePreset({
+    ...parsed,
     id: '',
     name: parsed.name || fallbackName || 'Imported Preset',
-    description: parsed.description || '',
     builtIn: false,
-    syntaxTheme: parsed.syntaxTheme || 'github-light',
-    page: parsed.page,
-    typography: parsed.typography,
-    headings: parsed.headings,
-    code: parsed.code,
-    fileHeaders: parsed.fileHeaders,
-    projectHeaders: parsed.projectHeaders,
-    titlePage: parsed.titlePage,
-    colors: parsed.colors,
-    metadata: parsed.metadata,
-    includeToc: parsed.includeToc ?? true,
-    includeProjectStructure: parsed.includeProjectStructure ?? true,
-    pageBreakBetweenFiles: parsed.pageBreakBetweenFiles ?? true,
-  };
-  return saveCustomPreset(preset);
+  });
+  return saveCustomPreset(migrated);
 }

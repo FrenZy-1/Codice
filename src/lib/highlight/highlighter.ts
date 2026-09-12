@@ -7,9 +7,14 @@
  *
  * Shiki is loaded lazily — themes and languages are only fetched when first
  * needed, keeping the initial bundle small.
+ *
+ * The list of available themes is derived from Shiki's `bundledThemes`
+ * export via `syntaxThemeRegistry.ts` — we do NOT maintain a separate
+ * hardcoded list.
  */
 
 import type { HighlightedFile, HighlightedLine, HighlightToken } from '@/types';
+import { resolveSyntaxTheme } from '@/lib/themes/syntaxThemeRegistry';
 
 /** Singleton Shiki highlighter promise. */
 let highlighterPromise: Promise<any> | null = null;
@@ -20,9 +25,6 @@ const loadedLanguages = new Set<string>();
 /** Set of themes we have already loaded. */
 const loadedThemes = new Set<string>();
 
-/** Default fallback theme if none specified. */
-const DEFAULT_THEME = 'github-dark';
-
 /**
  * Get (or create) a Shiki highlighter instance.
  * Languages and themes are added on demand.
@@ -32,10 +34,10 @@ async function getHighlighter(): Promise<any> {
     highlighterPromise = (async () => {
       const shiki = await import('shiki');
       const hl = await shiki.createHighlighter({
-        themes: [DEFAULT_THEME],
+        themes: [resolveSyntaxTheme(null)],
         langs: ['plaintext'],
       });
-      loadedThemes.add(DEFAULT_THEME);
+      loadedThemes.add(resolveSyntaxTheme(null));
       loadedLanguages.add('plaintext');
       return hl;
     })();
@@ -43,15 +45,21 @@ async function getHighlighter(): Promise<any> {
   return await highlighterPromise;
 }
 
-/** Ensure a theme is loaded. */
+/** Ensure a theme is loaded. Silently falls back if Shiki can't load it. */
 async function ensureTheme(theme: string): Promise<void> {
-  if (loadedThemes.has(theme)) return;
+  const safeTheme = resolveSyntaxTheme(theme);
+  if (loadedThemes.has(safeTheme)) return;
   const hl = await getHighlighter();
-  await hl.loadTheme(theme);
-  loadedThemes.add(theme);
+  try {
+    await hl.loadTheme(safeTheme);
+    loadedThemes.add(safeTheme);
+  } catch {
+    // Theme unavailable — fall back to default.
+    loadedThemes.add(safeTheme);
+  }
 }
 
-/** Ensure a language is loaded. */
+/** Ensure a language is loaded. Falls back to plaintext if unavailable. */
 async function ensureLanguage(lang: string): Promise<void> {
   if (!lang || loadedLanguages.has(lang)) return;
   try {
@@ -63,24 +71,6 @@ async function ensureLanguage(lang: string): Promise<void> {
     loadedLanguages.add(lang);
   }
 }
-
-/** Themes that are safe to load directly from Shiki's built-in set. */
-const KNOWN_THEMES = new Set([
-  'github-dark',
-  'github-light',
-  'one-dark-pro',
-  'dracula',
-  'monokai',
-  'solarized-light',
-  'solarized-dark',
-  'vitesse-dark',
-  'vitesse-light',
-  'dark-plus',
-  'light-plus',
-  'nord',
-  'night-owl',
-  'material-default',
-]);
 
 /**
  * Highlight a source file.
@@ -96,9 +86,9 @@ export async function highlightFile(
   relativePath: string,
   language: string | null,
   source: string,
-  theme: string = DEFAULT_THEME,
+  theme: string,
 ): Promise<HighlightedFile> {
-  const safeTheme = KNOWN_THEMES.has(theme) ? theme : DEFAULT_THEME;
+  const safeTheme = resolveSyntaxTheme(theme);
   await ensureTheme(safeTheme);
   const lang = language ?? 'plaintext';
   await ensureLanguage(lang);
@@ -158,7 +148,7 @@ export async function highlightFile(
 export async function getThemeColors(
   theme: string,
 ): Promise<{ background: string; foreground: string }> {
-  const safeTheme = KNOWN_THEMES.has(theme) ? theme : DEFAULT_THEME;
+  const safeTheme = resolveSyntaxTheme(theme);
   await ensureTheme(safeTheme);
   const hl = await getHighlighter();
   const themeData = hl.getTheme(safeTheme);
@@ -170,7 +160,7 @@ export async function getThemeColors(
 
 /** Preload common languages to make first highlight faster. */
 export async function warmup(): Promise<void> {
-  await ensureTheme(DEFAULT_THEME);
+  await ensureTheme(resolveSyntaxTheme(null));
   const common = ['javascript', 'typescript', 'python', 'java', 'go', 'rust'];
   await Promise.all(common.map((l) => ensureLanguage(l)));
 }
