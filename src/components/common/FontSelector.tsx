@@ -73,14 +73,6 @@ export function FontSelector({ value, onChange, category, label, id }: Props) {
     };
   }, [open, fonts, highlightIdx, onChange]);
 
-  // Reset highlight when opening.
-  useEffect(() => {
-    if (open) {
-      const idx = fonts.findIndex((f) => f.value === value);
-      setHighlightIdx(idx >= 0 ? idx : 0);
-    }
-  }, [open, fonts, value]);
-
   return (
     <div ref={containerRef} className="relative">
       {label && (
@@ -92,7 +84,17 @@ export function FontSelector({ value, onChange, category, label, id }: Props) {
         ref={buttonRef}
         id={id}
         type="button"
-        onClick={() => setOpen((o) => !o)}
+        onClick={() =>
+          setOpen((o) => {
+            const next = !o;
+            // Reset the keyboard highlight each time the dropdown opens.
+            if (next) {
+              const idx = fonts.findIndex((f) => f.value === value);
+              setHighlightIdx(idx >= 0 ? idx : 0);
+            }
+            return next;
+          })
+        }
         className="input flex items-center justify-between text-left"
         aria-haspopup="listbox"
         aria-expanded={open}

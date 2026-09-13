@@ -1,10 +1,11 @@
 /**
  * File discovery — recursive scan of uploaded project folders.
  *
- * Supports three input modes:
+ * Supports four input modes:
  *  1. webkitdirectory upload (FileList with webkitRelativePath)
  *  2. File System Access API (FileSystemDirectoryHandle)
  *  3. Drag-and-drop of folders (DataTransferItem with webkitGetAsEntry)
+ *  4. ZIP archives (picked or dropped — unpacked in-memory via JSZip)
  *
  * All modes are normalized into a `ProjectEntry` containing `DiscoveredFile`
  * records. Each `DiscoveredFile` carries a `FileHandle` that can later read
@@ -17,6 +18,7 @@ import type {
   ProjectEntry,
   ScanWarning,
 } from '@/types';
+import JSZip from 'jszip';
 import { detectLanguage, isConfigFile } from './languageDetection';
 import {
   DEFAULT_EXCLUDED_DIRS,
@@ -35,6 +37,25 @@ class FileHandleImpl implements FileHandle {
   }
   get file(): File {
     return this._file;
+  }
+}
+
+/** Wraps a lazily-read ZIP entry as a FileHandle (text is cached). */
+class ZipEntryHandleImpl implements FileHandle {
+  private _cached?: string;
+  constructor(
+    private readonly entry: JSZip.JSZipObject,
+    private readonly _name: string,
+  ) {}
+  async getText(): Promise<string> {
+    if (this._cached === undefined) {
+      this._cached = await this.entry.async('string');
+    }
+    return this._cached;
+  }
+  get file(): File {
+    // Synthesize a File on demand (content is already decoded text).
+    return new File([this._cached ?? ''], this._name, { type: 'text/plain' });
   }
 }
 
@@ -82,7 +103,7 @@ function stripFirstSegment(path: string): string {
 }
 
 /** Build a DiscoveredFile record. */
-function makeFile(
+export function makeFile(
   projectId: string,
   relativePath: string,
   size: number,
@@ -164,6 +185,10 @@ function makeFile(
  * Each file's `webkitRelativePath` looks like `MyProject/src/main.ts`.
  * The first segment is the folder name; we strip it from the relative path
  * but keep it as the project's `folderName`.
+ *
+ * Files WITHOUT a `webkitRelativePath` (loose files, e.g. dragged from the
+ * desktop) are accepted as a synthetic "Loose files" project instead of
+ * being silently dropped — the folder structure is simply their file name.
  */
 export async function discoverFromFiles(
   files: File[],
@@ -183,11 +208,26 @@ export async function discoverFromFiles(
     throw new Error('No files were provided.');
   }
 
-  // Derive folder name from the first file's webkitRelativePath.
-  const firstPath = (files[0] as any).webkitRelativePath as string | undefined;
-  const folderName = firstPath ? firstPath.split('/')[0] : 'Project';
+  // Derive folder name from the first file that carries a relative path
+  // (loose files don't have one, but may share the input with folder files).
+  const firstRelFile = files.find((f) => Boolean((f as any).webkitRelativePath));
+  const firstPath = firstRelFile
+    ? ((firstRelFile as any).webkitRelativePath as string)
+    : undefined;
+  const hasRelativePaths = Boolean(firstRelFile);
+  const folderName = firstPath
+    ? firstPath.split('/')[0]
+    : hasRelativePaths
+      ? 'Project'
+      : 'Loose files';
   const projectId = genId('p');
   const warnings: ScanWarning[] = [];
+  if (!hasRelativePaths && files.length > 0) {
+    warnings.push({
+      severity: 'info',
+      message: `Loose files were added without folder structure (${files.length} file${files.length === 1 ? '' : 's'})`,
+    });
+  }
 
   // Filter out excluded directories early.
   const excludedDirSet = new Set(filter.excludedDirs);
@@ -197,8 +237,8 @@ export async function discoverFromFiles(
 
   for (const file of files) {
     const rel = (file as any).webkitRelativePath as string | undefined;
-    if (!rel) continue;
-    const stripped = stripFirstSegment(rel);
+    // Loose files (no relative path) use their bare name as the path.
+    const stripped = rel ? stripFirstSegment(rel) : file.name;
     if (!stripped) continue;
 
     // Check directory exclusions
@@ -236,11 +276,17 @@ export async function discoverFromFiles(
   }
 
   const discovered: DiscoveredFile[] = filtered.map((file) => {
-    const rel = (file as any).webkitRelativePath as string;
-    const stripped = stripFirstSegment(rel);
+    const rel = (file as any).webkitRelativePath as string | undefined;
+    const stripped = rel ? stripFirstSegment(rel) : file.name;
     const handle = new FileHandleImpl(file);
     return makeFile(projectId, stripped, file.size, handle, filter);
   });
+
+  if (discovered.length === 0) {
+    throw new Error(
+      'No readable files were found in the provided selection — everything was skipped as binary or too large.',
+    );
+  }
 
   // Surface large-but-not-skipped files
   for (const f of discovered) {
@@ -353,6 +399,139 @@ export async function discoverFromDirectoryHandle(
     warnings,
     addedAt: Date.now(),
   };
+}
+
+/**
+ * Discover files from a ZIP archive uploaded by the user.
+ *
+ * The archive is unpacked in-memory (nothing is uploaded to a server).
+ * Directories and binary entries are skipped; the same exclusion rules that
+ * apply to folder uploads are enforced. If every entry shares a common
+ * top-level folder (typical for GitHub tarball/zip downloads), that segment
+ * becomes the project label and is stripped from relative paths.
+ */
+export async function discoverFromZipArchive(
+  file: File,
+  filter: {
+    excludedDirs: string[];
+    excludedExtensions: string[];
+    excludedFilenames: string[];
+    includeGlobs: string[];
+    excludeGlobs: string[];
+    includeSource: boolean;
+    includeConfig: boolean;
+    includeMarkdown: boolean;
+    customExtensions: string[];
+  },
+  onProgress?: (count: number) => void,
+): Promise<ProjectEntry> {
+  let zip: JSZip;
+  try {
+    zip = await JSZip.loadAsync(file);
+  } catch {
+    throw new Error(`Could not read "${file.name}" as a ZIP archive.`);
+  }
+
+  const entries = Object.values(zip.files).filter((e) => !e.dir);
+  if (entries.length === 0) {
+    throw new Error('The ZIP archive contains no files.');
+  }
+
+  // Detect a common top-level folder shared by every entry.
+  const firstSegments = new Set(
+    entries.map((e) => normalizePath(e.name).split('/')[0]),
+  );
+  const hasCommonRoot = firstSegments.size === 1;
+  const commonRoot = hasCommonRoot ? entries[0].name.split('/')[0] : '';
+  const folderName = hasCommonRoot ? commonRoot : file.name.replace(/\.zip$/i, '');
+  const projectId = genId('p');
+  const warnings: ScanWarning[] = [];
+  const excludedDirSet = new Set(filter.excludedDirs);
+
+  const discovered: DiscoveredFile[] = [];
+  let skippedBinary = 0;
+  let skippedLarge = 0;
+
+  for (const entry of entries) {
+    const raw = normalizePath(entry.name);
+    const stripped = hasCommonRoot ? stripFirstSegment(raw) : raw;
+    if (!stripped) continue;
+
+    // Ignore OS/IDE metadata that commonly hides inside archives.
+    if (stripped === '.DS_Store' || stripped.startsWith('__MACOSX/')) continue;
+
+    const segments = stripped.split('/');
+    const inExcluded = segments.some((seg) => {
+      const lower = seg.toLowerCase();
+      return excludedDirSet.has(lower) || excludedDirSet.has(seg);
+    });
+    if (inExcluded) continue;
+
+    const meta = await entry.async('uint8array');
+    if (meta.byteLength > SKIP_FILE_THRESHOLD) {
+      skippedLarge++;
+      warnings.push({
+        severity: 'warn',
+        message: `Skipped very large file: ${stripped} (${formatBytes(meta.byteLength)})`,
+        filePath: stripped,
+      });
+      continue;
+    }
+    if (looksBinary(entry.name)) {
+      skippedBinary++;
+      continue;
+    }
+
+    const handle = new ZipEntryHandleImpl(entry, entry.name.split('/').pop() ?? entry.name);
+    discovered.push(makeFile(projectId, stripped, meta.byteLength, handle, filter));
+    onProgress?.(discovered.length);
+  }
+
+  if (discovered.length === 0) {
+    throw new Error('No readable files were found in the ZIP archive.');
+  }
+  if (skippedBinary > 0) {
+    warnings.push({
+      severity: 'info',
+      message: `${skippedBinary} binary file${skippedBinary === 1 ? '' : 's'} ignored`,
+    });
+  }
+
+  // Surface large-but-not-skipped files.
+  for (const f of discovered) {
+    if (!f.excluded && f.size > LARGE_FILE_THRESHOLD) {
+      warnings.push({
+        severity: 'warn',
+        message: `File exceeds recommended size: ${f.relativePath} (${formatBytes(f.size)})`,
+        filePath: f.relativePath,
+      });
+    }
+  }
+
+  const selected = discovered.filter((f) => !f.excluded);
+  const noLang = selected.filter((f) => !f.language).length;
+  if (noLang > 0) {
+    warnings.push({
+      severity: 'info',
+      message: `Language could not be detected for ${noLang} file${noLang === 1 ? '' : 's'}`,
+    });
+  }
+
+  return {
+    id: projectId,
+    label: folderName,
+    folderName,
+    files: discovered,
+    selectedCount: selected.length,
+    selectedSize: selected.reduce((s, f) => s + f.size, 0),
+    warnings,
+    addedAt: Date.now(),
+  };
+}
+
+/** True when the file looks like a ZIP archive the user wants unpacked. */
+export function isZipFile(file: { name: string; type?: string }): boolean {
+  return /\.zip$/i.test(file.name) || file.type === 'application/zip' || file.type === 'application/x-zip-compressed';
 }
 
 /** Format bytes as a human-readable string. */

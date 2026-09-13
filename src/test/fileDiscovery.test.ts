@@ -134,6 +134,93 @@ describe('discoverFromFiles', () => {
       }),
     ).rejects.toThrow(/No files/);
   });
+
+  it('accepts loose files (no webkitRelativePath) as a synthetic project', async () => {
+    const loose = [
+      new File(['class Loose {}'], 'Loose.java', { type: 'text/plain' }),
+      new File(['# Notes'], 'NOTES.md', { type: 'text/plain' }),
+    ];
+    const project = await discoverFromFiles(loose, {
+      excludedDirs: [],
+      excludedExtensions: [],
+      excludedFilenames: [],
+      includeGlobs: [],
+      excludeGlobs: [],
+      includeSource: true,
+      includeConfig: true,
+      includeMarkdown: true,
+      customExtensions: [],
+    });
+    expect(project.label).toBe('Loose files');
+    expect(project.files).toHaveLength(2);
+    expect(project.files.map((f) => f.relativePath).sort()).toEqual([
+      'Loose.java',
+      'NOTES.md',
+    ]);
+    // An informational warning about loose structure is surfaced.
+    expect(
+      project.warnings.some((w) => /Loose files/.test(w.message)),
+    ).toBe(true);
+  });
+
+  it('keeps folder-backed files when mixed with loose ones', async () => {
+    const mixed = [
+      new File(['loose body'], 'loose.txt', { type: 'text/plain' }),
+      makeFile('Main.java', 'class Main {}', 'P/src/Main.java'),
+    ];
+    const project = await discoverFromFiles(mixed, {
+      excludedDirs: [],
+      excludedExtensions: [],
+      excludedFilenames: [],
+      includeGlobs: [],
+      excludeGlobs: [],
+      includeSource: true,
+      includeConfig: true,
+      includeMarkdown: true,
+      customExtensions: [],
+    });
+    // Folder name still derives from the first relative path.
+    expect(project.folderName).toBe('P');
+    const paths = project.files.map((f) => f.relativePath).sort();
+    expect(paths).toEqual(['loose.txt', 'src/Main.java']);
+  });
+
+  it('throws a helpful error when every file was skipped', async () => {
+    const binaryOnly = [new File(['\u0000\u0001'], 'blob.png', { type: 'image/png' })];
+    await expect(
+      discoverFromFiles(binaryOnly, {
+        excludedDirs: [],
+        excludedExtensions: [],
+        excludedFilenames: [],
+        includeGlobs: [],
+        excludeGlobs: [],
+        includeSource: true,
+        includeConfig: true,
+        includeMarkdown: true,
+        customExtensions: [],
+      }),
+    ).rejects.toThrow(/No readable files/);
+  });
+
+  it('loose binary files are still excluded by extension rules', async () => {
+    const loose = [
+      new File(['class A {}'], 'A.java', { type: 'text/plain' }),
+      new File(['\u0000data'], 'asset.zip', { type: 'application/zip' }),
+    ];
+    const project = await discoverFromFiles(loose, {
+      excludedDirs: [],
+      excludedExtensions: [],
+      excludedFilenames: [],
+      includeGlobs: [],
+      excludeGlobs: [],
+      includeSource: true,
+      includeConfig: true,
+      includeMarkdown: true,
+      customExtensions: [],
+    });
+    expect(project.files).toHaveLength(1);
+    expect(project.files[0].name).toBe('A.java');
+  });
 });
 
 describe('formatBytes', () => {

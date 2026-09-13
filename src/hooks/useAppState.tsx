@@ -46,6 +46,7 @@ import {
 } from '@/lib/presets/customPresets';
 import type { DocumentPreset } from '@/lib/presets/documentPreset';
 import { presetToOptions } from '@/lib/presets/presetToOptions';
+import { isRuleDeselected, isRuleSelected } from '@/lib/selectionRules';
 import {
   applyUITheme,
   getInitialUITheme,
@@ -63,6 +64,10 @@ export interface AppState {
   exclusions: Record<string, Set<string>>;
   /** Per-project explicitly-included file ids (override defaults). */
   inclusions: Record<string, Set<string>>;
+  /** Per-project selection rules — glob patterns that deselect matching files. */
+  projectExcludeRules: Record<string, string[]>;
+  /** Per-project include rules — globs that rescue files from exclude rules. */
+  projectIncludeRules: Record<string, string[]>;
   /** Active document preset (the template). */
   preset: DocumentPreset;
   /** All known custom presets (built-ins are constants). */
@@ -109,6 +114,8 @@ type Action =
   | { type: 'IMPORT_CUSTOM_PRESET'; json: string; fallbackName?: string }
   | { type: 'SET_METADATA'; metadata: Partial<DocumentMetadata> }
   | { type: 'SET_FILTER'; filter: Partial<FilterConfig> }
+  | { type: 'SET_PROJECT_RULES'; projectId: string; rules: string[] }
+  | { type: 'SET_PROJECT_INCLUDE_RULES'; projectId: string; rules: string[] }
   | { type: 'SET_UI_THEME'; mode: UIThemeMode }
   | { type: 'SET_OUTPUT_FORMAT'; format: 'docx' | 'pdf' | 'odt' }
   | { type: 'SET_OUTPUT_MODE'; mode: OutputMode }
@@ -128,7 +135,19 @@ function reducer(state: AppState, action: Action): AppState {
       delete exclusions[action.projectId];
       const inclusions = { ...state.inclusions };
       delete inclusions[action.projectId];
-      return { ...state, projects, selection, exclusions, inclusions };
+      const projectExcludeRules = { ...state.projectExcludeRules };
+      delete projectExcludeRules[action.projectId];
+      const projectIncludeRules = { ...state.projectIncludeRules };
+      delete projectIncludeRules[action.projectId];
+      return {
+        ...state,
+        projects,
+        selection,
+        exclusions,
+        inclusions,
+        projectExcludeRules,
+        projectIncludeRules,
+      };
     }
     case 'RENAME_PROJECT':
       return {
@@ -248,6 +267,18 @@ function reducer(state: AppState, action: Action): AppState {
       return { ...state, metadata: { ...state.metadata, ...action.metadata } };
     case 'SET_FILTER':
       return { ...state, filter: { ...state.filter, ...action.filter } };
+    case 'SET_PROJECT_RULES': {
+      const rules = { ...state.projectExcludeRules };
+      if (action.rules.length > 0) rules[action.projectId] = action.rules;
+      else delete rules[action.projectId];
+      return { ...state, projectExcludeRules: rules };
+    }
+    case 'SET_PROJECT_INCLUDE_RULES': {
+      const rules = { ...state.projectIncludeRules };
+      if (action.rules.length > 0) rules[action.projectId] = action.rules;
+      else delete rules[action.projectId];
+      return { ...state, projectIncludeRules: rules };
+    }
     case 'SET_UI_THEME':
       persistUITheme(action.mode);
       applyUITheme(action.mode);
@@ -265,6 +296,8 @@ function reducer(state: AppState, action: Action): AppState {
         selection: {},
         exclusions: {},
         inclusions: {},
+        projectExcludeRules: {},
+        projectIncludeRules: {},
       };
     case 'LOAD_STATE':
       return { ...state, ...action.state };
@@ -281,6 +314,8 @@ function buildInitialState(): AppState {
     selection: {},
     exclusions: {},
     inclusions: {},
+    projectExcludeRules: {},
+    projectIncludeRules: {},
     preset: initialPreset,
     customPresets: loadCustomPresets(),
     metadata: {
@@ -343,6 +378,26 @@ function loadPersistedState(): Partial<AppState> | null {
       inclusions[k] = new Set(v as any);
     }
     if (Object.keys(inclusions).length) result.inclusions = inclusions;
+    if (
+      parsed.projectExcludeRules &&
+      typeof parsed.projectExcludeRules === 'object'
+    ) {
+      const rules: Record<string, string[]> = {};
+      for (const [k, v] of Object.entries(parsed.projectExcludeRules)) {
+        if (Array.isArray(v)) rules[k] = v.filter((x) => typeof x === 'string');
+      }
+      if (Object.keys(rules).length) result.projectExcludeRules = rules;
+    }
+    if (
+      parsed.projectIncludeRules &&
+      typeof parsed.projectIncludeRules === 'object'
+    ) {
+      const rules: Record<string, string[]> = {};
+      for (const [k, v] of Object.entries(parsed.projectIncludeRules)) {
+        if (Array.isArray(v)) rules[k] = v.filter((x) => typeof x === 'string');
+      }
+      if (Object.keys(rules).length) result.projectIncludeRules = rules;
+    }
     return result;
   } catch {
     return null;
@@ -365,6 +420,8 @@ function persistState(state: AppState) {
       inclusions: Object.fromEntries(
         Object.entries(state.inclusions).map(([k, v]) => [k, Array.from(v)]),
       ),
+      projectExcludeRules: state.projectExcludeRules,
+      projectIncludeRules: state.projectIncludeRules,
     };
     localStorage.setItem(STORAGE_KEY, JSON.stringify(serializable));
   } catch {
@@ -400,15 +457,34 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
       if (!project) return new Set();
       const excl = state.exclusions[projectId] ?? new Set();
       const incl = state.inclusions[projectId] ?? new Set();
+      const rules = state.projectExcludeRules[projectId] ?? [];
+      const includeRules = state.projectIncludeRules[projectId] ?? [];
       const result = new Set<string>();
       for (const file of project.files) {
         if (file.excluded && !incl.has(file.id)) continue;
+        // An explicit user exclusion (checkbox unchecked) always wins —
+        // even over include rules.
         if (excl.has(file.id)) continue;
+        // Selection rules deselect matching files unless the user
+        // explicitly re-included them OR an include rule rescues them.
+        if (
+          !incl.has(file.id) &&
+          isRuleDeselected(file, rules) &&
+          !isRuleSelected(file, includeRules)
+        ) {
+          continue;
+        }
         result.add(file.id);
       }
       return result;
     },
-    [state.projects, state.exclusions, state.inclusions],
+    [
+      state.projects,
+      state.exclusions,
+      state.inclusions,
+      state.projectExcludeRules,
+      state.projectIncludeRules,
+    ],
   );
 
   const getDocumentOptions = useCallback(

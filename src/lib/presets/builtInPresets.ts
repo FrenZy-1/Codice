@@ -12,6 +12,8 @@ import {
   DEFAULT_PAGE_BREAK_BEHAVIOR,
   DEFAULT_PROJECT_STRUCTURE,
   DEFAULT_MISC,
+  migratePreset,
+  type PresetInput,
 } from './presetMigration';
 
 /** Common color defaults shared by all presets. */
@@ -35,7 +37,13 @@ const COMMON_COLORS = {
   error: '#cf222e',
 };
 
-export const BUILT_IN_DOCUMENT_PRESETS: DocumentPreset[] = [
+/**
+ * Raw built-in preset definitions. Each is run through `migratePreset()` so
+ * newly introduced fields (structured header/footer layouts, vertical
+ * alignment, dotted/dashed borders) always carry valid defaults — including
+ * conversion of the legacy single-string pageHeader/pageFooter templates.
+ */
+const RAW_BUILT_IN_PRESETS: PresetInput[] = [
   {
     id: 'university',
     name: 'University',
@@ -541,6 +549,9 @@ export const BUILT_IN_DOCUMENT_PRESETS: DocumentPreset[] = [
     pageBreakBetweenFiles: true,
   },
 ];
+
+export const BUILT_IN_DOCUMENT_PRESETS: DocumentPreset[] =
+  RAW_BUILT_IN_PRESETS.map((p) => migratePreset(p));
 
 export const DEFAULT_DOCUMENT_PRESET_ID = 'university';
 

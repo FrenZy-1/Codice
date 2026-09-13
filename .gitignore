@@ -1,14 +1,13 @@
 # Dependencies
 node_modules/
 
+# Next.js build output
+.next/
+out/
+
 # Build output
 dist/
 build/
-out/
-
-# Vite / tooling caches
-.vite/
-.cache/
 
 # Environment files
 .env
@@ -47,9 +46,6 @@ temp/
 playwright-report/
 test-results/
 
-# Local development artifacts
-*.local
-
 # Generated archives / exports
 *.zip
 
@@ -57,3 +53,11 @@ test-results/
 *.docx
 *.pdf
 *.odt
+
+# Worklog and sandbox artifacts
+worklog.md
+dev.log
+server.log
+tool-results/
+upload/
+download/

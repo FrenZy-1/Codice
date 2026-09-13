@@ -132,6 +132,50 @@ describe('docxExporter', () => {
     expect(buf[0]).toBe(0x50); // P
     expect(buf[1]).toBe(0x4b); // K
   }, 30000);
+
+  it('resolves header tokens ({title}/{author}/{files}) in header1.xml', async () => {
+    const model = buildModel({
+      pageHeaderShow: true,
+      pageHeaderLayout: 'single',
+      pageHeaderCenter: '{title} — {author} — {files} files',
+    });
+    const result = await docxExporter.export(model, {
+      format: 'docx',
+      filename: 'tokens',
+    });
+    const JSZip = (await import('jszip')).default;
+    const zip = await JSZip.loadAsync(await result.blob.arrayBuffer());
+    const header = await zip.file('word/header1.xml')!.async('string');
+    expect(header).toContain('Test Project');
+    expect(header).toContain('Test Author');
+    // {files} resolves in its own run ('1') followed by the literal ' files'.
+    expect(header).toMatch(/>1<\/w:t>/);
+    expect(header).toContain('files');
+    // No raw token text may leak into the output.
+    expect(header).not.toContain('{title}');
+    expect(header).not.toContain('{author}');
+    expect(header).not.toContain('{files}');
+  }, 30000);
+
+  it('emits live PAGE fields for {page}/{pages} in footer text templates', async () => {
+    const model = buildModel({
+      pageFooterShow: true,
+      pageFooterLayout: 'single',
+      pageFooterCenter: 'text',
+      pageFooterText: 'Page {page} of {pages}',
+    });
+    const result = await docxExporter.export(model, {
+      format: 'docx',
+      filename: 'fields',
+    });
+    const JSZip = (await import('jszip')).default;
+    const zip = await JSZip.loadAsync(await result.blob.arrayBuffer());
+    const footer = await zip.file('word/footer1.xml')!.async('string');
+    expect(footer).toContain('Page ');
+    expect(footer).toContain(' of ');
+    expect(footer).toMatch(/PAGE/);
+    expect(footer).toMatch(/NUMPAGES/);
+  }, 30000);
 });
 
 describe('pdfExporter', () => {
@@ -165,5 +209,25 @@ describe('odtExporter', () => {
     const buf = await readFirstBytes(result.blob, 2);
     expect(buf[0]).toBe(0x50);
     expect(buf[1]).toBe(0x4b);
+  }, 30000);
+
+  it('resolves header tokens and keeps {page} as a live field in styles.xml', async () => {
+    const model = buildModel({
+      pageHeaderShow: true,
+      pageHeaderLayout: 'single',
+      pageHeaderCenter: '{title} · page {page}',
+    });
+    const result = await odtExporter.export(model, {
+      format: 'odt',
+      filename: 'tokens',
+    });
+    const JSZip = (await import('jszip')).default;
+    const zip = await JSZip.loadAsync(await result.blob.arrayBuffer());
+    const styles = await zip.file('styles.xml')!.async('string');
+    // Static token resolved from model metadata…
+    expect(styles).toContain('Test Project');
+    expect(styles).not.toContain('{title}');
+    // …while {page} stays a live OpenDocument page-number field.
+    expect(styles).toContain('text:page-number');
   }, 30000);
 });

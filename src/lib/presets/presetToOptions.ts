@@ -46,5 +46,34 @@ export function presetToOptions(preset: DocumentPreset): DocumentOptions {
     syntaxTheme: preset.syntaxTheme,
     pageHeader: preset.page.pageHeader,
     pageFooter: preset.page.pageFooter,
+    // Structured header/footer layout fields.
+    pageHeaderShow: preset.page.pageHeaderShow,
+    pageHeaderLayout: preset.page.pageHeaderLayout,
+    pageHeaderAlign: preset.page.pageHeaderAlign,
+    pageHeaderLeft: preset.page.pageHeaderLeft,
+    pageHeaderCenter: preset.page.pageHeaderCenter,
+    pageHeaderRight: preset.page.pageHeaderRight,
+    pageFooterShow: preset.page.pageFooterShow,
+    pageFooterLayout: preset.page.pageFooterLayout,
+    pageFooterAlign: preset.page.pageFooterAlign,
+    pageFooterLeft: preset.page.pageFooterLeft,
+    pageFooterCenter: preset.page.pageFooterCenter,
+    pageFooterRight: preset.page.pageFooterRight,
+    pageFooterText: preset.page.pageFooterText,
+    // Border style passthrough (solid / dotted / dashed).
+    codeBorderStyle: borderStyleNone ? undefined : preset.code.borderStyle === 'none' ? undefined : preset.code.borderStyle,
+    // File-header independence (spec §5).
+    showFileName: preset.fileHeaders.showFileName,
+    showRelativePath: preset.fileHeaders.showRelativePath,
+    showLanguageLabel: preset.fileHeaders.showLanguageLabel,
+    showFileSize: preset.fileHeaders.showFileSize,
+    showLineCount: preset.fileHeaders.showLineCount,
+    showFileHeaderBold: preset.fileHeaders.bold,
+    // Title-page layout for the exporters' front matter.
+    titlePageVerticalAlignment: preset.titlePage.verticalAlignment,
+    titlePageVerticalOffsetPt: preset.titlePage.verticalOffsetPt,
+    titlePageHorizontalAlignment: preset.titlePage.alignment,
+    // TOC file metadata.
+    showFileMetadata: preset.misc.showFileMetadata,
   };
 }

@@ -93,28 +93,18 @@ const THEME_CLASSIFICATION: Record<string, { dark: boolean; group: 'light' | 'da
 
 /**
  * Derive the full theme catalog from Shiki's `bundledThemes` export.
- * Falls back to a curated list if the dynamic import fails (e.g. in tests).
+ *
+ * In this Next.js port, `require('shiki')` is unavailable (ESM-only package),
+ * so the synchronous catalog is seeded from the curated classification and
+ * then upgraded asynchronously via `ensureSyntaxThemeCatalog()` which lazily
+ * imports the installed Shiki package and syncs the id list with what the
+ * installed version actually ships. Falls back to the curated list if the
+ * dynamic import fails (e.g. in tests).
  */
 function buildThemeCatalog(): SyntaxThemeOption[] {
-  // We try to read bundledThemes dynamically. If it's not available
-  // (e.g. in a non-browser context without the full bundle), we fall
-  // back to the static classification keys.
-  let themeIds: string[] = [];
-  try {
-    // Use a dynamic require so this works in both ESM and CJS contexts.
-    // In the browser, Vite will tree-shake the shiki import.
-    const shiki = require('shiki');
-    if (shiki?.bundledThemes) {
-      themeIds = Object.keys(shiki.bundledThemes);
-    }
-  } catch {
-    // Fall back below.
-  }
-
-  // Fallback: use the static classification keys.
-  if (themeIds.length === 0) {
-    themeIds = Object.keys(THEME_CLASSIFICATION);
-  }
+  // Seed with the curated classification keys. The async enhancer below
+  // replaces/extends this with the real bundledThemes id list.
+  let themeIds: string[] = Object.keys(THEME_CLASSIFICATION);
 
   // Build the catalog.
   const catalog: SyntaxThemeOption[] = themeIds.map((id) => {
@@ -170,6 +160,58 @@ function prettifyName(id: string): string {
 
 /** Cached catalog — built once on first access. */
 let cachedCatalog: SyntaxThemeOption[] | null = null;
+
+/** Whether the async enhancement (real bundledThemes ids) has run. */
+let catalogEnhanced = false;
+
+/** In-flight promise so concurrent callers share one enhancement. */
+let enhancementPromise: Promise<void> | null = null;
+
+/**
+ * Asynchronously sync the catalog with the installed Shiki package's
+ * `bundledThemes` export. Safe to call multiple times; components typically
+ * invoke it from an effect and re-render when the catalog may have changed.
+ */
+export async function ensureSyntaxThemeCatalog(): Promise<SyntaxThemeOption[]> {
+  if (catalogEnhanced) return getSyntaxThemeCatalog();
+  if (!enhancementPromise) {
+    enhancementPromise = (async () => {
+      try {
+        const shiki = await import('shiki');
+        const bundled = (shiki as any).bundledThemes;
+        if (bundled && typeof bundled === 'object') {
+          const realIds = Object.keys(bundled);
+          if (realIds.length > 0) {
+            const known = new Set(Object.keys(THEME_CLASSIFICATION));
+            for (const id of realIds) {
+              if (!known.has(id)) {
+                // Heuristic for unknown themes: check the name for "light".
+                const lower = id.toLowerCase();
+                const dark = !(
+                  lower.includes('light') ||
+                  lower.includes('latte') ||
+                  lower.includes('dawn') ||
+                  lower.includes('lotus')
+                );
+                THEME_CLASSIFICATION[id] = {
+                  dark,
+                  group: dark ? 'dark' : 'light',
+                };
+              }
+            }
+            cachedCatalog = null; // force rebuild with the real id list
+          }
+        }
+      } catch {
+        // Shiki unavailable (e.g. unit tests) — keep the curated catalog.
+      } finally {
+        catalogEnhanced = true;
+      }
+    })();
+  }
+  await enhancementPromise;
+  return getSyntaxThemeCatalog();
+}
 
 /** Get the full syntax theme catalog. */
 export function getSyntaxThemeCatalog(): SyntaxThemeOption[] {

@@ -1,58 +1,73 @@
 /**
- * Document preview pane.
+ * Document preview pane — REAL multi-page preview.
  *
- * Renders an HTML approximation of what the exported document will look like.
- * The preview consumes the SAME `DocumentPreset` that feeds the exporters —
- * there is no separate preview-only style state.
+ * Renders a paginated HTML approximation of the exported document. It shares
+ * ONE element model + paginator with the template-settings preview
+ * (`@/lib/preview/documentPagination`, spec §11/§13) and consumes the SAME
+ * canonical `DocumentPreset` that feeds the exporters — there is no
+ * preview-only style state.
  *
- * Bug fixes applied here:
- *   - File header: fileName and relativePath are independent elements.
- *   - File metadata: showLanguageLabel / showFileSize / showLineCount each
- *     independently control their metadata piece.
- *   - Heading numbering: hierarchical (1, 1.1, 1.1.1) when misc.numberHeadings
- *     AND the per-heading numbered flag are both on.
- *   - Title page description: shows when enabled + content present.
- *   - Project header: showPath and showMetadata render real content.
- *   - Page header/footer: rendered visually with spacing.
- *   - Document density: all spacing values applied.
- *   - Page breaks: visible page-break markers.
- *   - Heading italic + weight: applied per-level.
- *   - Code border: borderStyle='none' truly disables border.
- *   - All document colors wired to semantic elements.
- *
- * Syntax highlighting is performed by Shiki. Shiki token colors are ALWAYS
- * respected — `preset.code.textColor` is only a fallback.
+ * Behavior highlights:
+ *   - Page-break settings (after title / before project / before file /
+ *     before H1) move content to an actual separate page — never a
+ *     divider-only simulation (spec §11).
+ *   - The title page is ONE coherent group: horizontal alignment applies to
+ *     every element; vertical alignment positions the whole group (§9/§29).
+ *   - Structured page headers/footers (single/dual/triple + slots) render
+ *     per page with tokens resolved through the shared engine (§27, §7).
+ *   - Setting changes briefly highlight ONLY the affected preview regions
+ *     (§8/§30): region ids match computeHighlightIds and only sub-objects
+ *     that actually changed flash.
+ *   - Outline panel anchors + scroll-spy, print stylesheet, Unicode
+ *     box-drawing glyphs with DejaVu fallback (§23/§24).
  */
 
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useAppState } from '@/hooks/useAppState';
 import { highlightFile, getThemeColors } from '@/lib/highlight/highlighter';
 import { resolveSyntaxTheme } from '@/lib/themes/syntaxThemeRegistry';
 import { fontStack } from '@/lib/fonts/fontCatalog';
-import type { DocumentPreset, FontWeight } from '@/lib/presets/documentPreset';
-import type { HighlightedFile } from '@/types';
+import type { DocumentPreset, FooterSlotType } from '@/lib/presets/documentPreset';
+import type { DocumentMetadata, HighlightedFile } from '@/types';
 import { formatBytes } from '@/lib/fileDiscovery';
 import { languageLabel } from '@/lib/languageDetection';
+import { PreviewWelcome, PreviewNoSelection } from '@/components/Preview/PreviewEmptyStates';
+import { buildStaticTokenContext, expandTokens } from '@/lib/tokens';
+import { computeHighlightIds } from '@/components/Settings/templateShared';
+import { buildDocumentOutline, type OutlineEntry } from '@/lib/documentOutline';
+import { OutlinePanel } from '@/components/Preview/OutlinePanel';
+import { StatsPanel } from '@/components/common/StatsPanel';
+import { ListTree, BarChart } from '@/components/common/Icons';
+import {
+  buildDocumentElements,
+  paginateDocument,
+  pageBoxPx,
+  MM_TO_PX,
+  PT_TO_PX,
+  WEIGHT_MAP,
+  type PaginationProject,
+  type PreviewElement,
+  type PreviewPage,
+} from '@/lib/preview/documentPagination';
 
-const PAGE_DIMENSIONS_PX: Record<string, [number, number]> = {
-  A4: [794, 1123],
-  Letter: [816, 1056],
-  Legal: [816, 1344],
-  A3: [1123, 1587],
-};
-
-/** Map FontWeight to numeric CSS font-weight. */
-const WEIGHT_MAP: Record<FontWeight, number> = {
-  normal: 400,
-  medium: 500,
-  semibold: 600,
-  bold: 700,
-};
+/** Map FontWeight to numeric CSS font-weight (re-exported from the shared model). */
+const WEIGHTS = WEIGHT_MAP;
 
 /** Cache key that includes the syntax theme so theme changes invalidate it. */
 function cacheKey(fileId: string, theme: string): string {
   return `${fileId}::${theme}`;
 }
+
+/** CSS font stack with a guaranteed Unicode-glyph fallback for box drawing. */
+function glyphCapableStack(stack: string): string {
+  if (/monospace\s*$/.test(stack.trim())) {
+    return stack.replace(/monospace\s*$/, '"DejaVu Sans Mono", monospace');
+  }
+  return `${stack}, "DejaVu Sans Mono", monospace`;
+}
+
+/** Preview file limit — the exported document contains ALL selected files. */
+const PREVIEW_LIMIT = 25;
 
 export function DocumentPreview() {
   const { state, getSelectedFiles } = useAppState();
@@ -107,13 +122,20 @@ export function DocumentPreview() {
     return result;
   }, [state.projects, getSelectedFiles]);
 
-  const PREVIEW_LIMIT = 25;
   const filesToPreview = allSelected.slice(0, PREVIEW_LIMIT);
 
-  // Re-highlight files when the syntax theme changes — clear the entire
-  // cache so stale tokens don't bleed through.
+  // Prune stale theme entries when the theme changes.
   useEffect(() => {
-    setHighlightedCache({});
+    const t = window.setTimeout(() => {
+      setHighlightedCache((prev) => {
+        const next: Record<string, HighlightedFile> = {};
+        for (const [k, v] of Object.entries(prev)) {
+          if (k.endsWith(`::${resolvedTheme}`)) next[k] = v;
+        }
+        return next;
+      });
+    }, 0);
+    return () => window.clearTimeout(t);
   }, [resolvedTheme]);
 
   // Highlight files lazily. Re-runs when the file set or syntax theme changes.
@@ -151,690 +173,995 @@ export function DocumentPreview() {
     return () => {
       cancelled = true;
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [filesToPreview.map((f) => f.fileId).join(','), resolvedTheme]);
 
-  const [pageW, pageH] = PAGE_DIMENSIONS_PX[preset.page.size] ?? PAGE_DIMENSIONS_PX.A4;
-  const effectiveW = preset.page.landscape ? pageH : pageW;
-  const effectiveH = preset.page.landscape ? pageW : pageH;
+  // ---- Document outline state ----
+  const [outlineOpen, setOutlineOpen] = useState(false);
+  const [statsOpen, setStatsOpen] = useState(false);
+  const [activeOutlineId, setActiveOutlineId] = useState<string | null>(null);
+  const scrollRafRef = useRef<number | null>(null);
 
-  const scaleFactor = useMemo(() => {
-    if (!containerRef.current) return 0.7;
-    const available = containerRef.current.clientWidth - 48;
-    return Math.min(1, available / effectiveW);
-  }, [effectiveW, containerRef.current?.clientWidth]);
+  /** Smooth-scroll the preview so the anchor section sits at the top. */
+  const navigateToOutline = useCallback((id: string) => {
+    const root = containerRef.current;
+    const el = root?.querySelector<HTMLElement>(`[data-outline-id="${id}"]`);
+    if (!root || !el) return;
+    const rootRect = root.getBoundingClientRect();
+    const elRect = el.getBoundingClientRect();
+    const top = root.scrollTop + (elRect.top - rootRect.top) - 24;
+    if (typeof root.scrollTo === 'function') {
+      root.scrollTo({ top, behavior: 'smooth' });
+    } else {
+      root.scrollTop = top; // jsdom fallback
+    }
+  }, []);
 
-  const projectGroups = useMemo(() => {
-    const groups: Array<{
-      projectLabel: string;
-      projectId: string;
-      files: typeof filesToPreview;
-    }> = [];
+  /** rAF-throttled scroll-spy — the topmost visible anchor wins. */
+  const handlePreviewScroll = useCallback(() => {
+    if (scrollRafRef.current !== null) return;
+    scrollRafRef.current = window.requestAnimationFrame(() => {
+      scrollRafRef.current = null;
+      const root = containerRef.current;
+      if (!root) return;
+      const anchors = root.querySelectorAll<HTMLElement>('[data-outline-id]');
+      if (anchors.length === 0) return;
+      const rootTop = root.getBoundingClientRect().top;
+      let current: string | null = anchors[0].getAttribute('data-outline-id');
+      for (const el of Array.from(anchors)) {
+        if (el.getBoundingClientRect().top <= rootTop + 120) {
+          current = el.getAttribute('data-outline-id');
+        } else {
+          break;
+        }
+      }
+      setActiveOutlineId(current);
+    });
+  }, []);
+
+  // Ctrl+O (dispatched from the global shortcut handler) toggles the panel.
+  useEffect(() => {
+    const onToggle = () => setOutlineOpen((v) => !v);
+    window.addEventListener('codice:toggle-outline', onToggle);
+    return () => window.removeEventListener('codice:toggle-outline', onToggle);
+  }, []);
+
+  // Measure the container width so the page can be scaled to fit.
+  const [containerWidth, setContainerWidth] = useState(800);
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    const update = () => setContainerWidth(el.clientWidth);
+    update();
+    const ro = new ResizeObserver(update);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+
+  // ---- Shared pagination model ----
+
+  const paginationProjects = useMemo<PaginationProject[]>(() => {
+    const groups: PaginationProject[] = [];
     for (const item of filesToPreview) {
-      let g = groups.find((g) => g.projectId === item.projectId);
+      let g = groups.find((g) => g.label === item.projectLabel && g.outlineProjectId === item.projectId);
       if (!g) {
         g = {
-          projectLabel: item.projectLabel,
-          projectId: item.projectId,
+          label: item.projectLabel,
+          path: `${item.projectLabel}/`,
+          structure: [],
           files: [],
+          outlineProjectId: item.projectId,
         };
         groups.push(g);
       }
-      g.files.push(item);
+      g.structure.push(item.relativePath);
+      g.files.push({
+        name: item.relativePath.split('/').pop() || item.relativePath,
+        path: item.relativePath,
+        language: item.language ?? 'plaintext',
+        size: item.sizeBytes,
+        outlineFileId: item.fileId,
+      });
     }
     return groups;
   }, [filesToPreview]);
 
-  /** Compute heading number prefix based on hierarchy. */
-  function headingNumber(
-    level: 'h1' | 'h2' | 'h3' | 'h4',
-    projectIdx: number,
-    fileIdx: number,
-  ): string {
-    if (!preset.misc.numberHeadings) return '';
-    const h = preset.headings[level];
-    if (!h.numbered) return '';
-    switch (level) {
-      case 'h1':
-        return `${projectIdx + 1}. `;
-      case 'h2':
-        return `${projectIdx + 1}.${fileIdx + 1} `;
-      case 'h3':
-        return `${projectIdx + 1}.${fileIdx + 1}.1 `;
-      case 'h4':
-        return `${projectIdx + 1}.${fileIdx + 1}.1.1 `;
-    }
-  }
+  const getHlForFile = useCallback(
+    (fileId: string): HighlightedFile | null =>
+      highlightedCache[cacheKey(fileId, resolvedTheme)] ?? null,
+    [highlightedCache, resolvedTheme],
+  );
 
-  return (
-    <div
-      ref={containerRef}
-      className="flex-1 overflow-auto bg-app p-6"
-      style={{
-        backgroundImage:
-          'radial-gradient(circle, rgba(128,128,128,0.07) 1px, transparent 1px)',
-        backgroundSize: '20px 20px',
-      }}
-    >
-      <div className="mx-auto" style={{ width: effectiveW * scaleFactor }}>
+  const elements = useMemo(
+    () => buildDocumentElements(preset, paginationProjects),
+    [preset, paginationProjects],
+  );
+
+  const pages = useMemo(
+    () =>
+      paginateDocument(elements, preset, paginationProjects, {
+        getLineCount: (file) => {
+          const id = paginationProjects
+            .flatMap((p) => p.files)
+            .find((f) => f === file)?.outlineFileId;
+          const hl = id ? getHlForFile(id) : null;
+          if (hl) return hl.lines.length;
+          return file.code ? file.code.split('\n').length : 1;
+        },
+        getLineText: (file, lineIdx) => {
+          const id = paginationProjects
+            .flatMap((p) => p.files)
+            .find((f) => f === file)?.outlineFileId;
+          const hl = id ? getHlForFile(id) : null;
+          return hl?.lines[lineIdx]?.text ?? '';
+        },
+      }),
+    [elements, preset, paginationProjects, getHlForFile],
+  );
+
+  const outline: OutlineEntry[] = useMemo(
+    () =>
+      buildDocumentOutline({
+        projects: paginationProjects.map((g) => ({
+          id: g.outlineProjectId ?? g.label,
+          label: g.label,
+          files: g.files.map((f) => ({
+            fileId: f.outlineFileId ?? f.path,
+            relativePath: f.path,
+            language: f.language,
+            sizeBytes: f.size,
+          })),
+        })),
+        includeTitlePage: preset.titlePage.enabled,
+        hasTitle: Boolean(state.metadata.title),
+        includeToc: preset.misc.includeToc,
+        includeStructure: preset.projectStructure.enabled,
+      }),
+    [
+      paginationProjects,
+      preset.titlePage.enabled,
+      preset.misc.includeToc,
+      preset.projectStructure.enabled,
+      state.metadata.title,
+    ],
+  );
+
+  /* ------------------------------------------------------------------ */
+  /* Change flash — ONLY the affected regions (spec §8/§30)              */
+  /* ------------------------------------------------------------------ */
+
+  const flashTimerRef = useRef<number | null>(null);
+  useEffect(() => {
+    // The template editor computes the affected region ids (diffed against
+    // the previous preset so group-merging patches target only the changed
+    // sub-objects) and broadcasts them — both previews flash the SAME ids.
+    const onFlash = (e: Event) => {
+      const ids = (e as CustomEvent<string[]>).detail ?? [];
+      if (!Array.isArray(ids) || ids.length === 0) return;
+      const root = containerRef.current;
+      if (!root) return;
+      root.querySelectorAll<HTMLElement>('[data-codice-region]').forEach((el) => {
+        const region = el.dataset.codiceRegion ?? '';
+        if (!ids.includes(region)) return;
+        el.classList.remove('codice-highlight');
+        void el.offsetWidth; // restart animation
+        el.classList.add('codice-highlight');
+      });
+      if (flashTimerRef.current) window.clearTimeout(flashTimerRef.current);
+      flashTimerRef.current = window.setTimeout(() => {
+        root.querySelectorAll<HTMLElement>('.codice-highlight').forEach((el) =>
+          el.classList.remove('codice-highlight'),
+        );
+      }, 1100);
+    };
+    window.addEventListener('codice:flash-regions', onFlash);
+    return () => {
+      window.removeEventListener('codice:flash-regions', onFlash);
+      if (flashTimerRef.current) window.clearTimeout(flashTimerRef.current);
+    };
+  }, []);
+
+  /* ------------------------------------------------------------------ */
+  /* Empty states — all hooks have run above, so a late branch is safe.  */
+  /* ------------------------------------------------------------------ */
+
+  if (allSelected.length === 0) {
+    return (
+      <div className="relative min-h-0 flex-1">
         <div
-          className="shadow-2xl mx-auto"
+          ref={containerRef}
+          className="codice-print-area h-full overflow-auto bg-app p-6"
           style={{
-            width: effectiveW,
-            minHeight: effectiveH,
-            transform: `scale(${scaleFactor})`,
-            transformOrigin: 'top left',
-            marginBottom: (effectiveH - effectiveH * scaleFactor) * -1 + 24,
-            padding: `${preset.page.marginTopMm * 3.78}px ${preset.page.marginRightMm * 3.78}px ${preset.page.marginBottomMm * 3.78}px ${preset.page.marginLeftMm * 3.78}px`,
-            fontFamily: fontStack(preset.typography.bodyFont),
-            fontSize: preset.typography.bodyFontSizePt,
-            fontWeight: WEIGHT_MAP[preset.typography.bodyWeight],
-            color: preset.colors.primaryText,
-            background: preset.colors.background,
-            position: 'relative',
+            backgroundImage:
+              'radial-gradient(circle, rgba(128,128,128,0.07) 1px, transparent 1px)',
+            backgroundSize: '20px 20px',
           }}
         >
-          {/* Page header — rendered at the top */}
-          {preset.page.pageHeader && (
-            <div
-              style={{
-                color: preset.colors.mutedText,
-                fontSize: 10,
-                textAlign: 'right',
-                marginBottom: preset.page.headerSpacingMm * 2,
-                borderBottom: `0.5px solid ${preset.colors.borders}`,
-                paddingBottom: 4,
-              }}
-            >
-              {preset.page.pageHeader}
-            </div>
-          )}
-
-          {/* Title page */}
-          {preset.titlePage.enabled && state.metadata.title && (
-            <div
-              style={{
-                textAlign: preset.titlePage.alignment,
-                marginTop: preset.titlePage.verticalOffsetPt,
-              }}
-            >
-              {preset.titlePage.showTitle && (
-                <div
-                  style={{
-                    fontFamily: fontStack(preset.headings.title.font),
-                    fontSize: preset.headings.title.sizePt,
-                    fontWeight: WEIGHT_MAP[preset.headings.title.weight],
-                    fontStyle: preset.headings.title.italic ? 'italic' : 'normal',
-                    color: preset.headings.title.color,
-                    textAlign: preset.headings.title.alignment,
-                    lineHeight: preset.headings.title.lineHeight,
-                    marginTop: preset.headings.title.spaceBeforePt,
-                    marginBottom: preset.headings.title.spaceAfterPt,
-                  }}
-                >
-                  {state.metadata.title}
-                </div>
-              )}
-              {preset.titlePage.showSubtitle && state.metadata.course && (
-                <div
-                  style={{
-                    fontFamily: fontStack(preset.typography.bodyFont),
-                    fontSize: preset.typography.bodyFontSizePt + 2,
-                    color: preset.colors.secondaryText,
-                    marginTop: 8,
-                    marginBottom: 8,
-                  }}
-                >
-                  {state.metadata.course}
-                </div>
-              )}
-              {preset.titlePage.showAuthor && state.metadata.author && (
-                <div
-                  style={{
-                    fontSize: preset.typography.bodyFontSizePt + 2,
-                    color: preset.colors.secondaryText,
-                    marginTop: 12,
-                  }}
-                >
-                  {state.metadata.author}
-                </div>
-              )}
-              {preset.titlePage.showCourse && !preset.titlePage.showSubtitle && state.metadata.course && (
-                <div
-                  style={{
-                    fontSize: preset.typography.bodyFontSizePt,
-                    color: preset.colors.mutedText,
-                    marginTop: 6,
-                  }}
-                >
-                  {state.metadata.course}
-                </div>
-              )}
-              {preset.titlePage.showUniversity && state.metadata.university && (
-                <div
-                  style={{
-                    fontSize: preset.typography.bodyFontSizePt,
-                    color: preset.colors.mutedText,
-                    marginTop: 4,
-                  }}
-                >
-                  {state.metadata.university}
-                </div>
-              )}
-              {preset.titlePage.showDate && (
-                <div
-                  style={{
-                    fontSize: 11,
-                    color: preset.colors.mutedText,
-                    marginTop: 32,
-                  }}
-                >
-                  {state.metadata.date || `Generated: ${new Date().toLocaleString()}`}
-                </div>
-              )}
-              {preset.titlePage.showVersion && state.metadata.version && (
-                <div
-                  style={{
-                    fontSize: 11,
-                    color: preset.colors.mutedText,
-                    marginTop: 4,
-                  }}
-                >
-                  Version: {state.metadata.version}
-                </div>
-              )}
-              {preset.titlePage.showDescription && state.metadata.description && (
-                <div
-                  style={{
-                    fontSize: 12,
-                    color: preset.colors.secondaryText,
-                    maxWidth: 400,
-                    margin: '24px auto 0',
-                  }}
-                >
-                  {state.metadata.description}
-                </div>
-              )}
-              {preset.pageBreaks.afterTitlePage && (
-                <PageBreakMarker label="Page break — after title page" color={preset.colors.borders} />
-              )}
-            </div>
-          )}
-
-          {/* TOC */}
-          {preset.misc.includeToc && (
-            <div style={{ marginBottom: preset.layout.sectionSpacingPt }}>
-              <div
-                style={{
-                  fontFamily: fontStack(preset.headings.h1.font),
-                  fontSize: preset.headings.h1.sizePt,
-                  fontWeight: WEIGHT_MAP[preset.headings.h1.weight],
-                  fontStyle: preset.headings.h1.italic ? 'italic' : 'normal',
-                  color: preset.headings.h1.color,
-                  marginBottom: 12,
-                }}
-              >
-                Table of Contents
-              </div>
-              {projectGroups.map((g, gi) => (
-                <div key={g.projectId}>
-                  <div
-                    style={{
-                      fontFamily: fontStack(preset.headings.h1.font),
-                      fontWeight: WEIGHT_MAP[preset.headings.h1.weight],
-                      fontSize: 13,
-                      marginTop: 8,
-                      color: preset.colors.primaryText,
-                    }}
-                  >
-                    {gi + 1}. {g.projectLabel}
-                  </div>
-                  {g.files.map((f, fi) => (
-                    <div
-                      key={f.fileId}
-                      style={{
-                        fontSize: 11,
-                        color: preset.colors.secondaryText,
-                        marginLeft: 16,
-                        marginTop: 2,
-                      }}
-                    >
-                      {gi + 1}.{fi + 1}  {f.relativePath}
-                    </div>
-                  ))}
-                </div>
-              ))}
-            </div>
-          )}
-
-          {/* Per-project sections */}
-          {projectGroups.map((g, gi) => {
-            // Compute project-level stats for the metadata display.
-            const projectFiles = g.files;
-            const totalSize = projectFiles.reduce((acc, f) => acc + f.sizeBytes, 0);
-            return (
-              <div
-                key={g.projectId}
-                style={{
-                  marginTop: gi === 0 ? 0 : preset.layout.sectionSpacingPt,
-                }}
-              >
-                {preset.pageBreaks.beforeProject && gi > 0 && (
-                  <PageBreakMarker label={`Page break — before project ${gi + 1}`} color={preset.colors.borders} />
-                )}
-
-                {/* Project header — title + path + metadata, each independently toggled */}
-                {preset.projectHeaders.showTitle && (
-                  <div
-                    style={{
-                      fontFamily: fontStack(preset.projectHeaders.font),
-                      fontSize: preset.projectHeaders.sizePt,
-                      fontWeight: WEIGHT_MAP[preset.projectHeaders.weight],
-                      color: preset.projectHeaders.color,
-                      textTransform: preset.projectHeaders.uppercase ? 'uppercase' : 'none',
-                      textAlign: preset.projectHeaders.alignment,
-                      marginTop: preset.projectHeaders.spaceBeforePt,
-                      marginBottom: 4,
-                    }}
-                  >
-                    {gi + 1}. {g.projectLabel}
-                  </div>
-                )}
-                {preset.projectHeaders.showPath && (
-                  <div style={{ fontSize: 10, color: preset.colors.mutedText, marginBottom: 4 }}>
-                    Path: {g.projectLabel}/
-                  </div>
-                )}
-                {preset.projectHeaders.showMetadata && (
-                  <div style={{ fontSize: 10, color: preset.colors.mutedText, marginBottom: preset.projectHeaders.spaceAfterPt }}>
-                    Files: {projectFiles.length} · Total size: {formatBytes(totalSize)}
-                  </div>
-                )}
-
-                {/* Project structure */}
-                {preset.projectStructure.enabled && (
-                  <div style={{ marginBottom: preset.layout.sectionSpacingPt }}>
-                    <div
-                      style={{
-                        fontFamily: fontStack(preset.headings.h2.font),
-                        fontSize: preset.headings.h2.sizePt,
-                        fontWeight: WEIGHT_MAP[preset.headings.h2.weight],
-                        fontStyle: preset.headings.h2.italic ? 'italic' : 'normal',
-                        color: preset.headings.h2.color,
-                        textAlign: preset.headings.h2.alignment,
-                        marginBottom: 8,
-                        lineHeight: preset.headings.h2.lineHeight,
-                        textIndent: preset.headings.h2.indentPt,
-                      }}
-                    >
-                      {headingNumber('h2', gi, 0)}Project Structure
-                    </div>
-                    <div
-                      style={{
-                        fontFamily: fontStack(preset.projectStructure.font),
-                        fontSize: preset.projectStructure.fontSizePt,
-                        color: preset.projectStructure.color,
-                        whiteSpace: 'pre',
-                        lineHeight: preset.projectStructure.lineHeight,
-                      }}
-                    >
-                      {buildStructurePreview(
-                        g.files.map((f) => f.relativePath),
-                        preset.projectStructure.dirsFirst,
-                      )}
-                    </div>
-                  </div>
-                )}
-
-                {/* H2 — Source Files */}
-                <div
-                  style={{
-                    fontFamily: fontStack(preset.headings.h2.font),
-                    fontSize: preset.headings.h2.sizePt,
-                    fontWeight: WEIGHT_MAP[preset.headings.h2.weight],
-                    fontStyle: preset.headings.h2.italic ? 'italic' : 'normal',
-                    color: preset.headings.h2.color,
-                    textAlign: preset.headings.h2.alignment,
-                    marginTop: preset.headings.h2.spaceBeforePt,
-                    marginBottom: preset.headings.h2.spaceAfterPt,
-                    lineHeight: preset.headings.h2.lineHeight,
-                    textIndent: preset.headings.h2.indentPt,
-                  }}
-                >
-                  {headingNumber('h2', gi, 0)}Source Files
-                </div>
-
-                {g.files.map((f, fi) => {
-                  const key = cacheKey(f.fileId, resolvedTheme);
-                  const highlighted = highlightedCache[key];
-                  const fileName = f.relativePath.split('/').pop() || f.relativePath;
-                  return (
-                    <div
-                      key={f.fileId}
-                      style={{
-                        marginTop: fi === 0 ? 0 : preset.layout.sectionSpacingPt,
-                      }}
-                    >
-                      {preset.pageBreaks.beforeFile && fi > 0 && (
-                        <PageBreakMarker label={`Page break — before file ${fi + 1}`} color={preset.colors.borders} />
-                      )}
-
-                      {/* H3 — file heading */}
-                      <div
-                        style={{
-                          fontFamily: fontStack(preset.headings.h3.font),
-                          fontSize: preset.headings.h3.sizePt,
-                          fontWeight: WEIGHT_MAP[preset.headings.h3.weight],
-                          fontStyle: preset.headings.h3.italic ? 'italic' : 'normal',
-                          color: preset.headings.h3.color,
-                          textAlign: preset.headings.h3.alignment,
-                          marginTop: preset.headings.h3.spaceBeforePt,
-                          marginBottom: preset.headings.h3.spaceAfterPt,
-                          lineHeight: preset.headings.h3.lineHeight,
-                          textIndent: preset.headings.h3.indentPt,
-                        }}
-                      >
-                        {headingNumber('h3', gi, fi)}
-                        {f.relativePath}
-                      </div>
-
-                      {/* File header — fileName and relativePath are independent */}
-                      {preset.fileHeaders.show && (
-                        <div
-                          style={{
-                            fontFamily: fontStack(preset.fileHeaders.font),
-                            fontSize: preset.fileHeaders.fontSizePt,
-                            fontWeight: preset.fileHeaders.bold ? 'bold' : 'normal',
-                            color: preset.fileHeaders.textColor,
-                            background:
-                              preset.fileHeaders.background === 'transparent'
-                                ? undefined
-                                : preset.fileHeaders.background,
-                            borderBottom: preset.fileHeaders.borderBottom
-                              ? `0.5px solid ${preset.fileHeaders.borderColor}`
-                              : undefined,
-                            paddingBottom: 4,
-                            marginBottom: preset.fileHeaders.spacingAfterPt,
-                          }}
-                        >
-                          {preset.fileHeaders.showFileName && (
-                            <div style={{ fontWeight: preset.fileHeaders.bold ? 'bold' : 'normal' }}>
-                              {fileName}
-                            </div>
-                          )}
-                          {preset.fileHeaders.showRelativePath && (
-                            <div style={{ fontSize: preset.fileHeaders.fontSizePt - 1, opacity: 0.8 }}>
-                              {f.relativePath}
-                            </div>
-                          )}
-                          {/* Metadata line — each piece independently toggled */}
-                          {(preset.fileHeaders.showLanguageLabel ||
-                            preset.fileHeaders.showFileSize ||
-                            (preset.fileHeaders.showLineCount && highlighted)) && (
-                            <div style={{ fontSize: preset.fileHeaders.fontSizePt - 1, color: preset.colors.mutedText, marginTop: 2 }}>
-                              {[
-                                preset.fileHeaders.showLanguageLabel && languageLabel(f.language),
-                                preset.fileHeaders.showFileSize && formatBytes(f.sizeBytes),
-                                preset.fileHeaders.showLineCount && highlighted && `${highlighted.lines.length} lines`,
-                              ].filter(Boolean).join('  ·  ')}
-                            </div>
-                          )}
-                        </div>
-                      )}
-
-                      <CodeBlock
-                        highlighted={highlighted}
-                        preset={preset}
-                        themeColors={themeColors}
-                      />
-                    </div>
-                  );
-                })}
-              </div>
-            );
-          })}
-
-          {allSelected.length > PREVIEW_LIMIT && (
-            <div
-              style={{
-                marginTop: 16,
-                padding: 12,
-                background: '#fef3c7',
-                color: '#92400e',
-                fontSize: 12,
-                borderRadius: 4,
-              }}
-            >
-              Preview limited to {PREVIEW_LIMIT} files. The exported document
-              will contain all {allSelected.length} selected files.
-            </div>
-          )}
-
-          {allSelected.length === 0 && (
-            <div
-              style={{
-                padding: 48,
-                textAlign: 'center',
-                color: preset.colors.mutedText,
-                fontSize: 14,
-              }}
-            >
-              No files selected. Add a project and select files to preview the
-              document.
-            </div>
-          )}
-
-          {/* Page footer — rendered at the bottom */}
-          {preset.page.pageFooter && (
-            <div
-              style={{
-                color: preset.colors.mutedText,
-                fontSize: 10,
-                textAlign: 'center',
-                marginTop: 32,
-                borderTop: `0.5px solid ${preset.colors.borders}`,
-                paddingTop: 4,
-              }}
-            >
-              {preset.page.pageFooter
-                .replace('{page}', '1')
-                .replace('{pages}', '1')}
-            </div>
+          {state.projects.length === 0 ? (
+            <PreviewWelcome />
+          ) : (
+            <PreviewNoSelection projectCount={state.projects.length} />
           )}
         </div>
-      </div>
-    </div>
-  );
-}
-
-/** Visual page-break marker. */
-function PageBreakMarker({ label, color }: { label: string; color: string }) {
-  return (
-    <div
-      style={{
-        margin: '12px 0',
-        padding: '4px 8px',
-        textAlign: 'center',
-        fontSize: 9,
-        fontWeight: 'bold',
-        color: color,
-        borderTop: `1px dashed ${color}`,
-        borderBottom: `1px dashed ${color}`,
-        textTransform: 'uppercase',
-        letterSpacing: 1,
-      }}
-    >
-      {label}
-    </div>
-  );
-}
-
-/**
- * Code block renderer.
- *
- * Background logic:
- *   - If `preset.code.useSyntaxThemeBackground` is true → use Shiki's bg.
- *   - Otherwise → use `preset.code.backgroundColor`.
- *
- * Token colors: ALWAYS from Shiki. `preset.code.textColor` is the fallback
- * for tokens that don't have an explicit color.
- *
- * Border: `borderStyle='none'` truly disables the border (border: none).
- */
-function CodeBlock({
-  highlighted,
-  preset,
-  themeColors,
-}: {
-  highlighted?: HighlightedFile;
-  preset: DocumentPreset;
-  themeColors: { background: string; foreground: string };
-}) {
-  const effectiveBg = preset.code.useSyntaxThemeBackground
-    ? themeColors.background
-    : preset.code.backgroundColor;
-  const fallbackFg = preset.code.useSyntaxThemeBackground
-    ? themeColors.foreground
-    : preset.code.textColor;
-
-  // Border: 'none' truly disables it.
-  const borderStyle =
-    preset.code.borderStyle === 'none' || !preset.code.borderColor
-      ? 'none'
-      : `${preset.code.borderWidthPt}px solid ${preset.code.borderColor}`;
-
-  if (!highlighted) {
-    return (
-      <div
-        style={{
-          padding: preset.code.paddingPt,
-          background: effectiveBg,
-          color: fallbackFg,
-          fontFamily: fontStack(preset.code.font),
-          fontSize: preset.code.fontSizePt,
-          fontWeight: WEIGHT_MAP[preset.code.fontWeight],
-          lineHeight: preset.code.lineHeight,
-          borderRadius: preset.code.borderRadiusPt,
-          border: borderStyle,
-        }}
-      >
-        <div style={{ opacity: 0.5 }}>Loading…</div>
       </div>
     );
   }
 
-  const lineNumberWidth =
-    preset.code.lineNumberWidthChars > 0
-      ? preset.code.lineNumberWidthChars
-      : String(highlighted.lines.length).length;
+  const { pageW: effectiveW, pageH: effectiveH } = pageBoxPx(preset);
+  const scaleFactor = Math.min(1, Math.max(0.3, (containerWidth - 48) / effectiveW));
 
-  return (
-    <div
-      style={{
-        background: effectiveBg,
-        fontFamily: fontStack(preset.code.font),
-        fontSize: preset.code.fontSizePt,
-        fontWeight: WEIGHT_MAP[preset.code.fontWeight],
-        lineHeight: preset.code.lineHeight,
-        padding: preset.code.paddingPt,
-        borderRadius: preset.code.borderRadiusPt,
-        border: borderStyle,
-        overflow: 'hidden',
-        marginTop: preset.code.blockSpacingBeforePt,
-        marginBottom: preset.code.blockSpacingAfterPt,
-      }}
-    >
-      {highlighted.lines.map((line) => (
-        <div key={line.lineNumber} style={{ display: 'flex' }}>
-          {preset.code.showLineNumbers && (
-            <span
-              style={{
-                color: preset.code.lineNumberColor,
-                background: preset.code.lineNumberBackground ?? undefined,
-                width: `${lineNumberWidth + 1}ch`,
-                marginRight: 8,
-                userSelect: 'none',
-                textAlign: 'right',
-                flexShrink: 0,
-              }}
-            >
-              {line.lineNumber}
-            </span>
-          )}
-          <span
-            style={{
-              whiteSpace: preset.code.wrapLongLines ? 'pre-wrap' : 'pre',
-              wordBreak: preset.code.wrapLongLines ? 'break-word' : 'normal',
-              overflow: preset.code.wrapLongLines ? 'hidden' : 'auto',
-              color: fallbackFg,
-            }}
-          >
-            {line.tokens.length === 0 ? (
-              '\u00A0'
-            ) : (
-              line.tokens.map((tok, i) => {
-                const text = line.text.slice(tok.start, tok.start + tok.length);
-                return (
-                  <span
-                    key={i}
-                    style={{
-                      color: tok.color ?? undefined,
-                      fontWeight: tok.bold ? 'bold' : undefined,
-                      fontStyle: tok.italic ? 'italic' : undefined,
-                      textDecoration: tok.underline ? 'underline' : undefined,
-                    }}
-                  >
-                    {text}
-                  </span>
-                );
-              })
-            )}
-          </span>
-        </div>
-      ))}
-    </div>
-  );
-}
+  const marginTop = preset.page.marginTopMm * MM_TO_PX;
+  const marginBottom = preset.page.marginBottomMm * MM_TO_PX;
+  const marginLeft = preset.page.marginLeftMm * MM_TO_PX;
+  const marginRight = preset.page.marginRightMm * MM_TO_PX;
+  const headerReserve = preset.page.pageHeaderShow ? Math.max(28, preset.page.headerSpacingMm * MM_TO_PX) : 0;
+  const footerReserve = preset.page.pageFooterShow ? Math.max(28, preset.page.footerSpacingMm * MM_TO_PX) : 0;
 
-function buildStructurePreview(
-  paths: string[],
-  dirsFirst: boolean = true,
-): string {
-  type Node = { name: string; children: Map<string, Node>; isFile: boolean };
-  const root: Node = { name: '', children: new Map(), isFile: false };
-  for (const p of paths) {
-    const parts = p.split('/');
-    let node = root;
-    for (let i = 0; i < parts.length; i++) {
-      const isLast = i === parts.length - 1;
-      if (!node.children.has(parts[i])) {
-        node.children.set(parts[i], {
-          name: parts[i],
-          children: new Map(),
-          isFile: isLast,
+  const effectiveBg = preset.code.useSyntaxThemeBackground ? themeColors.background : preset.code.backgroundColor;
+  const fallbackFg = preset.code.useSyntaxThemeBackground ? themeColors.foreground : preset.code.textColor;
+  const codeBorderCss =
+    preset.code.borderStyle === 'none' || !preset.code.borderColor
+      ? 'none'
+      : `${Math.max(0.5, preset.code.borderWidthPt)}px ${preset.code.borderStyle} ${preset.code.borderColor}`;
+
+  /* ---------------- Per-page token expansion (shared engine) ---------------- */
+
+  const nowDate = new Date();
+  const staticCtx = buildStaticTokenContext({
+    metadata: state.metadata,
+    firstProjectLabel: allSelected[0]?.projectLabel ?? null,
+    fileCount: allSelected.length,
+    now: nowDate,
+  });
+
+  function headerText(slot: string | null): string | null {
+    if (!slot) return null;
+    return expandTokens(slot, staticCtx);
+  }
+
+  function footerValue(type: FooterSlotType, page: PreviewPage, pageNo: number): string {
+    switch (type) {
+      case 'none':
+        return '';
+      case 'text':
+        return expandTokens(preset.page.pageFooterText ?? '', {
+          ...staticCtx,
+          page: String(pageNo),
+          pages: String(pages.length),
+          lines: String(page.linesOnPage),
+          fileName: page.fileName ?? '',
+          projectName: page.projectName ?? '',
         });
-      }
-      node = node.children.get(parts[i])!;
-      if (isLast) node.isFile = true;
+      case 'pageNumber':
+        return String(pageNo);
+      case 'pageCount':
+        return String(pages.length);
+      case 'linesOnPage':
+        return page.linesOnPage > 0 ? `${page.linesOnPage} lines` : '—';
+      case 'fileName':
+        return page.fileName ?? '';
+      case 'projectName':
+        return page.projectName ?? '';
+      case 'date':
+        return state.metadata.date || nowDate.toLocaleDateString();
+      default:
+        return '';
     }
   }
-  const out: string[] = [];
-  const render = (node: Node, prefix: string, isRoot: boolean) => {
-    const entries = Array.from(node.children.values()).sort((a, b) => {
-      if (dirsFirst) {
-        if (a.isFile !== b.isFile) return a.isFile ? 1 : -1;
+
+  function renderHeaderRow() {
+    if (!preset.page.pageHeaderShow) return null;
+    const p = preset.page;
+    const slots = (() => {
+      if (p.pageHeaderLayout === 'single') {
+        return [{ text: headerText(p.pageHeaderCenter ?? p.pageHeader), align: p.pageHeaderAlign }];
       }
-      return a.name.localeCompare(b.name);
-    });
-    for (let i = 0; i < entries.length; i++) {
-      const e = entries[i];
-      const isLast = i === entries.length - 1;
-      const connector = isRoot ? '' : isLast ? '└── ' : '├── ';
-      const childPrefix = isRoot ? '' : prefix + (isLast ? '    ' : '│   ');
-      out.push(`${prefix}${connector}${e.name}`);
-      if (!e.isFile) render(e, childPrefix, false);
+      if (p.pageHeaderLayout === 'dual') {
+        return [
+          { text: headerText(p.pageHeaderLeft), align: 'left' as const },
+          { text: headerText(p.pageHeaderRight), align: 'right' as const },
+        ];
+      }
+      return [
+        { text: headerText(p.pageHeaderLeft), align: 'left' as const },
+        { text: headerText(p.pageHeaderCenter), align: 'center' as const },
+        { text: headerText(p.pageHeaderRight), align: 'right' as const },
+      ];
+    })().filter((s) => s.text);
+
+    if (slots.length === 0) return null;
+    return (
+      <div
+        data-codice-region="page-header"
+        style={{
+          display: 'flex',
+          justifyContent:
+            p.pageHeaderLayout === 'single'
+              ? p.pageHeaderAlign === 'left'
+                ? 'flex-start'
+                : p.pageHeaderAlign === 'right'
+                  ? 'flex-end'
+                  : 'center'
+              : 'space-between',
+          gap: 12,
+          color: preset.colors.mutedText,
+          fontSize: 10,
+          borderBottom: `0.5px solid ${preset.colors.borders}`,
+          paddingBottom: 4,
+        }}
+      >
+        {slots.map((s, i) => (
+          <span key={i} style={{ textAlign: s.align }}>
+            {s.text}
+          </span>
+        ))}
+      </div>
+    );
+  }
+
+  function renderFooterRow(page: PreviewPage, pageNo: number) {
+    if (!preset.page.pageFooterShow) return null;
+    const p = preset.page;
+    const slots = (() => {
+      if (p.pageFooterLayout === 'single') return [p.pageFooterCenter];
+      if (p.pageFooterLayout === 'dual') return [p.pageFooterLeft, p.pageFooterRight];
+      return [p.pageFooterLeft, p.pageFooterCenter, p.pageFooterRight];
+    })();
+
+    const values = slots.map((s) => footerValue(s, page, pageNo));
+    if (values.every((v) => v === '')) return null;
+
+    const single = p.pageFooterLayout === 'single';
+    return (
+      <div
+        data-codice-region="page-footer"
+        style={{
+          display: 'flex',
+          justifyContent: single
+            ? p.pageFooterAlign === 'left'
+              ? 'flex-start'
+              : p.pageFooterAlign === 'right'
+                ? 'flex-end'
+                : 'center'
+            : 'space-between',
+          gap: 12,
+          color: preset.colors.mutedText,
+          fontSize: 10,
+          borderTop: `0.5px solid ${preset.colors.borders}`,
+          paddingTop: 4,
+        }}
+      >
+        {values.map((v, i) => (
+          <span key={i}>{v}</span>
+        ))}
+      </div>
+    );
+  }
+
+  /* ---------------- Element rendering ---------------- */
+
+  function renderElement(el: PreviewElement, key: string): React.ReactNode {
+    switch (el.type) {
+      case 'titlePage':
+        return renderTitlePage(key);
+      case 'toc':
+        return renderToc(key);
+      case 'projectHeader':
+        return renderProjectHeader(el, key);
+      case 'structure':
+        return renderStructure(el, key);
+      case 'heading':
+        return renderHeading(el, key);
+      case 'paragraph':
+        return (
+          <p
+            key={key}
+            data-codice-region="body"
+            style={{
+              color: preset.typography.bodyColor,
+              fontSize: preset.typography.bodyFontSizePt * PT_TO_PX,
+              fontWeight: WEIGHTS[preset.typography.bodyWeight],
+              lineHeight: preset.typography.lineSpacing,
+              margin: `0 0 ${preset.typography.paragraphSpacingPt}pt 0`,
+              fontFamily: fontStack(preset.typography.bodyFont),
+            }}
+          >
+            {el.text}
+          </p>
+        );
+      case 'fileHeader':
+        return renderFileHeader(el, key);
+      case 'code':
+        return renderCodeChunk(el, key);
+      case 'spacer':
+        return <div key={key} style={{ height: el.height }} />;
+      default:
+        return null;
     }
-  };
-  render(root, '', true);
-  return out.join('\n');
+  }
+
+  /** Title page — ONE coherent group (§9): group-wide horizontal alignment. */
+  function renderTitlePage(key: string) {
+    const tp = preset.titlePage;
+    const md: DocumentMetadata = state.metadata;
+    const titleH = preset.headings.title;
+    const descriptionMargin =
+      tp.alignment === 'center' ? '24px auto 0' : tp.alignment === 'right' ? '24px 0 0 auto' : '24px 0 0';
+    return (
+      <div
+        key={key}
+        data-outline-id="outline-title"
+        data-codice-region="title-page"
+        style={{
+          textAlign: tp.alignment,
+          // verticalOffsetPt nudges the group down from the top (top mode).
+          // In center/bottom modes the group is positioned by the page's
+          // justify-content so Center/Center truly centers it (spec §9/§29);
+          // bottom mode uses the offset as an upward nudge from the bottom.
+          marginTop: tp.verticalAlignment === 'top' ? tp.verticalOffsetPt * PT_TO_PX : undefined,
+          transform:
+            tp.verticalAlignment === 'bottom'
+              ? `translateY(-${tp.verticalOffsetPt * PT_TO_PX}px)`
+              : undefined,
+        }}
+      >
+        {tp.showTitle && md.title && (
+          <div
+            data-codice-region="heading-title"
+            style={{
+              fontFamily: fontStack(titleH.font),
+              fontSize: titleH.sizePt * PT_TO_PX,
+              fontWeight: WEIGHTS[titleH.weight],
+              fontStyle: titleH.italic ? 'italic' : 'normal',
+              color: titleH.color,
+              lineHeight: titleH.lineHeight,
+              textIndent: titleH.indentPt,
+            }}
+          >
+            {md.title}
+          </div>
+        )}
+        {tp.showSubtitle && md.subtitle && (
+          <div
+            style={{
+              fontFamily: fontStack(preset.typography.bodyFont),
+              fontSize: preset.typography.bodyFontSizePt * PT_TO_PX + 2,
+              color: preset.colors.secondaryText,
+              marginTop: 10,
+            }}
+          >
+            {md.subtitle}
+          </div>
+        )}
+        {tp.showAuthor && md.author && (
+          <div style={{ fontSize: preset.typography.bodyFontSizePt * PT_TO_PX + 2, color: preset.colors.secondaryText, marginTop: 18 }}>
+            {md.author}
+          </div>
+        )}
+        {tp.showCourse && md.course && (
+          <div style={{ fontSize: 12, color: preset.colors.mutedText, marginTop: 8 }}>
+            {md.course}
+          </div>
+        )}
+        {tp.showUniversity && md.university && (
+          <div style={{ fontSize: 12, color: preset.colors.mutedText, marginTop: 4 }}>
+            {md.university}
+          </div>
+        )}
+        {tp.showDate && (
+          <div style={{ fontSize: 11, color: preset.colors.mutedText, marginTop: 28 }}>
+            {md.date || `Generated: ${nowDate.toLocaleString()}`}
+          </div>
+        )}
+        {tp.showVersion && md.version && (
+          <div style={{ marginTop: 6 }}>
+            <span
+              style={{
+                display: 'inline-block',
+                fontSize: 10,
+                fontWeight: 600,
+                letterSpacing: 0.4,
+                color: preset.colors.accent,
+                background: preset.colors.surface,
+                border: `0.5px solid ${preset.colors.borders}`,
+                borderRadius: 999,
+                padding: '2px 10px',
+              }}
+            >
+              Version: {md.version}
+            </span>
+          </div>
+        )}
+        {tp.showDescription && md.description && (
+          <div
+            style={{
+              fontSize: 12,
+              color: preset.colors.secondaryText,
+              maxWidth: 400,
+              margin: descriptionMargin,
+            }}
+          >
+            {md.description}
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  function renderToc(key: string) {
+    const h1 = preset.headings.h1;
+    return (
+      <div key={key} data-outline-id="outline-toc" data-codice-region="toc" style={{ marginBottom: preset.layout.sectionSpacingPt }}>
+        <div
+          style={{
+            fontFamily: fontStack(h1.font),
+            fontSize: h1.sizePt * PT_TO_PX,
+            fontWeight: WEIGHTS[h1.weight],
+            fontStyle: h1.italic ? 'italic' : 'normal',
+            color: h1.color,
+            marginBottom: 12,
+          }}
+        >
+          Table of Contents
+        </div>
+        {paginationProjects.map((g, gi) => (
+          <div key={g.outlineProjectId ?? gi}>
+            <div
+              style={{
+                fontFamily: fontStack(h1.font),
+                fontWeight: WEIGHTS[h1.weight],
+                fontSize: 13,
+                marginTop: 8,
+                // Project TOC lines are headings-in-context (§10).
+                color: preset.colors.headings,
+              }}
+            >
+              <span style={{ color: preset.colors.accent }}>{gi + 1}. </span>
+              {g.label}
+            </div>
+            {g.files.map((f, fi) => (
+              <div
+                key={f.outlineFileId ?? fi}
+                style={{
+                  fontSize: 11,
+                  color: preset.colors.secondaryText,
+                  marginLeft: 16,
+                  marginTop: 2,
+                }}
+              >
+                {gi + 1}.{fi + 1}  {f.path}
+              </div>
+            ))}
+          </div>
+        ))}
+      </div>
+    );
+  }
+
+  function renderProjectHeader(el: Extract<PreviewElement, { type: 'projectHeader' }>, key: string) {
+    const g = paginationProjects[el.projectIdx];
+    if (!g) return null;
+    const ph = preset.projectHeaders;
+    const totalSize = g.files.reduce((acc, f) => acc + f.size, 0);
+    return (
+      <div key={key} data-outline-id={el.outlineId} data-codice-region="project-header">
+        {ph.showTitle && (
+          <div
+            style={{
+              fontFamily: fontStack(ph.font),
+              fontSize: ph.sizePt * PT_TO_PX,
+              fontWeight: WEIGHTS[ph.weight],
+              color: ph.color,
+              textTransform: ph.uppercase ? 'uppercase' : 'none',
+              textAlign: ph.alignment,
+              marginTop: ph.spaceBeforePt,
+              marginBottom: 4,
+            }}
+          >
+            <span style={{ color: preset.colors.accent }}>{el.projectIdx + 1}. </span>
+            {g.label}
+          </div>
+        )}
+        {ph.showPath && (
+          <div style={{ fontSize: 10, color: preset.colors.mutedText, marginBottom: 4 }}>
+            Path: {g.path}
+          </div>
+        )}
+        {ph.showMetadata && (
+          <div style={{ fontSize: 10, color: preset.colors.mutedText, marginBottom: ph.spaceAfterPt }}>
+            Files: {g.files.length} · Total size: {formatBytes(totalSize)}
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  function buildStructureLines(paths: string[], dirsFirst: boolean): string[] {
+    type Node = { name: string; children: Map<string, Node>; isFile: boolean };
+    const root: Node = { name: '', children: new Map(), isFile: false };
+    for (const p of paths) {
+      const parts = p.split('/');
+      let node = root;
+      for (let i = 0; i < parts.length; i++) {
+        const isLast = i === parts.length - 1;
+        if (!node.children.has(parts[i])) {
+          node.children.set(parts[i], { name: parts[i], children: new Map(), isFile: isLast });
+        }
+        node = node.children.get(parts[i])!;
+        if (isLast) node.isFile = true;
+      }
+    }
+    const out: string[] = [];
+    const render = (node: Node, prefix: string, isRoot: boolean) => {
+      const entries = Array.from(node.children.values()).sort((a, b) => {
+        if (dirsFirst) {
+          if (a.isFile !== b.isFile) return a.isFile ? 1 : -1;
+        }
+        return a.name.localeCompare(b.name);
+      });
+      for (let i = 0; i < entries.length; i++) {
+        const e = entries[i];
+        const isLast = i === entries.length - 1;
+        const connector = isRoot ? '' : isLast ? '└── ' : '├── ';
+        const childPrefix = isRoot ? '' : prefix + (isLast ? '    ' : '│   ');
+        out.push(`${prefix}${connector}${e.name}`);
+        if (!e.isFile) render(e, childPrefix, false);
+      }
+    };
+    render(root, '', true);
+    return out;
+  }
+
+  function renderStructure(el: Extract<PreviewElement, { type: 'structure' }>, key: string) {
+    const g = paginationProjects[el.projectIdx];
+    if (!g) return null;
+    const ps = preset.projectStructure;
+    const h2 = preset.headings.h2;
+    const lines = buildStructureLines(g.structure, ps.dirsFirst);
+    return (
+      <div key={key} data-outline-id={el.outlineId} data-codice-region="structure" style={{ marginBottom: preset.layout.sectionSpacingPt }}>
+        <div
+          style={{
+            fontFamily: fontStack(h2.font),
+            fontSize: h2.sizePt * PT_TO_PX,
+            fontWeight: WEIGHTS[h2.weight],
+            fontStyle: h2.italic ? 'italic' : 'normal',
+            color: h2.color,
+            marginBottom: 8,
+            lineHeight: h2.lineHeight,
+            textIndent: h2.indentPt,
+          }}
+        >
+          <span style={{ color: preset.colors.accent }}>
+            {preset.misc.numberHeadings && h2.numbered
+              ? `${el.projectIdx + 1}.${g.files.length + 1} `
+              : ''}
+          </span>
+          Project Structure
+        </div>
+        <div
+          style={{
+            fontFamily: glyphCapableStack(fontStack(ps.font)),
+            fontSize: ps.fontSizePt * PT_TO_PX,
+            color: ps.color,
+            whiteSpace: 'pre',
+            lineHeight: ps.lineHeight,
+          }}
+        >
+          {lines.join('\n')}
+        </div>
+      </div>
+    );
+  }
+
+  function renderHeading(el: Extract<PreviewElement, { type: 'heading' }>, key: string) {
+    const h = preset.headings[el.level];
+    const regionId =
+      el.level === 'h1' ? 'heading-h1' : el.level === 'h2' ? 'heading-h2' : el.level === 'h3' ? 'heading-h3' : 'heading-h4';
+    return (
+      <div
+        key={key}
+        data-outline-id={el.outlineId}
+        data-codice-region={regionId}
+        style={{
+          fontFamily: fontStack(h.font),
+          fontSize: h.sizePt * PT_TO_PX,
+          fontWeight: WEIGHTS[h.weight],
+          fontStyle: h.italic ? 'italic' : 'normal',
+          color: h.color,
+          textAlign: h.alignment,
+          marginTop: h.spaceBeforePt,
+          marginBottom: h.spaceAfterPt,
+          lineHeight: h.lineHeight,
+          textIndent: h.indentPt,
+        }}
+      >
+        <span style={{ color: preset.colors.accent }}>{el.numberPrefix}</span>
+        {el.text}
+      </div>
+    );
+  }
+
+  function renderFileHeader(el: Extract<PreviewElement, { type: 'fileHeader' }>, key: string) {
+    const g = paginationProjects[el.projectIdx];
+    const file = g?.files[el.fileIdx];
+    if (!g || !file) return null;
+    const fh = preset.fileHeaders;
+    const hl = file.outlineFileId ? getHlForFile(file.outlineFileId) : null;
+    const metaBits: string[] = [];
+    if (fh.showLanguageLabel) metaBits.push(languageLabel(file.language));
+    if (fh.showFileSize) metaBits.push(formatBytes(file.size));
+    if (fh.showLineCount && hl) metaBits.push(`${hl.lines.length} lines`);
+    if (metaBits.length === 0 && !fh.showFileName && !fh.showRelativePath) return null;
+    return (
+      <div
+        key={key}
+        data-codice-region="file-header"
+        style={{
+          fontFamily: fontStack(fh.font),
+          fontSize: fh.fontSizePt * PT_TO_PX,
+          color: fh.textColor,
+          background: fh.background === 'transparent' ? undefined : fh.background,
+          borderBottom: fh.borderBottom ? `1px solid ${fh.borderColor}` : undefined,
+          paddingBottom: 4,
+          marginBottom: preset.fileHeaders.spacingAfterPt,
+        }}
+      >
+        {fh.showFileName && (
+          <div style={{ fontWeight: fh.bold ? 'bold' : 'normal' }}>{file.name}</div>
+        )}
+        {fh.showRelativePath && (
+          <div style={{ fontSize: fh.fontSizePt * PT_TO_PX - 1, opacity: 0.85, fontWeight: fh.bold ? 'bold' : 'normal' }}>
+            {file.path}
+          </div>
+        )}
+        {metaBits.length > 0 && (
+          <div style={{ fontSize: fh.fontSizePt * PT_TO_PX - 1, color: preset.colors.mutedText, marginTop: 2 }}>
+            {metaBits.join('  ·  ')}
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  /** One page-chunk of a code block (fromLine..toLine, startLineNumber). */
+  function renderCodeChunk(el: Extract<PreviewElement, { type: 'code' }>, key: string) {
+    const g = paginationProjects[el.projectIdx];
+    const file = g?.files[el.fileIdx];
+    if (!g || !file) return null;
+    const c = preset.code;
+    const hl = file.outlineFileId ? getHlForFile(file.outlineFileId) : null;
+    const allLines = hl?.lines ?? [];
+    const lines = allLines.slice(el.fromLine, el.toLine);
+    const lineNumberWidth = c.lineNumberWidthChars > 0
+      ? c.lineNumberWidthChars
+      : allLines.length > 0
+        ? String(allLines.length).length
+        : 2;
+    return (
+      <div
+        key={key}
+        data-codice-region="code"
+        style={{
+          background: effectiveBg,
+          fontFamily: glyphCapableStack(fontStack(c.font)),
+          fontSize: c.fontSizePt * PT_TO_PX,
+          fontWeight: WEIGHTS[c.fontWeight],
+          lineHeight: c.lineHeight,
+          padding: c.paddingPt,
+          borderRadius: c.borderRadiusPt,
+          border: codeBorderCss,
+          overflow: 'hidden',
+          marginTop: preset.code.blockSpacingBeforePt,
+          marginBottom: preset.code.blockSpacingAfterPt,
+        }}
+      >
+        {lines.length === 0 && !hl ? (
+          <div style={{ opacity: 0.5, color: fallbackFg, minHeight: 40 }}>Loading…</div>
+        ) : (
+          lines.map((line) => (
+            <div key={`${key}-${line.lineNumber}`} style={{ display: 'flex' }}>
+              {c.showLineNumbers && (
+                <span
+                  style={{
+                    color: c.lineNumberColor,
+                    background: c.lineNumberBackground ?? undefined,
+                    width: `${lineNumberWidth + 1}ch`,
+                    marginRight: 8,
+                    userSelect: 'none',
+                    textAlign: 'right',
+                    flexShrink: 0,
+                  }}
+                >
+                  {el.startLineNumber + line.lineNumber - (el.fromLine + 1) + 1}
+                </span>
+              )}
+              <span
+                style={{
+                  whiteSpace: c.wrapLongLines ? 'pre-wrap' : 'pre',
+                  wordBreak: c.wrapLongLines ? 'break-word' : 'normal',
+                  overflow: c.wrapLongLines ? 'hidden' : 'auto',
+                  color: fallbackFg,
+                  flex: 1,
+                  minWidth: 0,
+                }}
+              >
+                {line.tokens.length === 0
+                  ? '\u00A0'
+                  : line.tokens.map((tok, i) => (
+                      <span
+                        key={i}
+                        style={{
+                          color: tok.color ?? undefined,
+                          fontWeight: tok.bold ? 'bold' : undefined,
+                          fontStyle: tok.italic ? 'italic' : undefined,
+                          textDecoration: tok.underline ? 'underline' : undefined,
+                        }}
+                      >
+                        {line.text.slice(tok.start, tok.start + tok.length)}
+                      </span>
+                    ))}
+              </span>
+            </div>
+          ))
+        )}
+      </div>
+    );
+  }
+
+  /* ---------------- Page rendering ---------------- */
+
+  return (
+    <div className="relative min-h-0 flex-1">
+      <div
+        ref={containerRef}
+        className="codice-print-area h-full overflow-auto bg-app p-6"
+        style={{
+          backgroundImage:
+            'radial-gradient(circle, rgba(128,128,128,0.07) 1px, transparent 1px)',
+          backgroundSize: '20px 20px',
+        }}
+        onScroll={handlePreviewScroll}
+      >
+      <div className="codice-preview-frame mx-auto flex flex-col items-center gap-6" style={{ width: effectiveW * scaleFactor }}>
+        {pages.map((page, idx) => {
+          const underFilled = page.kind !== 'content';
+          const vAlign = preset.titlePage.verticalAlignment;
+          const justify =
+            underFilled && vAlign === 'center'
+              ? 'center'
+              : underFilled && vAlign === 'bottom'
+                ? 'flex-end'
+                : 'flex-start';
+          return (
+            <div
+              key={idx}
+              className="codice-preview-surface shadow-2xl"
+              data-page={idx + 1}
+              style={{
+                width: effectiveW,
+                minHeight: effectiveH,
+                transform: `scale(${scaleFactor})`,
+                transformOrigin: 'top left',
+                marginBottom: (effectiveH - effectiveH * scaleFactor) * -1,
+                background: preset.colors.background,
+                color: preset.colors.primaryText,
+                position: 'relative',
+                display: 'flex',
+                flexDirection: 'column',
+                justifyContent: justify,
+                paddingTop: marginTop,
+                paddingBottom: marginBottom,
+                paddingLeft: marginLeft,
+                paddingRight: marginRight,
+                fontFamily: fontStack(preset.typography.bodyFont),
+                fontSize: preset.typography.bodyFontSizePt,
+                fontWeight: WEIGHTS[preset.typography.bodyWeight],
+              }}
+            >
+              {/* Header — at the very top of the page */}
+              {preset.page.pageHeaderShow && (
+                <div style={{ position: 'absolute', top: Math.max(8, marginTop - headerReserve / 2 - 10), left: marginLeft, right: marginRight }}>
+                  {renderHeaderRow()}
+                </div>
+              )}
+
+              {/* Content */}
+              <div style={{ flex: '0 0 auto' }}>
+                {page.elements.map((el, i) => renderElement(el, `${idx}-${i}`))}
+              </div>
+
+              {/* Footer — at the very bottom */}
+              {preset.page.pageFooterShow && (
+                <div style={{ position: 'absolute', bottom: Math.max(8, marginBottom - footerReserve / 2 - 10), left: marginLeft, right: marginRight }}>
+                  {renderFooterRow(page, idx + 1)}
+                </div>
+              )}
+            </div>
+          );
+        })}
+
+        {allSelected.length > PREVIEW_LIMIT && (
+          <div
+            className="codice-print-hidden"
+            style={{
+              marginTop: 16,
+              padding: 12,
+              background: '#fef3c7',
+              color: '#92400e',
+              fontSize: 12,
+              borderRadius: 4,
+            }}
+          >
+            Preview limited to {PREVIEW_LIMIT} files. The exported document
+            will contain all {allSelected.length} selected files.
+          </div>
+        )}
+      </div>
+      </div>
+
+      {/* Floating outline + statistics pills (hidden from print output). */}
+      <div className="absolute right-4 top-4 z-10 flex flex-col items-end gap-1 codice-print-hidden">
+        {!outlineOpen && outline.length > 0 && (
+          <button
+            type="button"
+            className="codice-outline-toggle"
+            onClick={() => setOutlineOpen(true)}
+            title="Document outline (Ctrl+O)"
+            aria-label="Open document outline"
+          >
+            <ListTree size={14} />
+            <span className="hidden sm:inline">Outline</span>
+            <span className="codice-outline-count">{outline.length}</span>
+          </button>
+        )}
+        {!statsOpen && (
+          <button
+            type="button"
+            className="codice-outline-toggle"
+            onClick={() => setStatsOpen(true)}
+            title="Document statistics"
+            aria-label="Open document statistics"
+            data-tour="stats"
+          >
+            <BarChart size={14} />
+            <span className="hidden sm:inline">Statistics</span>
+          </button>
+        )}
+      </div>
+      {outlineOpen && (
+        <OutlinePanel
+          entries={outline}
+          activeId={activeOutlineId}
+          onNavigate={navigateToOutline}
+          onClose={() => setOutlineOpen(false)}
+        />
+      )}
+      {statsOpen && (
+        <div className="absolute inset-0 z-10 flex items-start justify-end p-4 codice-print-hidden">
+          <div
+            className="codice-fade-in w-80 max-h-full overflow-y-auto rounded-lg border border-app bg-surface-elevated shadow-2xl"
+            role="dialog"
+            aria-label="Document statistics"
+          >
+            <div className="flex items-center justify-between border-b border-app px-3 py-2">
+              <div className="flex items-center gap-1.5 text-xs font-semibold text-secondary">
+                <BarChart size={13} />
+                Document statistics
+              </div>
+              <button
+                type="button"
+                className="codice-outline-toggle !px-1.5"
+                onClick={() => setStatsOpen(false)}
+                aria-label="Close document statistics"
+                title="Close"
+              >
+                ✕
+              </button>
+            </div>
+            <StatsPanel embedded />
+          </div>
+        </div>
+      )}
+    </div>
+  );
 }

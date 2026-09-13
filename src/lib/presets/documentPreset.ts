@@ -21,6 +21,23 @@ export type FontFamily = string;
 export type FontWeight = 'normal' | 'medium' | 'semibold' | 'bold';
 export type Alignment = 'left' | 'center' | 'right';
 
+/** Layout preset for page headers/footers: how many regions are rendered. */
+export type HeaderFooterLayout = 'single' | 'dual' | 'triple';
+
+/** Vertical alignment of under-filled isolated pages. */
+export type VerticalAlignment = 'top' | 'center' | 'bottom';
+
+/** Structured content type for a footer slot. */
+export type FooterSlotType =
+  | 'none'
+  | 'text'
+  | 'pageNumber'
+  | 'pageCount'
+  | 'linesOnPage'
+  | 'fileName'
+  | 'projectName'
+  | 'date';
+
 export interface PageStyle {
   size: PageSize;
   landscape: boolean;
@@ -30,8 +47,27 @@ export interface PageStyle {
   marginLeftMm: number;
   headerSpacingMm: number;
   footerSpacingMm: number;
+  /** @deprecated legacy single-string header — kept for preset compat. */
   pageHeader: string | null;
+  /** @deprecated legacy single-string footer — kept for preset compat. */
   pageFooter: string | null;
+  // ---- Structured header ----
+  pageHeaderShow: boolean;
+  pageHeaderLayout: HeaderFooterLayout;
+  /** Horizontal alignment used in 'single' layout mode. */
+  pageHeaderAlign: Alignment;
+  pageHeaderLeft: string | null;
+  pageHeaderCenter: string | null;
+  pageHeaderRight: string | null;
+  // ---- Structured footer ----
+  pageFooterShow: boolean;
+  pageFooterLayout: HeaderFooterLayout;
+  pageFooterAlign: Alignment;
+  pageFooterLeft: FooterSlotType;
+  pageFooterCenter: FooterSlotType;
+  pageFooterRight: FooterSlotType;
+  /** Free text used by footer slots of type 'text'. Supports {page} {pages} {lines} {fileName} {projectName} {date} {title} tokens. */
+  pageFooterText: string | null;
 }
 
 /** Document density / spacing controls. */
@@ -122,8 +158,12 @@ export interface CodeBlockStyle {
    * is used.
    */
   useSyntaxThemeBackground: boolean;
-  /** Border style: 'none' completely disables the border (border: none). */
-  borderStyle: 'none' | 'solid';
+  /**
+   * Border style. 'none' completely disables the border; when enabled the
+   * style is one of solid / dotted / dashed (no 'None' option in the UI —
+   * disabling is done via the enable checkbox).
+   */
+  borderStyle: 'none' | 'solid' | 'dotted' | 'dashed';
   borderColor: string | null;
   borderWidthPt: number;
   borderRadiusPt: number;
@@ -200,10 +240,12 @@ export interface TitlePageStyle {
   showDate: boolean;
   showVersion: boolean;
   showDescription: boolean;
-  /** Alignment of title-page content. */
+  /** Alignment of title-page content (horizontal). */
   alignment: Alignment;
   /** Vertical offset from top (pt). */
   verticalOffsetPt: number;
+  /** Vertical alignment of under-filled isolated pages (title, TOC, project intro). */
+  verticalAlignment: VerticalAlignment;
 }
 
 export interface DocumentColors {

@@ -152,13 +152,66 @@ export interface DocumentOptions {
   pageHeader: string | null;
   /** Footer template; supports {page} and {pages}. */
   pageFooter: string | null;
+  // ---- Structured header/footer layout (optional for backward compat) ----
+  /** Whether the structured header is shown at all. */
+  pageHeaderShow?: boolean;
+  /** Header layout preset: how many regions are rendered. */
+  pageHeaderLayout?: 'single' | 'dual' | 'triple';
+  /** Horizontal alignment of the header in single mode. */
+  pageHeaderAlign?: 'left' | 'center' | 'right';
+  pageHeaderLeft?: string | null;
+  pageHeaderCenter?: string | null;
+  pageHeaderRight?: string | null;
+  /** Footer layout preset: how many regions are rendered. */
+  pageFooterShow?: boolean;
+  pageFooterLayout?: 'single' | 'dual' | 'triple';
+  pageFooterAlign?: 'left' | 'center' | 'right';
+  pageFooterLeft?: FooterSlotType;
+  pageFooterCenter?: FooterSlotType;
+  pageFooterRight?: FooterSlotType;
+  /** Free text used by footer 'text' slots (tokens expanded at render). */
+  pageFooterText?: string | null;
+  /** Code block border style when a border is enabled. */
+  codeBorderStyle?: 'solid' | 'dotted' | 'dashed';
+  // ---- File-header independence (spec §5) ----
+  /** Show the bare file name (independent of the relative path). */
+  showFileName?: boolean;
+  /** Show the relative path (independent of the file name). */
+  showRelativePath?: boolean;
+  showLanguageLabel?: boolean;
+  showFileSize?: boolean;
+  showLineCount?: boolean;
+  showFileHeaderBold?: boolean;
+  // ---- Title-page layout (used by PDF / DOCX / ODT front matter) ----
+  titlePageVerticalAlignment?: 'top' | 'center' | 'bottom';
+  titlePageVerticalOffsetPt?: number;
+  /** Horizontal alignment applied to the WHOLE title-page group (spec §9). */
+  titlePageHorizontalAlignment?: 'left' | 'center' | 'right';
+  /** Show file metadata inside the table of contents. */
+  showFileMetadata?: boolean;
 }
+
+/** Structured footer slot content type. */
+export type FooterSlotType =
+  | 'none'
+  | 'text'
+  | 'pageNumber'
+  | 'pageCount'
+  | 'linesOnPage'
+  | 'fileName'
+  | 'projectName'
+  | 'date';
+
+/** Code block border style (also used by preview). */
+export type CodeBorderStyle = 'solid' | 'dotted' | 'dashed';
 
 export type PageSize = 'A4' | 'Letter' | 'Legal' | 'A3';
 
 /** Optional front matter / metadata. */
 export interface DocumentMetadata {
   title?: string;
+  /** Subtitle shown on the title page (independent of course/description). */
+  subtitle?: string;
   author?: string;
   course?: string;
   university?: string;

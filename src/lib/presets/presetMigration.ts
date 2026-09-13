@@ -9,13 +9,18 @@ import type {
   CodeBlockStyle,
   DocumentPreset,
   FileHeaderStyle,
+  FooterSlotType,
   HeadingStyle,
   LayoutDensity,
   PageBreakBehavior,
+  PageStyle,
   ProjectHeaderStyle,
   ProjectStructureStyle,
   TitlePageStyle,
   TypographyStyle,
+  HeaderFooterLayout,
+  VerticalAlignment,
+  Alignment,
 } from './documentPreset';
 
 /** Default layout density values. */
@@ -62,11 +67,157 @@ export const DEFAULT_MISC = {
   showFileMetadata: true,
 };
 
+/** Default document color palette (light). */
+export const DEFAULT_DOCUMENT_COLORS = {
+  background: '#ffffff',
+  surface: '#f6f8fa',
+  primaryText: '#1f2328',
+  secondaryText: '#59636e',
+  mutedText: '#818b98',
+  accent: '#0969da',
+  headings: '#0f172a',
+  borders: '#d0d7de',
+  codeBackground: '#f6f8fa',
+  codeText: '#24292e',
+  codeHeader: '#586069',
+  codeBorder: '#d0d7de',
+  lineNumbers: '#9198a1',
+  links: '#0969da',
+  success: '#1a7f37',
+  warning: '#9a6700',
+  error: '#cf222e',
+};
+
+const HEADER_FOOTER_LAYOUTS: HeaderFooterLayout[] = ['single', 'dual', 'triple'];
+const VERTICAL_ALIGNMENTS: VerticalAlignment[] = ['top', 'center', 'bottom'];
+const ALIGNMENTS: Alignment[] = ['left', 'center', 'right'];
+const FOOTER_SLOT_TYPES: FooterSlotType[] = [
+  'none', 'text', 'pageNumber', 'pageCount', 'linesOnPage', 'fileName', 'projectName', 'date',
+];
+
+function safeEnum<T extends string>(value: unknown, allowed: T[], fallback: T): T {
+  return typeof value === 'string' && (allowed as string[]).includes(value)
+    ? (value as T)
+    : fallback;
+}
+
+/**
+ * Migrate the page style, adding the structured header/footer layout fields.
+ *
+ * Legacy presets only carry the single-string `pageHeader` / `pageFooter`
+ * templates. They are converted into the structured slots so the new layout
+ * controls (single / dual / triple) can edit them without losing data:
+ *   pageHeader text → headerCenter (single layout, right-aligned like before)
+ *   pageFooter text → footerCenter = 'text' with the template preserved
+ */
+export function migratePageStyle(raw: Partial<PageStyle> | undefined): PageStyle {
+  const p: Partial<PageStyle> = raw ?? {};
+  const legacyHeaderProvided = p.pageHeader !== undefined;
+  const legacyHeader =
+    legacyHeaderProvided && p.pageHeader ? p.pageHeader : null;
+  const legacyFooterProvided = p.pageFooter !== undefined;
+  const legacyFooter =
+    legacyFooterProvided && p.pageFooter ? p.pageFooter : null;
+
+  const structuredHeaderPresent =
+    p.pageHeaderShow !== undefined || p.pageHeaderLeft !== undefined || p.pageHeaderCenter !== undefined;
+  const structuredFooterPresent =
+    p.pageFooterShow !== undefined || p.pageFooterLeft !== undefined || p.pageFooterCenter !== undefined;
+
+  // A legacy string explicitly re-set on an already-structured preset turns
+  // the corresponding header/footer back on — but ONLY when the structured
+  // fields are absent or the legacy key is unambiguously authoritative
+  // (single layout, center slot not explicitly a non-text slot).
+  const headerTurnedOnByLegacy =
+    legacyHeaderProvided &&
+    legacyHeader !== null &&
+    (!structuredHeaderPresent ||
+      (p.pageHeaderCenter == null && (p.pageHeaderLayout ?? 'single') === 'single'));
+  const footerTurnedOnByLegacy =
+    legacyFooterProvided &&
+    legacyFooter !== null &&
+    (!structuredFooterPresent ||
+      (p.pageFooterCenter == null && (p.pageFooterLayout ?? 'single') === 'single'));
+
+  const pageHeaderShow = headerTurnedOnByLegacy
+    ? true
+    : (p.pageHeaderShow ?? (structuredHeaderPresent ? false : legacyHeader !== null));
+  const pageFooterShow = footerTurnedOnByLegacy
+    ? true
+    : (p.pageFooterShow ?? (structuredFooterPresent ? false : legacyFooter !== null));
+
+  const pageHeaderCenter = headerTurnedOnByLegacy
+    ? legacyHeader
+    : p.pageHeaderCenter !== undefined
+      ? p.pageHeaderCenter
+      : legacyHeader;
+  const pageHeaderLeft = p.pageHeaderLeft ?? null;
+  const pageHeaderRight = p.pageHeaderRight ?? null;
+
+  const pageFooterCenter = footerTurnedOnByLegacy
+    ? 'text'
+    : p.pageFooterCenter ?? (legacyFooter !== null && !structuredFooterPresent ? 'text' : 'pageNumber');
+  const pageFooterText = footerTurnedOnByLegacy
+    ? legacyFooter
+    : p.pageFooterText !== undefined
+      ? p.pageFooterText
+      : legacyFooter;
+
+  const pageHeaderLayoutOut = safeEnum(p.pageHeaderLayout, HEADER_FOOTER_LAYOUTS, 'single');
+  const pageFooterLayoutOut = safeEnum(p.pageFooterLayout, HEADER_FOOTER_LAYOUTS, 'single');
+  const pageFooterCenterOut = safeEnum(pageFooterCenter, FOOTER_SLOT_TYPES, 'pageNumber');
+
+  return {
+    size: p.size ?? 'A4',
+    landscape: p.landscape ?? false,
+    marginTopMm: p.marginTopMm ?? 25,
+    marginRightMm: p.marginRightMm ?? 20,
+    marginBottomMm: p.marginBottomMm ?? 25,
+    marginLeftMm: p.marginLeftMm ?? 25,
+    headerSpacingMm: p.headerSpacingMm ?? 10,
+    footerSpacingMm: p.footerSpacingMm ?? 10,
+    // Legacy strings kept in sync so older code paths keep working. Only
+    // emitted when they faithfully describe the structured state.
+    pageHeader:
+      pageHeaderShow && pageHeaderLayoutOut === 'single'
+        ? (pageHeaderCenter ?? pageHeaderLeft ?? pageHeaderRight)
+        : null,
+    pageFooter:
+      pageFooterShow && pageFooterCenterOut === 'text' ? (pageFooterText ?? '') : null,
+    pageHeaderShow,
+    pageHeaderLayout: pageHeaderLayoutOut,
+    pageHeaderAlign: safeEnum(p.pageHeaderAlign, ALIGNMENTS, 'right'),
+    pageHeaderLeft,
+    pageHeaderCenter,
+    pageHeaderRight,
+    pageFooterShow,
+    pageFooterLayout: pageFooterLayoutOut,
+    pageFooterAlign: safeEnum(p.pageFooterAlign, ALIGNMENTS, 'center'),
+    pageFooterLeft: safeEnum(p.pageFooterLeft, FOOTER_SLOT_TYPES, 'none'),
+    pageFooterCenter: pageFooterCenterOut,
+    pageFooterRight: safeEnum(p.pageFooterRight, FOOTER_SLOT_TYPES, 'none'),
+    pageFooterText,
+  };
+}
+
+/**
+ * Loose input shape accepted by migratePreset: every field optional, and the
+ * `page` / `titlePage` sub-objects may themselves be partial (older preset
+ * versions lack the newer members).
+ */
+export type PresetInput = {
+  [K in keyof DocumentPreset]?: K extends 'page'
+    ? Partial<PageStyle>
+    : K extends 'titlePage'
+      ? Partial<TitlePageStyle>
+      : DocumentPreset[K];
+};
+
 /**
  * Migrate a possibly-v1 preset to the v2 shape by filling in defaults
  * for any missing fields. This makes old saved presets still loadable.
  */
-export function migratePreset(raw: Partial<DocumentPreset>): DocumentPreset {
+export function migratePreset(raw: PresetInput): DocumentPreset {
   const layout: LayoutDensity = { ...DEFAULT_LAYOUT_DENSITY, ...(raw.layout ?? {}) };
   const pageBreaks: PageBreakBehavior = { ...DEFAULT_PAGE_BREAK_BEHAVIOR, ...(raw.pageBreaks ?? {}) };
   const projectStructure: ProjectStructureStyle = {
@@ -126,14 +277,21 @@ export function migratePreset(raw: Partial<DocumentPreset>): DocumentPreset {
     ? { ...raw.projectHeaders, alignment: raw.projectHeaders.alignment ?? 'left' }
     : ({} as any);
 
-  // Migrate title page — add alignment + verticalOffsetPt.
-  const titlePage: TitlePageStyle = raw.titlePage
-    ? {
-        ...raw.titlePage,
-        alignment: raw.titlePage.alignment ?? 'center',
-        verticalOffsetPt: raw.titlePage.verticalOffsetPt ?? 100,
-      }
-    : ({} as any);
+  // Migrate title page — add alignment + verticalOffsetPt + verticalAlignment.
+  const titlePage: TitlePageStyle = {
+    enabled: raw.titlePage?.enabled ?? true,
+    showTitle: raw.titlePage?.showTitle ?? true,
+    showSubtitle: raw.titlePage?.showSubtitle ?? false,
+    showAuthor: raw.titlePage?.showAuthor ?? false,
+    showCourse: raw.titlePage?.showCourse ?? false,
+    showUniversity: raw.titlePage?.showUniversity ?? false,
+    showDate: raw.titlePage?.showDate ?? true,
+    showVersion: raw.titlePage?.showVersion ?? false,
+    showDescription: raw.titlePage?.showDescription ?? false,
+    alignment: raw.titlePage?.alignment ?? 'center',
+    verticalOffsetPt: raw.titlePage?.verticalOffsetPt ?? 100,
+    verticalAlignment: safeEnum(raw.titlePage?.verticalAlignment, VERTICAL_ALIGNMENTS, 'top'),
+  };
 
   return {
     id: raw.id ?? '',
@@ -141,7 +299,7 @@ export function migratePreset(raw: Partial<DocumentPreset>): DocumentPreset {
     description: raw.description ?? '',
     builtIn: raw.builtIn ?? false,
     syntaxTheme: raw.syntaxTheme ?? 'github-dark',
-    page: raw.page ?? ({} as any),
+    page: migratePageStyle(raw.page),
     layout,
     pageBreaks,
     typography,
@@ -151,7 +309,7 @@ export function migratePreset(raw: Partial<DocumentPreset>): DocumentPreset {
     projectHeaders,
     projectStructure,
     titlePage,
-    colors: raw.colors ?? ({} as any),
+    colors: { ...DEFAULT_DOCUMENT_COLORS, ...(raw.colors ?? {}) },
     misc,
     metadata: raw.metadata,
     // Legacy fields kept in sync.
@@ -165,6 +323,14 @@ export function migratePreset(raw: Partial<DocumentPreset>): DocumentPreset {
 function migrateCodeBlock(c: Partial<CodeBlockStyle>): CodeBlockStyle {
   // Determine borderStyle: if borderColor is null/empty, treat as 'none'.
   const hasNoBorder = !c.borderColor;
+  const rawBorder = c.borderStyle ?? (hasNoBorder ? 'none' : 'solid');
+  // Validate — older presets only knew 'none' | 'solid'; accept the new
+  // dotted / dashed values as well.
+  const borderStyle = (['none', 'solid', 'dotted', 'dashed'] as const).includes(
+    rawBorder as any,
+  )
+    ? (rawBorder as CodeBlockStyle['borderStyle'])
+    : 'none';
   return {
     font: c.font ?? 'JetBrains Mono',
     fontSizePt: c.fontSizePt ?? 9,
@@ -173,7 +339,7 @@ function migrateCodeBlock(c: Partial<CodeBlockStyle>): CodeBlockStyle {
     textColor: c.textColor ?? '#24292e',
     backgroundColor: c.backgroundColor ?? '#f6f8fa',
     useSyntaxThemeBackground: c.useSyntaxThemeBackground ?? true,
-    borderStyle: c.borderStyle ?? (hasNoBorder ? 'none' : 'solid'),
+    borderStyle,
     borderColor: c.borderColor ?? '#d0d7de',
     borderWidthPt: c.borderWidthPt ?? 0.5,
     borderRadiusPt: c.borderRadiusPt ?? 0,

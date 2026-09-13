@@ -1,4 +1,4 @@
-import '@testing-library/jest-dom';
+import '@testing-library/jest-dom/vitest';
 
 // jsdom doesn't implement matchMedia — stub it.
 if (!window.matchMedia) {

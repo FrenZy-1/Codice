@@ -10,6 +10,8 @@ import { useMemo, useState, useCallback } from 'react';
 import type { DiscoveredFile, ProjectEntry } from '@/types';
 import { useAppState } from '@/hooks/useAppState';
 import { formatBytes } from '@/lib/fileDiscovery';
+import { findDuplicateFileNames, duplicateContext, fileSelectionKey } from '@/lib/fileDuplicates';
+import { filterVisibleFiles } from '@/lib/bulkSelection';
 import { languageLabel } from '@/lib/languageDetection';
 import { ChevronRight, ChevronDown, File, Folder, FolderOpen } from '@/components/common/Icons';
 
@@ -80,34 +82,30 @@ export function FileTree({
 
   const selectedIds = getSelectedFiles(project.id);
 
-  const filteredFiles = useMemo(() => {
-    let files = project.files;
-    if (!showExcluded) {
-      files = files.filter(
-        (f) => !f.excluded || state.inclusions[project.id]?.has(f.id),
-      );
-    }
-    if (extensionFilter) {
-      const ext = extensionFilter.toLowerCase();
-      files = files.filter((f) => {
-        const dot = f.name.lastIndexOf('.');
-        const fext = dot >= 0 ? f.name.slice(dot).toLowerCase() : '';
-        return fext === ext;
-      });
-    }
-    if (searchQuery) {
-      const q = searchQuery.toLowerCase();
-      files = files.filter((f) => f.relativePath.toLowerCase().includes(q));
-    }
-    return files;
-  }, [
-    project.files,
-    project.id,
-    showExcluded,
-    extensionFilter,
-    searchQuery,
-    state.inclusions,
-  ]);
+  /** Filenames that occur more than once in this project — shown with path context. */
+  const duplicateNames = useMemo(
+    () => findDuplicateFileNames(project.files),
+    [project.files],
+  );
+
+  const filteredFiles = useMemo(
+    () =>
+      filterVisibleFiles(project.files, {
+        showExcluded,
+        extensionFilter,
+        searchQuery,
+        inclusions: state.inclusions,
+        projectId: project.id,
+      }),
+    [
+      project.files,
+      project.id,
+      showExcluded,
+      extensionFilter,
+      searchQuery,
+      state.inclusions,
+    ],
+  );
 
   const tree = useMemo(() => {
     const t = buildTree(filteredFiles);
@@ -257,37 +255,50 @@ export function FileTree({
     const isSelected = isFileSelected(file);
     const isExcluded =
       file.excluded && !state.inclusions[project.id]?.has(file.id);
+    // Only duplicated filenames get path context — unique names stay clean.
+    const needsContext = duplicateNames.has(file.name);
 
     return (
       <div
-        key={`file-${file.id}`}
-        className={`group flex items-center gap-1.5 rounded px-1.5 py-0.5 hover-surface ${
+        key={`file-${fileSelectionKey(file)}`}
+        className={`group flex items-start gap-1.5 rounded px-1.5 py-0.5 hover-surface ${
           isExcluded ? 'opacity-50' : ''
         }`}
         style={{ paddingLeft: depth * 12 + 22 }}
       >
         <input
           type="checkbox"
+          className="mt-1 h-3.5 w-3.5"
           checked={isSelected}
           onChange={(e) => toggleFile(file, e.target.checked)}
-          className="h-3.5 w-3.5"
+          aria-label={`Select ${file.relativePath}`}
         />
-        <span className="text-secondary">
+        <span className="mt-0.5 text-secondary">
           <File size={13} />
         </span>
-        <span className="text-sm text-primary truncate flex-1" title={file.name}>
-          {file.name}
+        <span className="min-w-0 flex-1">
+          <span className="block truncate text-sm text-primary" title={file.relativePath}>
+            {file.name}
+          </span>
+          {needsContext && duplicateContext(file) && (
+            <span
+              className="block truncate text-[10px] text-muted"
+              title={file.relativePath}
+            >
+              {duplicateContext(file)}
+            </span>
+          )}
         </span>
         {file.language && (
-          <span className="text-[10px] text-muted uppercase tracking-wide hidden md:inline">
+          <span className="mt-0.5 text-[10px] text-muted uppercase tracking-wide hidden md:inline">
             {languageLabel(file.language)}
           </span>
         )}
-        <span className="text-[10px] text-muted pr-2 tabular-nums">
+        <span className="mt-0.5 text-[10px] text-muted pr-2 tabular-nums">
           {formatBytes(file.size)}
         </span>
         {isExcluded && (
-          <span className="text-[10px] text-warning pr-2">
+          <span className="mt-0.5 text-[10px] text-warning pr-2">
             {file.exclusionReason ?? 'excluded'}
           </span>
         )}

@@ -140,7 +140,7 @@ function ToastViewport({
 }) {
   return (
     <div
-      className="pointer-events-none fixed bottom-4 right-4 z-[100] flex w-full max-w-sm flex-col gap-2"
+      className="codice-print-hidden pointer-events-none fixed bottom-4 right-4 z-[100] flex w-full max-w-sm flex-col gap-2"
       role="region"
       aria-label="Notifications"
     >
@@ -176,7 +176,7 @@ function ToastCard({ toast, onDismiss }: { toast: Toast; onDismiss: () => void }
     <div
       role="status"
       aria-live="polite"
-      className={`pointer-events-auto flex items-start gap-3 rounded-md border border-[var(--color-border)] border-l-4 ${borderColor} bg-[var(--color-surface-elevated)] px-4 py-3 shadow-lg`}
+      className={`codice-toast-in pointer-events-auto flex items-start gap-3 rounded-md border border-[var(--color-border)] border-l-4 ${borderColor} bg-[var(--color-surface-elevated)] px-4 py-3 shadow-lg`}
     >
       <div className={`mt-0.5 flex-shrink-0 ${iconColor}`}>
         {toast.kind === 'success' ? (
