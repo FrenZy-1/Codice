@@ -2,12 +2,12 @@ import type { Metadata } from "next";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "Codice — Source code → DOCX · PDF · ODT",
+  title: "Codice",
   description: "Browser-based tool that turns project folders into polished DOCX, PDF, and ODT documents. Local-first, no telemetry.",
-  keywords: ["Codice", "DOCX", "PDF", "ODT", "syntax highlighting", "source code", "documentation"],
+  keywords: ["Codice", "DOCX", "PDF", "ODT", "syntax highlighting", "source code", "documentation", "code", "document"],
   authors: [{ name: "Codice" }],
   icons: {
-    icon: "https://z-cdn.chatglm.cn/z-ai/static/logo.svg",
+    icon: "/logo.svg",
   },
   openGraph: {
     title: "Codice",

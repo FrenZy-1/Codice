@@ -200,7 +200,7 @@ function AppInner() {
               Codice
             </div>
             <div className="text-[10px] text-muted">
-              Source code → DOCX · PDF · ODT
+              Source code → Documented code
             </div>
           </div>
         </div>
@@ -278,9 +278,16 @@ function AppInner() {
       </header>
 
       {/* Privacy banner */}
-      <div className="border-b border-app bg-app px-4 py-1 text-center text-[11px] text-muted">
-        Your source code stays on your machine. All processing happens in your browser — nothing is uploaded.
+      <div className="border-b border-app bg-app px-4 py-1 text-[11px] text-muted flex justify-center items-center">
+        All processing happens in your browser — nothing is uploaded.
+        <span
+          title="Okay... SOME data gets uploaded 😚👉👈. Maybe your dog's birth certificate? Maybe?"
+          aria-label="Privacy information and a joke."
+        >
+          <Sparkles className="cursor-pointer" size={14} style={{ color: 'var(--color-accent)' }} />
+        </span>
       </div>
+
 
       {/* Main content */}
       <div className="flex flex-1 overflow-hidden">
