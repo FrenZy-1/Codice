@@ -26,12 +26,17 @@ Codice is a local-first documentation generator. Upload a project (or drop loose
 ### Live preview
 - **True multi-page preview** with real pagination — page size, orientation and margins respond instantly.
 - Every meaningful setting is visible: headers/footers (per-column content), vertical alignment (Top / Center / Bottom), code borders, colors and fonts.
-- **Change highlighting** — a ~1 s subtle flash marks the section affected by your last edit (preview-only; never exported).
+- **TOC page alignment** — the Table of Contents gets its own Horizontal (Left/Center/Right) × Vertical (Top/Center/Bottom) group alignment, honored in the preview and in all three exporters.
+- **Multi-project preview tabs** — in “Separate document per project” mode the preview shows browser-style tabs, one document per project; combined mode keeps the single sequential document.
+- **Change highlighting** — a ~1 s subtle flash marks ONLY the section affected by your last edit (Title edits flash the title object, not every heading), and the preview repositions so the affected object sits in the upper part of the viewport.
 - **Outline panel** — clickable document map (title → TOC → project → Project Structure / Source Files → files) with scroll-spy, glyph tones and a one-click **copy outline as indented text**.
 - **Print-friendly preview** — a print stylesheet so the preview doubles as a paper draft.
 
 ### Export
 - **DOCX** (via `docx`), **PDF** (via `jsPDF`, with embedded DejaVu fonts so Unicode box-drawing glyphs render correctly) and **ODT** — all three share the same document model, so what you preview is what you get.
+- **Vertical export rail** — filename / format / mode / Generate live in a compact panel between the sidebar and the preview (never a footer bar); it stacks below the preview on narrow screens.
+- **Title-page group alignment** — Horizontal and Vertical (Top/Center/Bottom) position the whole title block coherently in every format, with the group kept together (never split across pages).
+- **TOC owns its page** — Title → page break → TOC → page break → content in DOCX, PDF and ODT alike (hard `fo:break-before` page breaks in ODT that every office suite honors).
 - **Single document** or **separate mode** — one document per project, zipped together (with collision-safe filenames: `demo.docx`, `demo_2.docx`, …).
 - **Source ZIP export** — bundle the selected files exactly as shown in the tree.
 - **Before-you-build archive previews** — inspect the exact ZIP contents (tree + sizes / planned document names) before committing to the export.

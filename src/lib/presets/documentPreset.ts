@@ -230,6 +230,14 @@ export interface ProjectStructureStyle {
   dirsFirst: boolean;
 }
 
+/** Table-of-contents page style (spec §4 — TOC often occupies its own page). */
+export interface TocStyle {
+  /** Horizontal alignment of the TOC content group. */
+  horizontalAlignment: Alignment;
+  /** Vertical alignment of the TOC content group within its page. */
+  verticalAlignment: VerticalAlignment;
+}
+
 export interface TitlePageStyle {
   enabled: boolean;
   showTitle: boolean;
@@ -301,6 +309,8 @@ export interface DocumentPreset {
   projectHeaders: ProjectHeaderStyle;
   projectStructure: ProjectStructureStyle;
   titlePage: TitlePageStyle;
+  /** Table-of-contents page alignment (spec §4). */
+  toc: TocStyle;
   colors: DocumentColors;
   misc: MiscDocumentOptions;
   /** Default metadata to apply when this preset is selected. */
@@ -328,6 +338,7 @@ export interface DocumentPresetExport {
   projectHeaders: ProjectHeaderStyle;
   projectStructure: ProjectStructureStyle;
   titlePage: TitlePageStyle;
+  toc: TocStyle;
   colors: DocumentColors;
   misc: MiscDocumentOptions;
   metadata?: Partial<DocumentMetadata>;

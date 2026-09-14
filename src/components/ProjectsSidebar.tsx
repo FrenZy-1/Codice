@@ -273,7 +273,27 @@ export function ProjectsSidebar({ selectedProjectId, onSelectProject }: Props) {
         <div className="flex min-h-0 flex-1 flex-col border-t border-app">
           <div className="min-h-0 flex-shrink space-y-2 overflow-y-auto p-3">
             <div className="flex items-center gap-2">
-              <div className="relative flex-1">
+              {/* spec §9 — the extension select is pinned to a fixed width so
+                  the search input keeps a sensible, clickable text-field
+                  width (.select's width:100% fills this wrapper instead of
+                  fighting flex-1 for the whole row). */}
+              <div className="w-24 flex-shrink-0">
+                <select
+                  className="select"
+                  value={extensionFilter}
+                  onChange={(e) => setExtensionFilter(e.target.value)}
+                  title="Filter by extension"
+                  aria-label="Filter by extension"
+                >
+                  <option value="">All</option>
+                  {extensions.map((ext) => (
+                    <option key={ext} value={ext}>
+                      {ext}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div className="relative min-w-0 flex-1">
                 <Search
                   size={14}
                   className="absolute left-2 top-1/2 -translate-y-1/2 text-muted"
@@ -287,19 +307,6 @@ export function ProjectsSidebar({ selectedProjectId, onSelectProject }: Props) {
                   onChange={(e) => setSearchQuery(e.target.value)}
                 />
               </div>
-              <select
-                className="select w-24"
-                value={extensionFilter}
-                onChange={(e) => setExtensionFilter(e.target.value)}
-                title="Filter by extension"
-              >
-                <option value="">All</option>
-                {extensions.map((ext) => (
-                  <option key={ext} value={ext}>
-                    {ext}
-                  </option>
-                ))}
-              </select>
             </div>
             <label className="flex items-center gap-2 text-xs text-secondary cursor-pointer">
               <input

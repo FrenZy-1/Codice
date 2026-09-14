@@ -28,6 +28,7 @@
 
 import JSZip from 'jszip';
 import type {
+  DocumentMetadata,
   DocumentModel,
   DocumentOptions,
   ExportOptions,
@@ -124,6 +125,26 @@ const PAGE_DIMENSIONS_CM: Record<string, [number, number]> = {
 /** pt → cm conversion factor (1pt = 1/72in, 1in = 2.54cm). */
 const PT_TO_CM = 2.54 / 72;
 
+/**
+ * Estimated rendered height of the title-page group (cm) from the metadata
+ * actually present (spec §17 — same per-field model as the DOCX exporter:
+ * line height ≈ 1.15 × font size). The old fixed 9cm constant placed small
+ * groups visibly ABOVE the bottom when Vertical = Bottom.
+ */
+export function estimateTitleGroupHeightCm(metadata: DocumentMetadata): number {
+  let pt = 28 * 1.15; // title (28pt)
+  if (metadata.subtitle) pt += 14 * 1.15;
+  if (metadata.author) pt += 14 * 1.15;
+  if (metadata.course) pt += 12 * 1.15;
+  if (metadata.university) pt += 12 * 1.15;
+  pt += 11 * 1.15; // "Generated: …"
+  if (metadata.version) pt += 11 * 1.15;
+  if (metadata.description) pt += 11 * 1.15 * 3; // description ≈ 3 wrapped lines
+  // + per-paragraph vertical margins from the Title/Subtitle/TextBody styles
+  // (~0.2-0.4cm each) so the placement estimate matches real rendering.
+  return pt * PT_TO_CM + 1.5;
+}
+
 /** Approximate rendered height of the title-page group (title + meta rows). */
 const TITLE_PAGE_GROUP_HEIGHT_CM = 9;
 
@@ -148,21 +169,38 @@ function titleAlignToOdf(align: 'left' | 'center' | 'right' | undefined): string
  * The result is clamped to the printable area so the group can never be
  * pushed off the page. Pure helper — exported for tests.
  */
-export function computeTitlePageSpacerCm(options: DocumentOptions, pageHeightCm: number): number {
-  const textHeightCm = Math.max(0, pageHeightCm - (options.margins.top + options.margins.bottom) / 10);
+export function computeTitlePageSpacerCm(
+  options: DocumentOptions,
+  pageHeightCm: number,
+  groupHeightCm: number = TITLE_PAGE_GROUP_HEIGHT_CM,
+): number {
+  // A master-page footer REDUCES the body text area (LibreOffice lays the
+  // footer out inside the bottom margin and shrinks the body accordingly).
+  const footerAllowance = options.pageFooterShow === false ? 0 : 1.6;
+  const textHeightCm = Math.max(
+    0,
+    pageHeightCm - (options.margins.top + options.margins.bottom) / 10 - footerAllowance,
+  );
   const vAlign = options.titlePageVerticalAlignment ?? 'top';
   const offsetCm = Math.max(0, options.titlePageVerticalOffsetPt ?? 0) * PT_TO_CM;
+  const groupH = Math.min(groupHeightCm, textHeightCm);
   let spacer: number;
   if (vAlign === 'center') {
     // Center/Center places the group AT the center — the offset is a
     // top-mode nudge and must not skew centering (spec §9/§29).
-    spacer = Math.max(0, (textHeightCm - TITLE_PAGE_GROUP_HEIGHT_CM) / 2);
+    spacer = Math.max(0, (textHeightCm - groupH) / 2);
   } else if (vAlign === 'bottom') {
-    spacer = Math.max(0, textHeightCm - TITLE_PAGE_GROUP_HEIGHT_CM) + offsetCm;
+    // Bottom = the group's bottom edge sits AT the text-area bottom
+    // (spec §17, same convention as the PDF and DOCX exporters). The
+    // offset applies only in top mode.
+    spacer = Math.max(0, textHeightCm - groupH);
   } else {
     spacer = offsetCm;
   }
-  return Math.min(Math.max(spacer, 0), Math.max(0, textHeightCm - 2));
+  // Group-aware clamp with a 1.2cm safety band so consumer rounding (line
+  // metrics, per-paragraph spacing) can never spill the group onto the
+  // next page.
+  return Math.min(Math.max(spacer, 0), Math.max(0, textHeightCm - groupH - 1.2));
 }
 
 /**
@@ -173,8 +211,67 @@ export function computeTitlePageSpacerCm(options: DocumentOptions, pageHeightCm:
  * and override fo:text-align. The vertical spacer style carries the computed
  * fo:margin-top that pushes the group toward its vertical position.
  */
-function buildTitlePageAutoStyles(odfAlign: string, spacerCm: number): string {
+/**
+ * Top offset (cm) for the TOC content group (spec §4) — same spacer model
+ * as the title page. The block height is estimated from the entry count
+ * (each TOC line ≈ bodyFontSize × 1.4 line-height). Pure helper — exported
+ * for tests.
+ */
+export function computeTocSpacerCm(
+  options: DocumentOptions,
+  pageHeightCm: number,
+  entryLines: number,
+): number {
+  const vertical = options.tocVerticalAlignment ?? 'top';
+  if (vertical === 'top') return 0;
+  // Footer reserves body area (see computeTitlePageSpacerCm).
+  const footerAllowance = options.pageFooterShow === false ? 0 : 1.6;
+  const textHeightCm = Math.max(
+    0,
+    pageHeightCm - (options.margins.top + options.margins.bottom) / 10 - footerAllowance,
+  );
+  const lineCm = Math.max(0.2, options.bodyFontSize * 1.4 * PT_TO_CM);
+  const blockH = Math.min(textHeightCm, entryLines * lineCm + 1.2);
+  if (vertical === 'center') {
+    return Math.max(0, (textHeightCm - blockH) / 2);
+  }
+  return Math.max(0, textHeightCm - blockH);
+}
+
+/**
+ * Automatic styles for the TOC page (spec §4): the heading + entries share
+ * ONE horizontal alignment; the first project heading after the TOC (and
+ * every later project) carries a HARD fo:break-before="page" so the TOC owns
+ * its page (spec §16) and each project starts at the top of a fresh page
+ * (spec §10) — replacing the old soft-page-break paragraphs that some
+ * ODF consumers ignore.
+ */
+function buildTocAutoStyles(odfAlign: string, spacerCm: number, breakBeforeToc: boolean): string {
   const alignProps = `<style:paragraph-properties fo:text-align="${odfAlign}" />`;
+  // The hard page break must ride on the FIRST paragraph of the TOC page.
+  // When a vertical-alignment spacer exists it is that first paragraph —
+  // putting the break on the heading instead would leave the spacer on the
+  // previous page and produce an empty page between title and TOC.
+  const spacerUsed = breakBeforeToc && spacerCm >= 0.05;
+  const headingBreak = breakBeforeToc && !spacerUsed;
+  const styles = [
+    `<style:style style:name="TocHeading1" style:family="paragraph" style:parent-style-name="Heading1"><style:paragraph-properties fo:text-align="${odfAlign}"${headingBreak ? ' fo:break-before="page"' : ''} /></style:style>`,
+    `<style:style style:name="TocEntry" style:family="paragraph" style:parent-style-name="TextBody">${alignProps}</style:style>`,
+    // Hard page break for project headings that start a new page.
+    `<style:style style:name="PBHeading1" style:family="paragraph" style:parent-style-name="Heading1"><style:paragraph-properties fo:break-before="page" /></style:style>`,
+  ];
+  if (spacerCm >= 0.05) {
+    styles.push(
+      `<style:style style:name="TocSpacer" style:family="paragraph"><style:paragraph-properties fo:margin-top="${spacerCm.toFixed(2)}cm" fo:margin-bottom="0cm" fo:line-height="0.15cm"${spacerUsed ? ' fo:break-before="page"' : ''} /><style:text-properties fo:font-size="1pt" /></style:style>`,
+    );
+  }
+  return styles.join('');
+}
+
+function buildTitlePageAutoStyles(odfAlign: string, spacerCm: number): string {
+  // keep-with-next chains the group together so it can never SPLIT across a
+  // page boundary (title staying behind while author flows on) (spec §18).
+  const alignProps = `<style:paragraph-properties fo:text-align="${odfAlign}" fo:keep-with-next="always" />`;
   const styles = [
     `<style:style style:name="TPTitle" style:family="paragraph" style:parent-style-name="Title">${alignProps}</style:style>`,
     `<style:style style:name="TPSubtitle" style:family="paragraph" style:parent-style-name="Subtitle">${alignProps}</style:style>`,
@@ -184,7 +281,7 @@ function buildTitlePageAutoStyles(odfAlign: string, spacerCm: number): string {
   // stray empty first line for the default top/zero-offset layout.
   if (spacerCm >= 0.05) {
     styles.push(
-      `<style:style style:name="TPSpacer" style:family="paragraph"><style:paragraph-properties fo:margin-top="${spacerCm.toFixed(2)}cm" fo:margin-bottom="0cm" /></style:style>`,
+      `<style:style style:name="TPSpacer" style:family="paragraph"><style:paragraph-properties fo:margin-top="${spacerCm.toFixed(2)}cm" fo:margin-bottom="0cm" fo:line-height="0.15cm" /><style:text-properties fo:font-size="1pt" /></style:style>`,
     );
   }
   return styles.join('');
@@ -204,6 +301,7 @@ export function buildStylesXml(options: DocumentOptions, model: DocumentModel): 
     xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0"
     xmlns:style="urn:oasis:names:tc:opendocument:xmlns:style:1.0"
     xmlns:text="urn:oasis:names:tc:opendocument:xmlns:text:1.0"
+    xmlns:table="urn:oasis:names:tc:opendocument:xmlns:table:1.0"
     xmlns:fo="urn:oasis:names:tc:opendocument:xmlns:xsl-fo-compatible:1.0"
     xmlns:svg="urn:oasis:names:tc:opendocument:xmlns:svg-compatible:1.0"
     office:version="1.2">
@@ -231,6 +329,12 @@ export function buildStylesXml(options: DocumentOptions, model: DocumentModel): 
     <style:style style:name="CodeLine" style:family="paragraph">
       <style:paragraph-properties fo:margin-top="0pt" fo:margin-bottom="0pt" fo:line-height="${Math.round(options.codeLineHeight * 100)}%" fo:background-color="#${hexToOdf(options.codeBackground || '#ffffff')}"${codeBorderStyleAttr} fo:padding="0.05cm" />
       <style:text-properties fo:font-family="${xmlEscape(options.codeFont)}" fo:font-size="${options.codeFontSize}pt" fo:color="#24292e" />
+    </style:style>
+    <style:style style:name="StructureLine" style:family="paragraph">
+      <!-- The structure tree is NOT a code block: no code background/border
+           (dark presets made the tree dark-on-dark/invisible — spec §7). -->
+      <style:paragraph-properties fo:margin-top="0pt" fo:margin-bottom="0pt" fo:line-height="${Math.round(options.codeLineHeight * 100)}%" fo:padding="0.02cm" />
+      <style:text-properties fo:font-family="${xmlEscape(options.codeFont)}" fo:font-size="${Math.max(6, options.codeFontSize - 1)}pt" fo:color="#${hexToOdf(options.projectStructureColor || '#3c3c3c')}" />
     </style:style>
     <style:style style:name="FileHeader" style:family="paragraph">
       <style:paragraph-properties fo:margin-top="0.2cm" fo:margin-bottom="0.1cm" fo:border-bottom="0.5pt solid #d0d7de" fo:padding="0.05cm" />
@@ -261,6 +365,48 @@ export function buildStylesXml(options: DocumentOptions, model: DocumentModel): 
     </style:style>
     <style:style style:name="PageFooterPara" style:family="paragraph">
       <style:paragraph-properties fo:text-align="${options.pageFooterAlign === 'left' ? 'start' : options.pageFooterAlign === 'right' ? 'end' : 'center'}" fo:border-top="0.5pt solid #d0d7de" fo:padding-top="0.05cm" />
+      <style:text-properties fo:font-family="${xmlEscape(options.bodyFont)}" fo:font-size="9pt" fo:color="#787878" />
+    </style:style>
+    <!-- Region table for dual/triple headers/footers: one borderless row of
+         equal-width cells so left/center/right slots keep their POSITIONS
+         (mirrors the DOCX tab stops and the PDF x-coordinates, spec §8/§9). -->
+    <style:style style:name="HFTable" style:family="table">
+      <style:table-properties style:width="${hfContentWidthCm(options)}cm" table:align="left" fo:border="none" />
+    </style:style>
+    <style:style style:name="HFCol" style:family="table-column">
+      <style:table-column-properties style:column-width="${(hfContentWidthCm(options) / 3).toFixed(3)}cm" />
+    </style:style>
+    <style:style style:name="HFCell" style:family="table-cell">
+      <style:table-cell-properties fo:border="none" fo:padding="0cm" />
+    </style:style>
+    <style:style style:name="HFHeaderCell" style:family="table-cell">
+      <style:table-cell-properties fo:border-bottom="0.5pt solid #d0d7de" fo:padding="0cm" fo:padding-bottom="0.05cm" />
+    </style:style>
+    <style:style style:name="HFFooterCell" style:family="table-cell">
+      <style:table-cell-properties fo:border-top="0.5pt solid #d0d7de" fo:padding="0cm" fo:padding-top="0.05cm" />
+    </style:style>
+    <style:style style:name="HFHeaderLeft" style:family="paragraph">
+      <style:paragraph-properties fo:text-align="start" />
+      <style:text-properties fo:font-family="${xmlEscape(options.bodyFont)}" fo:font-size="9pt" fo:color="#787878" />
+    </style:style>
+    <style:style style:name="HFHeaderCenter" style:family="paragraph">
+      <style:paragraph-properties fo:text-align="center" />
+      <style:text-properties fo:font-family="${xmlEscape(options.bodyFont)}" fo:font-size="9pt" fo:color="#787878" />
+    </style:style>
+    <style:style style:name="HFHeaderRight" style:family="paragraph">
+      <style:paragraph-properties fo:text-align="end" />
+      <style:text-properties fo:font-family="${xmlEscape(options.bodyFont)}" fo:font-size="9pt" fo:color="#787878" />
+    </style:style>
+    <style:style style:name="HFFooterLeft" style:family="paragraph">
+      <style:paragraph-properties fo:text-align="start" />
+      <style:text-properties fo:font-family="${xmlEscape(options.bodyFont)}" fo:font-size="9pt" fo:color="#787878" />
+    </style:style>
+    <style:style style:name="HFFooterCenter" style:family="paragraph">
+      <style:paragraph-properties fo:text-align="center" />
+      <style:text-properties fo:font-family="${xmlEscape(options.bodyFont)}" fo:font-size="9pt" fo:color="#787878" />
+    </style:style>
+    <style:style style:name="HFFooterRight" style:family="paragraph">
+      <style:paragraph-properties fo:text-align="end" />
       <style:text-properties fo:font-family="${xmlEscape(options.bodyFont)}" fo:font-size="9pt" fo:color="#787878" />
     </style:style>
   </office:automatic-styles>
@@ -306,11 +452,45 @@ function odtHeaderFooterInner(template: string, ctx: TokenContext): string {
   return inner;
 }
 
+/** Usable content width in cm (page minus margins) for header/footer tables. */
+function hfContentWidthCm(options: DocumentOptions): number {
+  const [wCm] = PAGE_DIMENSIONS_CM[options.pageSize] ?? PAGE_DIMENSIONS_CM.A4;
+  return Math.max(4, wCm - options.margins.left / 10 - options.margins.right / 10);
+}
+
 /**
- * Master-page header/footer for the ODT. Structured slots are flattened to
- * a single region (the primary slot) — OpenDocument master pages render one
- * paragraph per region, and the primary slot preserves the template tokens
- * ({page}, {pages}, …) as live text fields.
+ * Region table for dual/triple header/footer layouts — one borderless row of
+ * equal-width cells so left/center/right slots keep their POSITIONS across
+ * viewers (mirrors DOCX tab stops + PDF x-coordinates, spec §8/§9).
+ */
+function hfRegionTable(
+  kind: 'header' | 'footer',
+  regions: Array<{ inner: string; align: 'left' | 'center' | 'right' }>,
+): string {
+  const cellStyle = kind === 'header' ? 'HFHeaderCell' : 'HFFooterCell';
+  const paraPrefix = kind === 'header' ? 'HFHeader' : 'HFFooter';
+  const cells = regions
+    .map(
+      (r) =>
+        `<table:table-cell table:style-name="${cellStyle}">` +
+        (r.inner
+          ? `<text:p text:style-name="${paraPrefix}${r.align === 'left' ? 'Left' : r.align === 'center' ? 'Center' : 'Right'}">${r.inner}</text:p>`
+          : '') +
+        `</table:table-cell>`,
+    )
+    .join('');
+  return (
+    `<table:table table:style-name="HFTable">` +
+    `<table:table-column table:style-name="HFCol" table:number-columns-repeated="${regions.length}" />` +
+    `<table:table-row>${cells}</table:table-row>` +
+    `</table:table>`
+  );
+}
+
+/**
+ * Master-page header/footer for the ODT. Single layout renders one aligned
+ * paragraph; dual/triple render a region table so the slots keep their
+ * horizontal positions (spec §9).
  */
 function buildMasterHeaderFooter(options: DocumentOptions, ctx: TokenContext): string {
   let xml = '';
@@ -318,16 +498,27 @@ function buildMasterHeaderFooter(options: DocumentOptions, ctx: TokenContext): s
   const showFooter = options.pageFooterShow ?? Boolean(options.pageFooter);
   if (showHeader) {
     const layout = options.pageHeaderLayout ?? 'single';
-    let text = '';
     if (layout === 'single') {
-      text = options.pageHeaderCenter ?? options.pageHeader ?? '';
-    } else if (layout === 'dual') {
-      text = [options.pageHeaderLeft, options.pageHeaderRight].filter(Boolean).join('    ');
+      const text = options.pageHeaderCenter ?? options.pageHeader ?? '';
+      if (text) {
+        xml += `<style:header><text:p text:style-name="PageHeaderPara">${odtHeaderFooterInner(text, ctx)}</text:p></style:header>`;
+      }
     } else {
-      text = [options.pageHeaderLeft, options.pageHeaderCenter, options.pageHeaderRight].filter(Boolean).join('    ');
-    }
-    if (text) {
-      xml += `<style:header><text:p text:style-name="PageHeaderPara">${odtHeaderFooterInner(text, ctx)}</text:p></style:header>`;
+      const regions =
+        layout === 'dual'
+          ? [
+              { inner: odtHeaderFooterInner(options.pageHeaderLeft ?? '', ctx), align: 'left' as const },
+              { inner: '', align: 'center' as const },
+              { inner: odtHeaderFooterInner(options.pageHeaderRight ?? '', ctx), align: 'right' as const },
+            ]
+          : [
+              { inner: odtHeaderFooterInner(options.pageHeaderLeft ?? '', ctx), align: 'left' as const },
+              { inner: odtHeaderFooterInner(options.pageHeaderCenter ?? '', ctx), align: 'center' as const },
+              { inner: odtHeaderFooterInner(options.pageHeaderRight ?? '', ctx), align: 'right' as const },
+            ];
+      if (regions.some((r) => r.inner)) {
+        xml += `<style:header>${hfRegionTable('header', regions)}</style:header>`;
+      }
     }
   }
   if (showFooter) {
@@ -351,20 +542,29 @@ function buildMasterHeaderFooter(options: DocumentOptions, ctx: TokenContext): s
           return '';
       }
     };
-    let template: string;
     if (layout === 'single') {
-      template = options.pageFooterCenter ? slotText(options.pageFooterCenter) : (options.pageFooter ?? '');
-    } else if (layout === 'dual') {
-      template = [slotText(options.pageFooterLeft), slotText(options.pageFooterRight)].filter(Boolean).join('    ');
+      const template = options.pageFooterCenter ? slotText(options.pageFooterCenter) : (options.pageFooter ?? '');
+      if (template) {
+        // Convert remaining {page}/{pages} tokens into live ODT text fields.
+        const inner = odtHeaderFooterInner(template, ctx);
+        xml += `<style:footer><text:p text:style-name="PageFooterPara">${inner}</text:p></style:footer>`;
+      }
     } else {
-      template = [slotText(options.pageFooterLeft), slotText(options.pageFooterCenter), slotText(options.pageFooterRight)]
-        .filter(Boolean)
-        .join('    ');
-    }
-    if (template) {
-      // Convert remaining {page}/{pages} tokens into live ODT text fields.
-      const inner = odtHeaderFooterInner(template, ctx);
-      xml += `<style:footer><text:p text:style-name="PageFooterPara">${inner}</text:p></style:footer>`;
+      const regions =
+        layout === 'dual'
+          ? [
+              { inner: odtHeaderFooterInner(slotText(options.pageFooterLeft), ctx), align: 'left' as const },
+              { inner: '', align: 'center' as const },
+              { inner: odtHeaderFooterInner(slotText(options.pageFooterRight), ctx), align: 'right' as const },
+            ]
+          : [
+              { inner: odtHeaderFooterInner(slotText(options.pageFooterLeft), ctx), align: 'left' as const },
+              { inner: odtHeaderFooterInner(slotText(options.pageFooterCenter), ctx), align: 'center' as const },
+              { inner: odtHeaderFooterInner(slotText(options.pageFooterRight), ctx), align: 'right' as const },
+            ];
+      if (regions.some((r) => r.inner)) {
+        xml += `<style:footer>${hfRegionTable('footer', regions)}</style:footer>`;
+      }
     }
   }
   return xml;
@@ -455,6 +655,71 @@ function renderTree(
 }
 
 /**
+ * Automatic text-style registry for <text:span> elements.
+ *
+ * ODF does NOT allow direct formatting attributes (fo:color, fo:font-family,
+ * …) on <text:span> — spans may only carry text:style-name pointing at an
+ * automatic style. LibreOffice silently DROPS direct attributes, which used
+ * to discard every syntax color (dark themes rendered code dark-on-dark,
+ * i.e. invisible — spec §7). All inline formatting now goes through this
+ * registry; the collected styles are emitted into content.xml's
+ * <office:automatic-styles> right before the document body.
+ */
+interface SpanFormat {
+  color?: string;
+  bold?: boolean;
+  italic?: boolean;
+  underline?: boolean;
+  fallbackFont?: string;
+}
+
+let spanStyleCounter = 0;
+const spanStyleIds = new Map<string, string>();
+const spanStyleDefs = new Map<string, SpanFormat>();
+
+/** Reset the registry (called at the start of each content build). */
+export function resetSpanStyles(): void {
+  spanStyleCounter = 0;
+  spanStyleIds.clear();
+  spanStyleDefs.clear();
+}
+
+/** Intern a format combination and return its automatic style name. */
+export function spanStyleName(format: SpanFormat): string {
+  const key = JSON.stringify([
+    format.color ?? '',
+    format.bold ?? false,
+    format.italic ?? false,
+    format.underline ?? false,
+    format.fallbackFont ?? '',
+  ]);
+  const existing = spanStyleIds.get(key);
+  if (existing) return existing;
+  spanStyleCounter += 1;
+  const name = `CS${spanStyleCounter}`;
+  spanStyleIds.set(key, name);
+  spanStyleDefs.set(name, format);
+  return name;
+}
+
+/** Emit the collected automatic text styles (empty string when none). */
+export function buildSpanAutoStyles(): string {
+  const defs: string[] = [];
+  for (const [name, f] of spanStyleDefs) {
+    const props: string[] = [];
+    if (f.color) props.push(`fo:color="#${hexToOdf(f.color)}"`);
+    if (f.bold) props.push('fo:font-weight="bold"');
+    if (f.italic) props.push('fo:font-style="italic"');
+    if (f.underline) props.push('style:text-underline-style="solid"');
+    if (f.fallbackFont) props.push(`fo:font-family="${xmlEscape(f.fallbackFont)}"`);
+    defs.push(
+      `<style:style style:name="${name}" style:family="text"><style:text-properties ${props.join(' ')} /></style:style>`,
+    );
+  }
+  return defs.join('');
+}
+
+/**
  * Render a single line of code as ODF XML (with Unicode-glyph run splitting
  * and whitespace preservation).
  *
@@ -474,8 +739,9 @@ export function renderCodeLine(
   if (options.showLineNumbers) {
     const numStr = String(line.lineNumber).padStart(lineNumberWidth, ' ');
     // Pad spaces + gutter gap must survive XML whitespace collapse.
+    const numStyle = spanStyleName({ color: '#999999' });
     parts.push(
-      `<text:span style:use-optimal-column-width="false" fo:color="#999999">${xmlEscapeWithSpaces(numStr + ' ')}</text:span>`,
+      `<text:span text:style-name="${numStyle}">${xmlEscapeWithSpaces(numStr + ' ')}</text:span>`,
     );
   }
 
@@ -483,14 +749,16 @@ export function renderCodeLine(
     const text = line.text.slice(tok.start, tok.start + tok.length);
     if (text.length === 0) continue;
     const color = tok.color ?? defaultColor;
-    const baseAttrs = [`fo:color="#${hexToOdf(color)}"`];
-    if (tok.bold) baseAttrs.push('fo:font-weight="bold"');
-    if (tok.italic) baseAttrs.push('fo:font-style="italic"');
-    if (tok.underline) baseAttrs.push('style:text-underline-style="solid"');
     // Only box-drawing glyph runs switch to the fallback font.
     for (const run of splitRuns(text)) {
-      const attrs = run.fallback ? [...baseAttrs, `fo:font-family="${GLYPH_FALLBACK_FONT}"`] : baseAttrs;
-      parts.push(`<text:span ${attrs.join(' ')}>${xmlEscapeWithSpaces(run.text)}</text:span>`);
+      const style = spanStyleName({
+        color,
+        bold: tok.bold,
+        italic: tok.italic,
+        underline: tok.underline,
+        fallbackFont: run.fallback ? GLYPH_FALLBACK_FONT : undefined,
+      });
+      parts.push(`<text:span text:style-name="${style}">${xmlEscapeWithSpaces(run.text)}</text:span>`);
     }
   }
 
@@ -555,6 +823,8 @@ function languageLabel(id: string | null): string {
 /** Build the content.xml for the document. */
 async function buildContentXml(model: DocumentModel): Promise<string> {
   const opts = model.options;
+  // Fresh automatic-text-style registry per build (module-level Maps).
+  resetSpanStyles();
   let defaultColor = '#24292e';
   try {
     const tc = await getThemeColors(opts.syntaxTheme);
@@ -586,14 +856,26 @@ async function buildContentXml(model: DocumentModel): Promise<string> {
         office:version="1.2">`,
   );
 
-  // Title-page support styles (group alignment + vertical spacer, §9/§21).
-  // Defined as automatic styles so they only ship when a title page exists.
+  // Title-page support styles (group alignment + vertical spacer, §9/§21)
+  // plus TOC page styles (alignment + spacer, §4) and the hard page-break
+  // heading styles (§15/§16/§10). Defined as automatic styles so they only
+  // ship when actually used.
   const titleAlign = titleAlignToOdf(opts.titlePageHorizontalAlignment);
   const pageDims = PAGE_DIMENSIONS_CM[opts.pageSize] ?? PAGE_DIMENSIONS_CM.A4;
-  const titleSpacerCm = computeTitlePageSpacerCm(opts, pageDims[1]);
-  if (opts.includeFrontMatter) {
-    parts.push(`<office:automatic-styles>${buildTitlePageAutoStyles(titleAlign, titleSpacerCm)}</office:automatic-styles>`);
-  }
+  const titleSpacerCm = computeTitlePageSpacerCm(
+    opts,
+    pageDims[1],
+    estimateTitleGroupHeightCm(model.metadata),
+  );
+  const tocAlign = titleAlignToOdf(opts.tocHorizontalAlignment);
+  const tocEntryLines =
+    2 + model.projects.reduce((acc, p) => acc + 1 + p.files.length, 0);
+  const tocSpacerCm = computeTocSpacerCm(opts, pageDims[1], tocEntryLines);
+  // NOTE: the automatic-styles XML is INSERTED after the body has been
+  // built (see autoStyleInsertIndex) — inline code/structure rendering
+  // registers character styles while the body renders, so the registry is
+  // only complete at the end (spec §7).
+  const autoStyleInsertIndex = parts.length;
 
   parts.push(`<office:body>`);
   parts.push(`<office:text>`);
@@ -637,36 +919,47 @@ async function buildContentXml(model: DocumentModel): Promise<string> {
       parts.push(
         `<text:p text:style-name="TPBody">${xmlEscape(md.description)}</text:p>`,
       );
-    parts.push(`<text:p><text:soft-page-break/></text:p>`);
+    // spec §15 — NO trailing soft-page-break paragraph: the page break is
+    // expressed by fo:break-before="page" on the NEXT section's first
+    // paragraph (TocHeading1 / PBHeading1), which every ODF consumer honors.
   }
 
-  // Table of contents (static)
+  // Table of contents (static) — one aligned content group on its OWN page
+  // (spec §4/§16). The hard break lives on the TocHeading1 style; entries
+  // share the group alignment; the next section's first paragraph carries
+  // the break into the following page.
   if (opts.includeToc) {
-    parts.push(`<text:p text:style-name="Heading1">Table of Contents</text:p>`);
+    if (tocSpacerCm >= 0.05) {
+      parts.push(`<text:p text:style-name="TocSpacer"/>`);
+    }
+    parts.push(`<text:p text:style-name="TocHeading1">Table of Contents</text:p>`);
     let n = 1;
     for (const project of model.projects) {
       parts.push(
-        `<text:p text:style-name="TextBody">${n}. ${xmlEscape(project.label)}</text:p>`,
+        `<text:p text:style-name="TocEntry">${n}. ${xmlEscape(project.label)}</text:p>`,
       );
       let m = 1;
       for (const file of project.files) {
         const meta = opts.showFileMetadata
           ? `   ${n}.${m}  ${xmlEscape(file.relativePath)}  ·  ${languageLabel(file.language)} · ${formatBytes(file.sizeBytes)}`
           : `   ${n}.${m}  ${xmlEscape(file.relativePath)}`;
-        parts.push(`<text:p text:style-name="TextBody">${meta}</text:p>`);
+        parts.push(`<text:p text:style-name="TocEntry">${meta}</text:p>`);
         m++;
       }
       n++;
     }
-    parts.push(`<text:p><text:soft-page-break/></text:p>`);
   }
 
-  // Per-project
+  // Per-project — each project starts at the TOP of a fresh page when it
+  // follows the TOC or another project (spec §10/§16, matching the DOCX and
+  // PDF exporters' page model).
   let projectN = 0;
   for (const project of model.projects) {
     projectN++;
+    const projectHeadingStyle =
+      projectN > 1 || opts.includeToc ? 'PBHeading1' : 'Heading1';
     parts.push(
-      `<text:p text:style-name="Heading1">${projectN}. ${xmlEscape(project.label)}</text:p>`,
+      `<text:p text:style-name="${projectHeadingStyle}">${projectN}. ${xmlEscape(project.label)}</text:p>`,
     );
 
     if (opts.includeProjectStructure) {
@@ -680,13 +973,13 @@ async function buildContentXml(model: DocumentModel): Promise<string> {
         // Whitespace preservation matters here too: nested tree prefixes
         // ("│   " / "    ") are pure space runs that would otherwise collapse.
         const runs = splitRuns(line)
-          .map((run) =>
-            run.fallback
-              ? `<text:span fo:font-family="${GLYPH_FALLBACK_FONT}">${xmlEscapeWithSpaces(run.text)}</text:span>`
-              : xmlEscapeWithSpaces(run.text),
-          )
+          .map((run) => {
+            if (!run.fallback) return xmlEscapeWithSpaces(run.text);
+            const style = spanStyleName({ fallbackFont: GLYPH_FALLBACK_FONT });
+            return `<text:span text:style-name="${style}">${xmlEscapeWithSpaces(run.text)}</text:span>`;
+          })
           .join('');
-        parts.push(`<text:p text:style-name="CodeLine">${runs}</text:p>`);
+        parts.push(`<text:p text:style-name="StructureLine">${runs}</text:p>`);
       }
     }
 
@@ -709,6 +1002,23 @@ async function buildContentXml(model: DocumentModel): Promise<string> {
 
   parts.push(`</office:text>`);
   parts.push(`</office:body>`);
+
+  // Build the complete automatic-styles block NOW that the body (and thus
+  // the span-style registry) is final.
+  const autoStyles = [
+    opts.includeFrontMatter ? buildTitlePageAutoStyles(titleAlign, titleSpacerCm) : '',
+    opts.includeToc ? buildTocAutoStyles(tocAlign, tocSpacerCm, opts.includeFrontMatter) : '',
+    !opts.includeToc && model.projects.length > 1
+      ? `<style:style style:name="PBHeading1" style:family="paragraph" style:parent-style-name="Heading1"><style:paragraph-properties fo:break-before="page" /></style:style>`
+      : '',
+    // Inline character styles collected while rendering code/structure
+    // (syntax colors, bold/italic, glyph-fallback font — spec §7).
+    buildSpanAutoStyles(),
+  ].join('');
+  if (autoStyles) {
+    parts.splice(autoStyleInsertIndex, 0, `<office:automatic-styles>${autoStyles}</office:automatic-styles>`);
+  }
+
   parts.push(`</office:document-content>`);
 
   return parts.join('\n');

@@ -28,6 +28,7 @@
 
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { ChevronDown, ChevronUp, Minus, Plus } from '@/components/common/Icons';
+import { ToolbarButton } from '@/components/common/PreviewControls';
 import type { DocumentPreset } from '@/lib/presets/documentPreset';
 import type {
   DocumentMetadata,
@@ -43,6 +44,7 @@ import {
   buildDocumentElements,
   paginateDocument,
   pageBoxPx,
+  pageContentAlignment,
   MM_TO_PX,
   PT_TO_PX,
   WEIGHT_MAP,
@@ -215,10 +217,9 @@ function HighlightRegion({
       void el.offsetWidth;
       el.classList.add('codice-highlight');
       const t = window.setTimeout(() => el.classList.remove('codice-highlight'), 1100);
-      // jsdom (and some older engines) don't implement scrollIntoView.
-      if (typeof el.scrollIntoView === 'function') {
-        el.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
-      }
+      // Scrolling is performed ONCE for the whole change batch by the
+      // preview-level effect below (spec §3) — per-region scrolls would
+      // compound and fight each other's smooth animations.
       return () => window.clearTimeout(t);
     }
   }, [active, highlight.nonce, id]);
@@ -229,6 +230,47 @@ function HighlightRegion({
       {children}
     </Tag>
   );
+}
+
+/**
+ * Scroll the preview's own scroll container so `el` sits ~1/4 from the top
+ * of the viewport (spec §3):
+ *   - never scrolls the page itself — only the closest preview scroller;
+ *   - accounts for the scale transform on the page box (visual px vs layout
+ *     px) by deriving the ratio from offsetWidth vs bounding width;
+ *   - keeps the surrounding UI scroll state intact (no horizontal scrolling,
+ *     no window scrolling).
+ */
+export function bringRegionIntoView(el: HTMLElement): void {
+  const sc = el.closest('[data-preview-scroll]') as HTMLElement | null;
+  if (!sc || typeof sc.scrollTop !== 'number') return;
+  const scRect = sc.getBoundingClientRect();
+  const elRect = el.getBoundingClientRect();
+  // Element already comfortably visible? Leave the scroll state untouched.
+  const margin = 48;
+  const fullyVisible =
+    elRect.top >= scRect.top + margin &&
+    elRect.bottom <= scRect.bottom - margin;
+  if (fullyVisible) return;
+  // The page boxes carry a scale transform, but their wrappers already
+  // occupy the SCALED space in the scroller's layout — so getBoundingClientRect
+  // minus the scroller rect is ALREADY in content/scroll coordinates. No
+  // scale compensation is needed (dividing by the transform ratio would
+  // overshoot by ~1.5× at typical fit scales).
+  const current = typeof sc.scrollTop === 'number' ? sc.scrollTop : 0;
+  const elTopInScroller = elRect.top - scRect.top + current;
+  // Desired: element ~25% from the viewport top (or near-top if tall).
+  const viewportH = sc.clientHeight || 400;
+  const desiredOffsetRatio = elRect.height > viewportH * 0.6 ? 0.12 : 0.25;
+  let target = Math.max(0, elTopInScroller - viewportH * desiredOffsetRatio);
+  const maxScroll = Math.max(0, sc.scrollHeight - viewportH);
+  target = Math.min(target, maxScroll);
+  if (Math.abs(target - current) < 2) return;
+  if (typeof sc.scrollTo === 'function') {
+    sc.scrollTo({ top: target, behavior: 'smooth' });
+  } else {
+    sc.scrollTop = target; // jsdom fallback
+  }
 }
 
 /* ------------------------------------------------------------------ */
@@ -268,9 +310,16 @@ export function TemplatePreview({
   // Highlight sample sources with the selected Shiki theme (cached by theme).
   useEffect(() => {
     let cancelled = false;
-    getThemeColors(resolvedTheme).then((c) => {
-      if (!cancelled) setThemeColors(c);
-    });
+    // .catch guard: a theme that fails to load must never leave stale
+    // background/foreground colors behind (spec §6 — background stays in
+    // lockstep with the selected Shiki theme).
+    getThemeColors(resolvedTheme)
+      .then((c) => {
+        if (!cancelled) setThemeColors(c);
+      })
+      .catch(() => {
+        if (!cancelled) setThemeColors({ background: '#0d1117', foreground: '#e6edf3' });
+      });
     (async () => {
       for (const project of SAMPLE_PROJECTS) {
         for (const file of project.files) {
@@ -281,7 +330,27 @@ export function TemplatePreview({
               setHighlighted((prev) => ({ ...prev, [key]: h }));
             }
           } catch {
-            // ignore sample highlight failures
+            // A sample that cannot be highlighted still renders — as plain
+            // text — so the code region never gets stuck on "Highlighting…".
+            if (!cancelled) {
+              setHighlighted((prev) =>
+                prev[key]
+                  ? prev
+                  : {
+                      ...prev,
+                      [key]: {
+                        fileId: file.path,
+                        relativePath: file.path,
+                        language: null,
+                        lines: file.code.split('\n').map((text, i) => ({
+                          lineNumber: i + 1,
+                          text,
+                          tokens: [{ start: 0, length: text.length, scopes: [] }],
+                        })),
+                      },
+                    },
+              );
+            }
           }
         }
       }
@@ -290,6 +359,24 @@ export function TemplatePreview({
       cancelled = true;
     };
   }, [resolvedTheme]);
+
+  // spec §3 — ONE scroll per change batch: bring the FIRST affected region
+  // into the upper portion of the preview viewport (never the bottom edge).
+  useEffect(() => {
+    if (highlight.ids.length === 0 || highlight.nonce === 0) return;
+    const raf = window.requestAnimationFrame(() => {
+      const root = containerRef.current;
+      if (!root) return;
+      for (const id of highlight.ids) {
+        const el = root.querySelector<HTMLElement>(`[data-highlight="${id}"]`);
+        if (el) {
+          bringRegionIntoView(el);
+          break;
+        }
+      }
+    });
+    return () => window.cancelAnimationFrame(raf);
+  }, [highlight.nonce, highlight.ids]);
 
   const getHl = useCallback(
     (path: string): HighlightedFile | null =>
@@ -531,7 +618,9 @@ export function TemplatePreview({
             key={key}
             data-codice-region="body"
             style={{
-              color: preset.typography.bodyColor,
+              // Primary text is the CANONICAL body color (spec §5) — the
+              // Document Colors "Primary text" picker drives body copy.
+              color: preset.colors.primaryText,
               fontSize: preset.typography.bodyFontSizePt * PT_TO_PX,
               fontWeight: WEIGHT_MAP[preset.typography.bodyWeight],
               lineHeight: preset.typography.lineSpacing,
@@ -607,20 +696,22 @@ export function TemplatePreview({
         }}
       >
         {tp.showTitle && (
-          <div
-            data-codice-region="heading-title"
-            style={{
-              fontFamily: fontStack(titleH.font),
-              fontSize: titleH.sizePt * PT_TO_PX,
-              fontWeight: WEIGHT_MAP[titleH.weight],
-              fontStyle: titleH.italic ? 'italic' : 'normal',
-              color: titleH.color,
-              lineHeight: titleH.lineHeight,
-              textIndent: titleH.indentPt,
-            }}
-          >
-            {title}
-          </div>
+          <HighlightRegion id="heading-title" highlight={highlight}>
+            <div
+              data-codice-region="heading-title"
+              style={{
+                fontFamily: fontStack(titleH.font),
+                fontSize: titleH.sizePt * PT_TO_PX,
+                fontWeight: WEIGHT_MAP[titleH.weight],
+                fontStyle: titleH.italic ? 'italic' : 'normal',
+                color: titleH.color,
+                lineHeight: titleH.lineHeight,
+                textIndent: titleH.indentPt,
+              }}
+            >
+              {title}
+            </div>
+          </HighlightRegion>
         )}
         {tp.showSubtitle && (
           <div
@@ -725,6 +816,9 @@ export function TemplatePreview({
 
   function renderToc(key: string) {
     const h1 = preset.headings.h1;
+    const tocAlign = preset.toc.horizontalAlignment;
+    const entryJustify =
+      tocAlign === 'center' ? 'center' : tocAlign === 'right' ? 'flex-end' : 'flex-start';
     return (
       <HighlightRegion key={key} id="toc" highlight={highlight}>
         <div
@@ -735,6 +829,7 @@ export function TemplatePreview({
             fontStyle: h1.italic ? 'italic' : 'normal',
             color: h1.color,
             marginBottom: 12,
+            textAlign: tocAlign,
           }}
         >
           Table of Contents
@@ -748,6 +843,7 @@ export function TemplatePreview({
               style={{
                 display: 'flex',
                 alignItems: 'baseline',
+                justifyContent: entryJustify,
                 gap: 6,
                 marginLeft: depth,
                 marginTop: entry.level === 'h1' ? 10 : 2,
@@ -933,29 +1029,30 @@ export function TemplatePreview({
       { glyph: '✗', text: '1 unresolved import flagged for review', color: preset.colors.error },
     ];
     return (
-      <div
-        key={key}
-        data-codice-region="status-card"
-        style={{
-          background: preset.colors.surface,
-          border: `0.5px solid ${preset.colors.borders}`,
-          borderRadius: 6,
-          padding: '10px 12px',
-          marginBottom: preset.typography.paragraphSpacingPt,
-          fontFamily: fontStack(preset.typography.bodyFont),
-          fontSize: 11,
-        }}
-      >
-        <div style={{ fontWeight: 600, fontSize: 10, textTransform: 'uppercase', letterSpacing: 0.5, color: preset.colors.mutedText, marginBottom: 6 }}>
-          Validation summary
-        </div>
-        {rows.map((row) => (
-          <div key={row.text} style={{ display: 'flex', gap: 8, alignItems: 'baseline', marginTop: 3 }}>
-            <span style={{ color: row.color, fontWeight: 700 }}>{row.glyph}</span>
-            <span style={{ color: row.color }}>{row.text}</span>
+      <HighlightRegion key={key} id="status-card" highlight={highlight}>
+        <div
+          data-codice-region="status-card"
+          style={{
+            background: preset.colors.surface,
+            border: `0.5px solid ${preset.colors.borders}`,
+            borderRadius: 6,
+            padding: '10px 12px',
+            marginBottom: preset.typography.paragraphSpacingPt,
+            fontFamily: fontStack(preset.typography.bodyFont),
+            fontSize: 11,
+          }}
+        >
+          <div style={{ fontWeight: 600, fontSize: 10, textTransform: 'uppercase', letterSpacing: 0.5, color: preset.colors.mutedText, marginBottom: 6 }}>
+            Validation summary
           </div>
-        ))}
-      </div>
+          {rows.map((row) => (
+            <div key={row.text} style={{ display: 'flex', gap: 8, alignItems: 'baseline', marginTop: 3 }}>
+              <span style={{ color: row.color, fontWeight: 700 }}>{row.glyph}</span>
+              <span style={{ color: row.color }}>{row.text}</span>
+            </div>
+          ))}
+        </div>
+      </HighlightRegion>
     );
   }
 
@@ -1090,12 +1187,17 @@ export function TemplatePreview({
   /* ---------------- Page rendering ---------------- */
 
   const stepZoom = (delta: number) => {
-    const base = zoom === 'fit' ? Math.round(fitScale * 100) : zoom;
-    setZoom(Math.min(200, Math.max(30, base + delta)));
+    // Functional update — a burst of clicks must each take effect (the
+    // previous closure read a stale `zoom`, so rapid clicks only stepped
+    // once). Call sites pass ±10.
+    setZoom((z) => {
+      const base = z === 'fit' ? Math.round(fitScale * 100) : z;
+      return Math.min(200, Math.max(30, base + delta));
+    });
   };
 
   return (
-    <div className="flex h-full min-h-0 w-full flex-col">
+    <div className="flex h-full min-h-0 w-full min-w-0 flex-col overflow-hidden">
       {/* ---------- Toolbar: zoom + page navigation ---------- */}
       <div className="flex flex-shrink-0 items-center gap-1 border-b border-app bg-surface/70 px-3 py-1.5 backdrop-blur">
         <div className="flex items-center gap-0.5">
@@ -1138,21 +1240,25 @@ export function TemplatePreview({
       </div>
 
       {/* ---------- Scrollable pages ---------- */}
-      <div ref={scrollRef} onScroll={handleScroll} className="min-h-0 flex-1 overflow-auto p-4">
+      <div ref={scrollRef} onScroll={handleScroll} data-preview-scroll className="min-h-0 flex-1 overflow-auto p-4">
         <div ref={containerRef} className="mx-auto flex flex-col items-center gap-6" style={{ width: pageW * scale }}>
           {pages.map((page, idx) => {
-            const underFilled = page.kind !== 'content';
-            const vAlign = preset.titlePage.verticalAlignment;
-            const justify =
-              underFilled && vAlign === 'center'
-                ? 'center'
-                : underFilled && vAlign === 'bottom'
-                  ? 'flex-end'
-                  : 'flex-start';
+            // §4/§9/§10 — shared model: only the title page follows the title
+            // alignment; the TOC page follows the TOC alignment; content and
+            // project pages always start at the top.
+            const justify = pageContentAlignment(
+              page.kind,
+              preset.titlePage.verticalAlignment,
+              preset.toc.verticalAlignment,
+            );
             const isCurrent = currentPage === idx + 1;
             return (
               <div key={idx} className="group/page" style={{ width: pageW * scale }}>
-                <div style={{ transform: `scale(${scale})`, transformOrigin: 'top left', marginBottom: -(pageH - pageH * scale) }}>
+                {/* Explicit UNSCALED width: the transform maps this box to
+                    exactly the slot width. Without it the wrapper stretches
+                    to the slot width and is scaled twice — horizontal
+                    overflow at zoom > 100% (spec §6). */}
+                <div style={{ width: pageW, transform: `scale(${scale})`, transformOrigin: 'top left', marginBottom: -(pageH - pageH * scale) }}>
                 <div
                   data-page={idx + 1}
                   style={{
@@ -1246,31 +1352,7 @@ export function TemplatePreview({
   }
 }
 
-/** Small icon button used in the preview toolbar. */
-function ToolbarButton({
-  label,
-  onClick,
-  disabled,
-  children,
-}: {
-  label: string;
-  onClick: () => void;
-  disabled?: boolean;
-  children: React.ReactNode;
-}) {
-  return (
-    <button
-      onClick={onClick}
-      disabled={disabled}
-      title={label}
-      aria-label={label}
-      className="flex h-6 w-6 items-center justify-center rounded text-secondary transition-colors hover-surface disabled:opacity-40"
-    >
-      {children}
-    </button>
-  );
-}
-
+/** Map a language id to its display label. */
 function languageLabelOf(id: string): string {
   const map: Record<string, string> = {
     kotlin: 'Kotlin',

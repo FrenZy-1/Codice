@@ -220,12 +220,15 @@ export function ProjectUpload({ onProjectAdded }: Props) {
         onDrop={handleDrop}
         className={`codice-dropzone ${compact ? 'codice-dropzone-compact' : ''} ${isDragging ? 'codice-dropzone-active' : ''} ${pulse ? 'codice-dropzone-pulse' : ''}`}
         data-tour="upload"
-        onClick={compact ? undefined : handleDirPicker}
+        // spec §7 — the collapsed (compact) dropzone is itself a trigger for
+        // the native folder picker; the Folder/ZIP chips remain separate
+        // triggers (they stopPropagation, so no duplicate dialogs).
+        onClick={handleDirPicker}
         role="button"
         tabIndex={0}
-        aria-label={compact ? 'Add another project folder or ZIP archive' : 'Drop a project folder or ZIP archive here, or click to browse'}
+        aria-label={compact ? 'Add another project folder or ZIP archive — click to browse' : 'Drop a project folder or ZIP archive here, or click to browse'}
         onKeyDown={(e) => {
-          if ((e.key === 'Enter' || e.key === ' ') && !compact) {
+          if (e.key === 'Enter' || e.key === ' ') {
             e.preventDefault();
             handleDirPicker();
           }

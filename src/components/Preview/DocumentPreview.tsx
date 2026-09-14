@@ -24,7 +24,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useAppState } from '@/hooks/useAppState';
-import { highlightFile, getThemeColors } from '@/lib/highlight/highlighter';
+import { highlightFile, getThemeColors, plainHighlightedFile } from '@/lib/highlight/highlighter';
 import { resolveSyntaxTheme } from '@/lib/themes/syntaxThemeRegistry';
 import { fontStack } from '@/lib/fonts/fontCatalog';
 import type { DocumentPreset, FooterSlotType } from '@/lib/presets/documentPreset';
@@ -33,15 +33,16 @@ import { formatBytes } from '@/lib/fileDiscovery';
 import { languageLabel } from '@/lib/languageDetection';
 import { PreviewWelcome, PreviewNoSelection } from '@/components/Preview/PreviewEmptyStates';
 import { buildStaticTokenContext, expandTokens } from '@/lib/tokens';
-import { computeHighlightIds } from '@/components/Settings/templateShared';
 import { buildDocumentOutline, type OutlineEntry } from '@/lib/documentOutline';
 import { OutlinePanel } from '@/components/Preview/OutlinePanel';
 import { StatsPanel } from '@/components/common/StatsPanel';
-import { ListTree, BarChart } from '@/components/common/Icons';
+import { ToolbarButton, stepZoomLadder } from '@/components/common/PreviewControls';
+import { ListTree, BarChart, ChevronLeft, ChevronRight, Minus, Plus } from '@/components/common/Icons';
 import {
   buildDocumentElements,
   paginateDocument,
   pageBoxPx,
+  pageContentAlignment,
   MM_TO_PX,
   PT_TO_PX,
   WEIGHT_MAP,
@@ -86,9 +87,13 @@ export function DocumentPreview() {
   // Fetch theme colors whenever the syntax theme changes.
   useEffect(() => {
     let cancelled = false;
-    getThemeColors(resolvedTheme).then((c) => {
-      if (!cancelled) setThemeColors(c);
-    });
+    getThemeColors(resolvedTheme)
+      .then((c) => {
+        if (!cancelled) setThemeColors(c);
+      })
+      .catch(() => {
+        if (!cancelled) setThemeColors({ background: '#0d1117', foreground: '#e6edf3' });
+      });
     return () => {
       cancelled = true;
     };
@@ -151,13 +156,22 @@ export function DocumentPreview() {
         if (!file?.fileHandle) continue;
         try {
           const text = await file.fileHandle.getText();
-          const highlighted = await highlightFile(
-            item.fileId,
-            item.relativePath,
-            item.language,
-            text,
-            resolvedTheme,
-          );
+          let highlighted: HighlightedFile;
+          try {
+            highlighted = await highlightFile(
+              item.fileId,
+              item.relativePath,
+              item.language,
+              text,
+              resolvedTheme,
+            );
+          } catch {
+            // spec §8: a file whose highlighting fails (unknown language,
+            // grammar error) still renders — as plaintext — instead of
+            // being stuck on "Loading…" forever. Re-enabling an excluded
+            // file therefore always recovers naturally.
+            highlighted = plainHighlightedFile(item.fileId, item.relativePath, text);
+          }
           if (!cancelled) {
             setHighlightedCache((prev) => ({
               ...prev,
@@ -165,7 +179,7 @@ export function DocumentPreview() {
             }));
           }
         } catch {
-          // ignore
+          // Unreadable file handle — nothing to render.
         }
       }
     }
@@ -226,6 +240,11 @@ export function DocumentPreview() {
   }, []);
 
   // Measure the container width so the page can be scaled to fit.
+  // The scroll container below is rendered UNCONDITIONALLY (the empty state
+  // renders inside it), so this element never gets replaced and the
+  // observer stays attached for the component's whole life — previously the
+  // empty state swapped in a different node and containerWidth froze at a
+  // stale value, shrinking the preview to the 0.3 scale floor (§2/§3).
   const [containerWidth, setContainerWidth] = useState(800);
   useEffect(() => {
     const el = containerRef.current;
@@ -236,6 +255,10 @@ export function DocumentPreview() {
     ro.observe(el);
     return () => ro.disconnect();
   }, []);
+
+  // ---- Preview zoom (§5) — affects THIS preview only; independent from the
+  // template-settings preview zoom (§16) and from any document setting. ----
+  const [zoom, setZoom] = useState<number | 'fit'>('fit');
 
   // ---- Shared pagination model ----
 
@@ -265,6 +288,26 @@ export function DocumentPreview() {
     return groups;
   }, [filesToPreview]);
 
+  // ---- Multi-project preview tabs (spec §11/§12) ----
+  // In "separate document per project" mode the preview shows ONE project
+  // at a time, switchable via browser-style tabs. Combined mode keeps the
+  // sequential multi-project document (and shows no tabs).
+  const [activeTabId, setActiveTabId] = useState<string | null>(null);
+  const separateMode = state.outputMode === 'separate' && paginationProjects.length > 1;
+  const projectTabId = (g: PaginationProject) => g.outlineProjectId ?? g.label;
+  // Derived (not effect-synced): a selection that no longer matches any
+  // project (removed/reordered) falls back to the first project.
+  const validTabId = paginationProjects.some((g) => projectTabId(g) === activeTabId)
+    ? activeTabId
+    : null;
+  const activeGroup = separateMode
+    ? paginationProjects.find((g) => projectTabId(g) === validTabId) ?? paginationProjects[0]
+    : null;
+  const visiblePaginationProjects = useMemo<PaginationProject[]>(
+    () => (separateMode && activeGroup ? [activeGroup] : paginationProjects),
+    [separateMode, activeGroup, paginationProjects],
+  );
+
   const getHlForFile = useCallback(
     (fileId: string): HighlightedFile | null =>
       highlightedCache[cacheKey(fileId, resolvedTheme)] ?? null,
@@ -272,15 +315,15 @@ export function DocumentPreview() {
   );
 
   const elements = useMemo(
-    () => buildDocumentElements(preset, paginationProjects),
-    [preset, paginationProjects],
+    () => buildDocumentElements(preset, visiblePaginationProjects),
+    [preset, visiblePaginationProjects],
   );
 
   const pages = useMemo(
     () =>
-      paginateDocument(elements, preset, paginationProjects, {
+      paginateDocument(elements, preset, visiblePaginationProjects, {
         getLineCount: (file) => {
-          const id = paginationProjects
+          const id = visiblePaginationProjects
             .flatMap((p) => p.files)
             .find((f) => f === file)?.outlineFileId;
           const hl = id ? getHlForFile(id) : null;
@@ -288,20 +331,20 @@ export function DocumentPreview() {
           return file.code ? file.code.split('\n').length : 1;
         },
         getLineText: (file, lineIdx) => {
-          const id = paginationProjects
+          const id = visiblePaginationProjects
             .flatMap((p) => p.files)
             .find((f) => f === file)?.outlineFileId;
           const hl = id ? getHlForFile(id) : null;
           return hl?.lines[lineIdx]?.text ?? '';
         },
       }),
-    [elements, preset, paginationProjects, getHlForFile],
+    [elements, preset, visiblePaginationProjects, getHlForFile],
   );
 
   const outline: OutlineEntry[] = useMemo(
     () =>
       buildDocumentOutline({
-        projects: paginationProjects.map((g) => ({
+        projects: visiblePaginationProjects.map((g) => ({
           id: g.outlineProjectId ?? g.label,
           label: g.label,
           files: g.files.map((f) => ({
@@ -317,7 +360,7 @@ export function DocumentPreview() {
         includeStructure: preset.projectStructure.enabled,
       }),
     [
-      paginationProjects,
+      visiblePaginationProjects,
       preset.titlePage.enabled,
       preset.misc.includeToc,
       preset.projectStructure.enabled,
@@ -360,34 +403,16 @@ export function DocumentPreview() {
     };
   }, []);
 
-  /* ------------------------------------------------------------------ */
-  /* Empty states — all hooks have run above, so a late branch is safe.  */
-  /* ------------------------------------------------------------------ */
-
-  if (allSelected.length === 0) {
-    return (
-      <div className="relative min-h-0 flex-1">
-        <div
-          ref={containerRef}
-          className="codice-print-area h-full overflow-auto bg-app p-6"
-          style={{
-            backgroundImage:
-              'radial-gradient(circle, rgba(128,128,128,0.07) 1px, transparent 1px)',
-            backgroundSize: '20px 20px',
-          }}
-        >
-          {state.projects.length === 0 ? (
-            <PreviewWelcome />
-          ) : (
-            <PreviewNoSelection projectCount={state.projects.length} />
-          )}
-        </div>
-      </div>
-    );
-  }
+  /* ---------------- Page box + zoom (§5) ---------------- */
 
   const { pageW: effectiveW, pageH: effectiveH } = pageBoxPx(preset);
-  const scaleFactor = Math.min(1, Math.max(0.3, (containerWidth - 48) / effectiveW));
+  // 'Fit' derives from the LIVE container measurement; an explicit zoom
+  // percentage overrides it. The floor keeps tiny viewports readable while
+  // the document preview keeps its visual focus (§3).
+  const fitScale = Math.min(1, Math.max(0.3, (containerWidth - 48) / effectiveW));
+  const scaleFactor = zoom === 'fit' ? fitScale : Math.min(2, Math.max(0.3, zoom / 100));
+  const stepZoom = (delta: number) =>
+    setZoom((z) => stepZoomLadder(typeof z === 'number' ? z : Math.round(fitScale * 100), delta));
 
   const marginTop = preset.page.marginTopMm * MM_TO_PX;
   const marginBottom = preset.page.marginBottomMm * MM_TO_PX;
@@ -557,7 +582,8 @@ export function DocumentPreview() {
             key={key}
             data-codice-region="body"
             style={{
-              color: preset.typography.bodyColor,
+              // Primary text is the CANONICAL body color (spec §5).
+              color: preset.colors.primaryText,
               fontSize: preset.typography.bodyFontSizePt * PT_TO_PX,
               fontWeight: WEIGHTS[preset.typography.bodyWeight],
               lineHeight: preset.typography.lineSpacing,
@@ -689,8 +715,16 @@ export function DocumentPreview() {
 
   function renderToc(key: string) {
     const h1 = preset.headings.h1;
+    // §4 — the TOC content group follows its own horizontal alignment
+    // (vertical alignment is applied by the page container).
+    const tocAlign = preset.toc.horizontalAlignment;
     return (
-      <div key={key} data-outline-id="outline-toc" data-codice-region="toc" style={{ marginBottom: preset.layout.sectionSpacingPt }}>
+      <div
+        key={key}
+        data-outline-id="outline-toc"
+        data-codice-region="toc"
+        style={{ marginBottom: preset.layout.sectionSpacingPt, textAlign: tocAlign }}
+      >
         <div
           style={{
             fontFamily: fontStack(h1.font),
@@ -703,7 +737,7 @@ export function DocumentPreview() {
         >
           Table of Contents
         </div>
-        {paginationProjects.map((g, gi) => (
+        {visiblePaginationProjects.map((g, gi) => (
           <div key={g.outlineProjectId ?? gi}>
             <div
               style={{
@@ -738,7 +772,7 @@ export function DocumentPreview() {
   }
 
   function renderProjectHeader(el: Extract<PreviewElement, { type: 'projectHeader' }>, key: string) {
-    const g = paginationProjects[el.projectIdx];
+    const g = visiblePaginationProjects[el.projectIdx];
     if (!g) return null;
     const ph = preset.projectHeaders;
     const totalSize = g.files.reduce((acc, f) => acc + f.size, 0);
@@ -812,7 +846,7 @@ export function DocumentPreview() {
   }
 
   function renderStructure(el: Extract<PreviewElement, { type: 'structure' }>, key: string) {
-    const g = paginationProjects[el.projectIdx];
+    const g = visiblePaginationProjects[el.projectIdx];
     if (!g) return null;
     const ps = preset.projectStructure;
     const h2 = preset.headings.h2;
@@ -882,7 +916,7 @@ export function DocumentPreview() {
   }
 
   function renderFileHeader(el: Extract<PreviewElement, { type: 'fileHeader' }>, key: string) {
-    const g = paginationProjects[el.projectIdx];
+    const g = visiblePaginationProjects[el.projectIdx];
     const file = g?.files[el.fileIdx];
     if (!g || !file) return null;
     const fh = preset.fileHeaders;
@@ -925,7 +959,7 @@ export function DocumentPreview() {
 
   /** One page-chunk of a code block (fromLine..toLine, startLineNumber). */
   function renderCodeChunk(el: Extract<PreviewElement, { type: 'code' }>, key: string) {
-    const g = paginationProjects[el.projectIdx];
+    const g = visiblePaginationProjects[el.projectIdx];
     const file = g?.files[el.fileIdx];
     if (!g || !file) return null;
     const c = preset.code;
@@ -1011,10 +1045,77 @@ export function DocumentPreview() {
   /* ---------------- Page rendering ---------------- */
 
   return (
-    <div className="relative min-h-0 flex-1">
+    <div className="relative flex min-h-0 flex-1 flex-col">
+      {separateMode && (
+        <div
+          className="codice-print-hidden flex flex-shrink-0 items-center gap-1 overflow-x-auto border-b border-app bg-surface px-2 py-1.5"
+          role="tablist"
+          aria-label="Projects in this export — one document per project"
+          data-codice-region="project-tabs"
+        >
+          {paginationProjects.map((g, i) => {
+            const id = projectTabId(g);
+            const selected = (activeGroup ? projectTabId(activeGroup) : projectTabId(paginationProjects[0])) === id;
+            return (
+              <button
+                key={id}
+                type="button"
+                role="tab"
+                aria-selected={selected}
+                title={`Preview ${g.label} — ${g.files.length} file${g.files.length === 1 ? '' : 's'}`}
+                onClick={() => setActiveTabId(id)}
+                className={`flex max-w-[180px] flex-shrink-0 items-center gap-1.5 rounded-t-md border-b-2 px-2.5 py-1 text-xs transition-colors ${
+                  selected
+                    ? 'border-[var(--color-accent)] bg-app text-primary font-medium'
+                    : 'border-transparent text-secondary hover-surface'
+                }`}
+              >
+                <span className="truncate">{g.label}</span>
+                <span className="rounded-full border border-app px-1 text-[9px] tabular-nums text-muted">
+                  {g.files.length}
+                </span>
+              </button>
+            );
+          })}
+          <span className="ml-2 flex-shrink-0 text-[10px] text-muted">
+            Separate output — one document per project
+          </span>
+        </div>
+      )}
+      {/* Zoom toolbar (§5) — same control language as the template-settings
+          preview, but the zoom STATE is independent (§16). Hidden from print. */}
+      <div className="codice-print-hidden flex flex-shrink-0 items-center gap-2 border-b border-app bg-surface/70 px-3 py-1.5 backdrop-blur">
+        <div className="flex items-center gap-0.5">
+          <ToolbarButton label="Zoom out" onClick={() => stepZoom(-1)}>
+            <Minus size={13} />
+          </ToolbarButton>
+          <button
+            type="button"
+            onClick={() => setZoom('fit')}
+            className={`min-w-[44px] rounded px-2 py-0.5 text-[11px] font-medium tabular-nums transition-colors ${
+              zoom === 'fit'
+                ? 'bg-[var(--color-accent)] text-[var(--color-accent-text)]'
+                : 'text-secondary hover-surface'
+            }`}
+            title="Fit to width"
+          >
+            {zoom === 'fit' ? 'Fit' : `${zoom}%`}
+          </button>
+          <ToolbarButton label="Zoom in" onClick={() => stepZoom(1)}>
+            <Plus size={13} />
+          </ToolbarButton>
+        </div>
+        <div className="h-4 w-px bg-[var(--color-border)]" aria-hidden />
+        <span className="text-[10px] tabular-nums text-muted">
+          {pages.length} page{pages.length === 1 ? '' : 's'}
+        </span>
+        <span className="ml-auto text-[10px] tabular-nums text-muted">
+          {effectiveW}×{effectiveH}px · {preset.page.landscape ? 'landscape' : 'portrait'}
+        </span>
+      </div>
       <div
         ref={containerRef}
-        className="codice-print-area h-full overflow-auto bg-app p-6"
+        className="codice-print-area min-h-0 flex-1 overflow-auto bg-app p-6"
         style={{
           backgroundImage:
             'radial-gradient(circle, rgba(128,128,128,0.07) 1px, transparent 1px)',
@@ -1022,27 +1123,48 @@ export function DocumentPreview() {
         }}
         onScroll={handlePreviewScroll}
       >
-      <div className="codice-preview-frame mx-auto flex flex-col items-center gap-6" style={{ width: effectiveW * scaleFactor }}>
+        {allSelected.length === 0 ? (
+          state.projects.length === 0 ? (
+            <PreviewWelcome />
+          ) : (
+            <PreviewNoSelection projectCount={state.projects.length} />
+          )
+        ) : (
+        <div className="codice-preview-frame mx-auto flex w-fit min-w-full flex-col items-center gap-6">
         {pages.map((page, idx) => {
-          const underFilled = page.kind !== 'content';
-          const vAlign = preset.titlePage.verticalAlignment;
-          const justify =
-            underFilled && vAlign === 'center'
-              ? 'center'
-              : underFilled && vAlign === 'bottom'
-                ? 'flex-end'
-                : 'flex-start';
+          // §4/§9/§10 — shared model: title pages follow the title alignment,
+          // TOC pages follow the TOC alignment, content/project pages always
+          // start at the top.
+          const justify = pageContentAlignment(
+            page.kind,
+            preset.titlePage.verticalAlignment,
+            preset.toc.verticalAlignment,
+          );
           return (
-            <div
-              key={idx}
-              className="codice-preview-surface shadow-2xl"
-              data-page={idx + 1}
-              style={{
-                width: effectiveW,
-                minHeight: effectiveH,
-                transform: `scale(${scaleFactor})`,
-                transformOrigin: 'top left',
-                marginBottom: (effectiveH - effectiveH * scaleFactor) * -1,
+            // §2 — the slot wrapper owns the SCALED layout box so the visual
+            // page exactly fills it: centering happens on the wrapper (never
+            // on the oversized unscaled page box, which previously overflowed
+            // the frame symmetrically and pushed the page visually left).
+            <div key={idx} className="codice-page-slot" style={{ width: effectiveW * scaleFactor }}>
+              <div
+                className="codice-page-scale"
+                style={{
+                  // Explicit UNSCALED page width: the transform then maps
+                  // this box to exactly the slot's scaled width. Without it
+                  // the wrapper stretches to the slot width and gets scaled
+                  // twice (overflow at zoom > 100%).
+                  width: effectiveW,
+                  transform: `scale(${scaleFactor})`,
+                  transformOrigin: 'top left',
+                  marginBottom: (effectiveH - effectiveH * scaleFactor) * -1,
+                }}
+              >
+              <div
+                className="codice-preview-surface shadow-2xl"
+                data-page={idx + 1}
+                style={{
+                  width: effectiveW,
+                  minHeight: effectiveH,
                 background: preset.colors.background,
                 color: preset.colors.primaryText,
                 position: 'relative',
@@ -1077,6 +1199,8 @@ export function DocumentPreview() {
                 </div>
               )}
             </div>
+              </div>
+            </div>
           );
         })}
 
@@ -1096,11 +1220,15 @@ export function DocumentPreview() {
             will contain all {allSelected.length} selected files.
           </div>
         )}
-      </div>
+        </div>
+        )}
       </div>
 
-      {/* Floating outline + statistics pills (hidden from print output). */}
-      <div className="absolute right-4 top-4 z-10 flex flex-col items-end gap-1 codice-print-hidden">
+      {/* Floating outline + statistics pills (hidden from print output).
+          Anchored to THIS pane (the root is relative) — top-12 keeps them
+          below the zoom toolbar so they never collide with the app header
+          or cover the toolbar labels (§1). */}
+      <div className="absolute right-4 top-12 z-10 flex flex-col items-end gap-1 codice-print-hidden">
         {!outlineOpen && outline.length > 0 && (
           <button
             type="button"

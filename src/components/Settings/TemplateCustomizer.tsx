@@ -41,6 +41,7 @@ import type {
   PageStyle,
   ProjectHeaderStyle,
   ProjectStructureStyle,
+  TocStyle,
   TitlePageStyle,
   TypographyStyle,
   FontWeight,
@@ -397,8 +398,11 @@ export function TemplateCustomizer({ open, onClose }: Props) {
             </div>
           </div>
 
-          {/* Preview pane — TemplatePreview owns its toolbar + scroll area */}
-          <div className="min-h-0 flex-1">
+          {/* Preview pane — TemplatePreview owns its toolbar + scroll area.
+              min-w-0 is REQUIRED: without it the preview pane's automatic
+              flex minimum is the zoomed page width, so zooming in squeezed
+              this settings pane (spec §6). */}
+          <div className="min-h-0 min-w-0 flex-1">
             <TemplatePreview
               preset={preset}
               metadata={state.metadata}
@@ -592,6 +596,8 @@ function PageLayoutSection({
     patchPreset({ projectHeaders: { ...ph, ...patch } });
   const patchMisc = (patch: Partial<MiscDocumentOptions>) =>
     patchPreset({ misc: { ...misc, ...patch } });
+  const patchToc = (patch: Partial<TocStyle>) =>
+    patchPreset({ toc: { ...preset.toc, ...patch } });
 
   /** Last-focused header/footer input — the token-chip insert target. */
   const tokenTargetRef = useRef<TokenTarget | null>(null);
@@ -881,6 +887,7 @@ function PageLayoutSection({
               <Field label="Vertical alignment">
                 <select
                   className="select"
+                  aria-label="Title page vertical alignment"
                   value={tp.verticalAlignment}
                   onChange={(e) => patchTitlePage({ verticalAlignment: e.target.value as VerticalAlignment })}
                 >
@@ -956,7 +963,35 @@ function PageLayoutSection({
           onChange={(v) => patchMisc({ includeToc: v })}
         />
         <DependentSettings enabled={misc.includeToc}>
+          {/* spec §4 — ALL TOC options live behind "Advanced ▼": the TOC is a
+              rarely-reconfigured feature, and its alignment controls (a whole
+              page of their own, like the title page) are not top-level
+              material. Dependency behavior is unchanged: unchecking "Include
+              table of contents" hides the entire section. */}
           <AdvancedSection>
+            <div className="grid grid-cols-2 gap-2">
+              <Field label="Horizontal alignment">
+                <AlignmentSelect
+                  value={preset.toc.horizontalAlignment}
+                  onChange={(v) => patchToc({ horizontalAlignment: v })}
+                  label="TOC horizontal alignment"
+                />
+              </Field>
+              <Field label="Vertical alignment">
+                <select
+                  className="select"
+                  value={preset.toc.verticalAlignment}
+                  aria-label="TOC vertical alignment"
+                  onChange={(e) =>
+                    patchToc({ verticalAlignment: e.target.value as VerticalAlignment })
+                  }
+                >
+                  <option value="top">Top</option>
+                  <option value="center">Center</option>
+                  <option value="bottom">Bottom</option>
+                </select>
+              </Field>
+            </div>
             <Toggle label="Number headings" checked={misc.numberHeadings} onChange={(v) => patchMisc({ numberHeadings: v })} />
             <Toggle label="Show file metadata" checked={misc.showFileMetadata} onChange={(v) => patchMisc({ showFileMetadata: v })} />
           </AdvancedSection>
@@ -1142,8 +1177,19 @@ function FontsSection({
           <Field label="Line spacing"><NumberInput value={t.lineSpacing} step={0.05} onChange={(v) => patchTypography({ lineSpacing: v })} /></Field>
         </div>
         <div className="grid grid-cols-2 gap-2">
-          <Field label="Body text color">
-            <ColorInput value={t.bodyColor} onChange={(v) => patchTypography({ bodyColor: v })} />
+          <Field label="Text color (primary)">
+            <ColorInput
+              value={preset.colors.primaryText}
+              onChange={(v) =>
+                // Primary text is the CANONICAL body color (spec §5) — this
+                // picker and the Document Colors "Primary text" picker write
+                // the same value so the two can never drift apart.
+                patchPreset({
+                  typography: { ...t, bodyColor: v },
+                  colors: { ...preset.colors, primaryText: v },
+                })
+              }
+            />
           </Field>
           <Field label="Paragraph spacing (pt)">
             <NumberInput value={t.paragraphSpacingPt} onChange={(v) => patchTypography({ paragraphSpacingPt: v })} />
@@ -1286,8 +1332,20 @@ function ThemeSection({
   const c = preset.code;
   const patchCode = (p: Partial<CodeBlockStyle>) =>
     patchPreset({ code: { ...c, ...p } });
-  const patchColors = (p: Partial<DocumentColors>) =>
-    patchPreset({ colors: { ...preset.colors, ...p } });
+  const patchColors = (p: Partial<DocumentColors>) => {
+    // spec §5 semantic wiring:
+    //   - Primary text IS the body copy color — keep typography in lockstep.
+    //   - The Headings document color broadcasts to EVERY heading level
+    //     (Title + H1–H4) so changing it visibly recolors all headings.
+    const extra: Partial<DocumentPreset> = {};
+    if (p.primaryText !== undefined && p.primaryText !== preset.typography.bodyColor) {
+      extra.typography = { ...preset.typography, bodyColor: p.primaryText };
+    }
+    if (p.headings !== undefined && p.headings !== preset.colors.headings) {
+      extra.headings = applyToAllHeadings(preset.headings, { color: p.headings });
+    }
+    patchPreset({ ...extra, colors: { ...preset.colors, ...p } });
+  };
   const borderEnabled = c.borderStyle !== 'none';
 
   return (

@@ -43,8 +43,11 @@ export function presetToOptions(preset: DocumentPreset): DocumentOptions {
     includeFrontMatter: preset.titlePage.enabled,
     wrapLongLines: preset.code.wrapLongLines,
     includeProjectStructure: preset.projectStructure.enabled,
+    projectStructureColor: preset.projectStructure.color,
     syntaxTheme: preset.syntaxTheme,
     pageHeader: preset.page.pageHeader,
+    headerSpacingMm: preset.page.headerSpacingMm,
+    footerSpacingMm: preset.page.footerSpacingMm,
     pageFooter: preset.page.pageFooter,
     // Structured header/footer layout fields.
     pageHeaderShow: preset.page.pageHeaderShow,
@@ -75,5 +78,12 @@ export function presetToOptions(preset: DocumentPreset): DocumentOptions {
     titlePageHorizontalAlignment: preset.titlePage.alignment,
     // TOC file metadata.
     showFileMetadata: preset.misc.showFileMetadata,
+    // TOC page alignment (spec §4).
+    tocHorizontalAlignment: preset.toc.horizontalAlignment,
+    tocVerticalAlignment: preset.toc.verticalAlignment,
+    // Document color semantics (spec §5).
+    bodyColor: preset.colors.primaryText,
+    secondaryColor: preset.colors.secondaryText,
+    headingColor: preset.colors.headings,
   };
 }

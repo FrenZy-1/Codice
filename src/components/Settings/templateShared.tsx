@@ -341,6 +341,10 @@ export function computeHighlightIds(
       case 'misc':
         ids.add('toc');
         break;
+      case 'toc':
+        // TOC page alignment group (spec §4).
+        ids.add('toc');
+        break;
       case 'typography':
         ids.add('body');
         break;
@@ -352,13 +356,42 @@ export function computeHighlightIds(
         ids.add('code');
         break;
       case 'colors': {
+        // Each document color maps to the regions that semantically consume
+        // it (spec §5/§10) — the flash previews exactly what will change.
         const c = value as Record<string, unknown> | undefined;
         if (!c || typeof c !== 'object') break;
         if ('background' in c) ids.add('page');
-        if ('headings' in c) ids.add('heading-h1');
+        if ('headings' in c) {
+          // The Headings document color drives Title + H1–H4 (broadcast).
+          ids.add('heading-title');
+          ids.add('heading-h1');
+          ids.add('heading-h2');
+          ids.add('heading-h3');
+          ids.add('heading-h4');
+        }
         if ('borders' in c || 'codeBorder' in c) ids.add('code');
-        if ('primaryText' in c || 'secondaryText' in c || 'mutedText' in c || 'accent' in c || 'surface' in c || 'links' in c || 'success' in c || 'warning' in c || 'error' in c) {
-          ids.add('body');
+        // Primary text IS the body copy color (spec §5).
+        if ('primaryText' in c) ids.add('body');
+        // Secondary text: title-page subtitle/author/description, TOC
+        // entries, project-structure tree.
+        if ('secondaryText' in c) {
+          ids.add('title-page');
+          ids.add('toc');
+          ids.add('structure');
+        }
+        if ('mutedText' in c) {
+          ids.add('title-page');
+          ids.add('project-header');
+          ids.add('file-header');
+        }
+        if ('accent' in c) {
+          ids.add('toc');
+          ids.add('project-header');
+          ids.add('structure');
+        }
+        if ('links' in c) ids.add('body');
+        if ('success' in c || 'warning' in c || 'error' in c || 'surface' in c) {
+          ids.add('status-card');
         }
         if ('codeHeader' in c || 'lineNumbers' in c) ids.add('code');
         break;

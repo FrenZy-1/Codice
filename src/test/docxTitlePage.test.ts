@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { Paragraph } from 'docx';
-import { buildFrontMatter } from '../lib/exporters/docxExporter';
+import { buildFrontMatter, estimateTitleGroupHeightTwips } from '../lib/exporters/docxExporter';
 import type { DocumentModel, DocumentOptions } from '@/types';
 import { defaultDocumentOptions } from '@/lib/defaultOptions';
 
@@ -14,6 +14,9 @@ const FULL_METADATA = {
   version: '1.2.3',
   description: 'A description of the document.',
 };
+
+/** Group height for FULL_METADATA per the per-field estimator (spec §17). */
+const FULL_GROUP_TWIPS = estimateTitleGroupHeightTwips(FULL_METADATA);
 
 function buildModel(opts?: Partial<DocumentOptions>): DocumentModel {
   return {
@@ -73,10 +76,11 @@ function textOf(p: Paragraph): string {
   return parts.join('');
 }
 
-/** The title-page paragraphs (buildFrontMatter's output minus the trailing page break). */
+/** The title-page paragraphs — buildFrontMatter no longer emits a trailing
+ *  page-break paragraph (the break moved to the next section's first
+ *  paragraph, spec §17). */
 function titlePageParagraphs(model: DocumentModel): Paragraph[] {
-  const paragraphs = buildFrontMatter(model);
-  return paragraphs.slice(0, paragraphs.length - 1);
+  return buildFrontMatter(model);
 }
 
 describe('docx buildFrontMatter — title-page group alignment (spec §9/§29)', () => {
@@ -116,7 +120,7 @@ describe('docx buildFrontMatter — title-page group alignment (spec §9/§29)',
     expect(spacingOf(paragraphs[0]).after).toBe(400);
   });
 
-  it('center on A4 with 20mm margins → before ≈ (16838 - 1134 - 1134 - 6000)/2 (offset must not skew centering, spec §9)', () => {
+  it('center on A4 with 20mm margins → before ≈ (textArea − groupHeight)/2 with the per-field group height (offset must not skew centering, spec §9/§17)', () => {
     const model = buildModel({
       pageSize: 'A4',
       margins: { top: 20, right: 20, bottom: 20, left: 20 },
@@ -125,23 +129,27 @@ describe('docx buildFrontMatter — title-page group alignment (spec §9/§29)',
     });
     const paragraphs = buildFrontMatter(model);
     const textArea = 16838 - 1134 - 1134;
-    expect(spacingOf(paragraphs[0]).before).toBe(Math.round((textArea - 6000) / 2));
+    expect(spacingOf(paragraphs[0]).before).toBe(
+      Math.round((textArea - FULL_GROUP_TWIPS) / 2),
+    );
   });
 
-  it('bottom pushes the group down and clamps at the top margin', () => {
+  it('bottom places the group’s BOTTOM edge at the text-area bottom (minus the nudge) and clamps at the top margin (spec §17)', () => {
     const base = {
       pageSize: 'A4' as const,
       margins: { top: 20, right: 20, bottom: 20, left: 20 },
       titlePageVerticalAlignment: 'bottom' as const,
     };
-    // text area = 16838 - 1134 - 1134 = 14570 → 14570 - 6000 - 2000 = 6570.
+    // text area = 14570; spacing.before = textArea − groupHeight, so the
+    // group's rendered bottom lands exactly at the bottom margin. The
+    // offset applies ONLY in top mode (spec §17) — any offset value gives
+    // the same bottom position.
     expect(
       spacingOf(buildFrontMatter(buildModel({ ...base, titlePageVerticalOffsetPt: 100 }))[0]).before,
-    ).toBe(6570);
-    // A 400pt offset (8000 twips) would underflow below the margin → clamped to 1134.
+    ).toBe(14570 - FULL_GROUP_TWIPS);
     expect(
-      spacingOf(buildFrontMatter(buildModel({ ...base, titlePageVerticalOffsetPt: 400 }))[0]).before,
-    ).toBe(1134);
+      spacingOf(buildFrontMatter(buildModel({ ...base, titlePageVerticalOffsetPt: 500 }))[0]).before,
+    ).toBe(14570 - FULL_GROUP_TWIPS);
   });
 
   it('uses the per-page-size dimensions for the vertical position (Letter)', () => {
@@ -152,7 +160,9 @@ describe('docx buildFrontMatter — title-page group alignment (spec §9/§29)',
       titlePageVerticalOffsetPt: 0,
     });
     const textArea = 15840 - 1134 - 1134;
-    expect(spacingOf(buildFrontMatter(model)[0]).before).toBe(Math.round((textArea - 6000) / 2));
+    expect(spacingOf(buildFrontMatter(model)[0]).before).toBe(
+      Math.round((textArea - FULL_GROUP_TWIPS) / 2),
+    );
   });
 
   it('emits date/version/description paragraphs that honour the group alignment', () => {

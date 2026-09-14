@@ -145,6 +145,7 @@ export function exportPreset(preset: DocumentPreset): string {
     projectHeaders: preset.projectHeaders,
     projectStructure: preset.projectStructure,
     titlePage: preset.titlePage,
+    toc: preset.toc,
     colors: preset.colors,
     misc: preset.misc,
     metadata: preset.metadata,

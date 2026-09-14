@@ -3,19 +3,21 @@
 /**
  * Codice — main application component (Next.js client entry).
  *
- * Layout:
+ * Layout (desktop):
  *   ┌─────────────────────────────────────────────────────────┐
  *   │ Top bar: title, theme toggle, customizer, generate       │
- *   ├───────────────┬─────────────────────────────────────────┤
- *   │ Projects      │  Document preview                       │
- *   │ sidebar       │                                         │
- *   │               │                                         │
- *   │ + upload      │                                         │
- *   │ + file tree   │                                         │
- *   │ + filters     │                                         │
- *   ├───────────────┴─────────────────────────────────────────┤
- *   │ Bottom bar: export panel                                 │
- *   └─────────────────────────────────────────────────────────┘
+ *   ├───────────┬──────────┬──────────────────────────────────┤
+ *   │ Projects  │ Export   │  Document preview                │
+ *   │ sidebar   │ rail     │                                  │
+ *   │           │ (filename│                                  │
+ *   │ + upload  │  format  │                                  │
+ *   │ + tree    │  mode    │                                  │
+ *   │ + filters │  generate│                                  │
+ *   ├───────────┴──────────┴──────────────────────────────────┤
+ *
+ * On narrow screens the three columns stack (sidebar → preview → export).
+ * (The former bottom export footer became the vertical export rail —
+ * spec §13.)
  */
 
 import { useEffect, useRef, useState } from 'react';
@@ -288,11 +290,11 @@ function AppInner() {
         </span>
       </div>
 
-
-      {/* Main content */}
-      <div className="flex flex-1 overflow-hidden">
+      {/* Main content — sidebar · export rail · preview (spec §13). On
+          narrow screens the columns stack via order utilities. */}
+      <div className="flex flex-1 flex-col overflow-y-auto lg:flex-row lg:overflow-hidden">
         <aside
-          className="flex w-80 flex-shrink-0 flex-col overflow-hidden border-r border-app bg-app"
+          className="order-1 flex max-h-[45vh] w-full flex-shrink-0 flex-col overflow-hidden border-b border-app bg-app lg:max-h-none lg:w-80 lg:border-b-0 lg:border-r"
           data-tour="files"
         >
           <ProjectsSidebar
@@ -301,23 +303,20 @@ function AppInner() {
           />
         </aside>
 
+        <aside
+          className="order-3 flex w-full flex-shrink-0 flex-col overflow-hidden border-t border-app bg-surface lg:order-2 lg:w-60 lg:border-t-0 lg:border-r"
+          data-tour="export"
+        >
+          <ExportPanel />
+        </aside>
+
         <main
-          className="flex flex-1 flex-col overflow-hidden"
+          className="order-2 flex min-h-[320px] min-w-0 flex-1 flex-col overflow-hidden lg:order-3 lg:min-h-0"
           data-tour="preview"
         >
           <DocumentPreview />
         </main>
       </div>
-
-      {/* Bottom bar — export panel */}
-      <footer
-        className="border-t border-app bg-surface px-4 py-3"
-        data-tour="export"
-      >
-        <div className="mx-auto max-w-4xl">
-          <ExportPanel />
-        </div>
-      </footer>
 
       <TemplateCustomizer
         open={customizerOpen}

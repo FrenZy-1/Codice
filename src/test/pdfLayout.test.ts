@@ -278,9 +278,11 @@ describe('buildTitlePageLines', () => {
       'Part one.',
       'Part two.',
     ]);
-    // Typography preserved from the original renderer.
-    expect(lines[0]).toMatchObject({ size: 32, style: 'bold', color: [20, 20, 20] });
-    expect(lines[1]).toMatchObject({ size: 14, style: 'italic', color: [80, 80, 80] });
+    // Typography preserved; colors now follow the semantic document colors
+    // (spec §5): title = Headings (#0f172a), subtitle/author = Secondary
+    // (#59636e) — presetToOptions feeds them from the canonical preset.
+    expect(lines[0]).toMatchObject({ size: 32, style: 'bold', color: [15, 23, 42] });
+    expect(lines[1]).toMatchObject({ size: 14, style: 'italic', color: [89, 99, 110] });
     expect(lines[5]).toMatchObject({ size: 10, color: [120, 120, 120] });
     expect(lines[6]).toMatchObject({ size: 10, color: [120, 120, 120] });
     expect(lines[7]).toMatchObject({ size: 11, color: [60, 60, 60] });
@@ -326,10 +328,10 @@ describe('planTitlePageLayout', () => {
     expect(layout.groupTop + layout.totalHeight).toBeLessThanOrEqual(750 + EPS);
   });
 
-  it('bottom: group bottom sits offset*0.5 above the content bottom', () => {
+  it('bottom: the group bottom sits AT the content bottom (offset is top-mode only, spec §17)', () => {
     const layout = planTitlePageLayout({ lines, ...GEO, vAlign: 'bottom', offset: 100 });
-    expect(layout.groupTop).toBeCloseTo(750 - 72.4 - 50, 6);
-    expect(layout.groupTop + layout.totalHeight).toBeCloseTo(700, 6);
+    expect(layout.groupTop).toBeCloseTo(750 - 72.4, 6);
+    expect(layout.groupTop + layout.totalHeight).toBeCloseTo(750, 6);
   });
 
   it('clamps the group inside the content region for extreme offsets', () => {
@@ -338,7 +340,8 @@ describe('planTitlePageLayout', () => {
     expect(top.groupTop).toBeGreaterThanOrEqual(50);
 
     const bottom = planTitlePageLayout({ lines, ...GEO, vAlign: 'bottom', offset: 5000 });
-    expect(bottom.groupTop).toBeCloseTo(50, 6);
+    // The offset is top-mode only — bottom placement ignores it entirely.
+    expect(bottom.groupTop).toBeCloseTo(750 - 72.4, 6);
     expect(bottom.groupTop + bottom.totalHeight).toBeLessThanOrEqual(750 + EPS);
   });
 });

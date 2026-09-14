@@ -34,6 +34,7 @@ import {
   convertMillimetersToTwip,
 } from 'docx';
 import type {
+  DocumentMetadata,
   DocumentModel,
   DocumentOptions,
   ExportOptions,
@@ -277,11 +278,33 @@ function titlePageAlignmentType(
 }
 
 /**
- * Compute the title paragraph's spacing.before so the title-page group sits at
- * the requested vertical position within the page text area (spec §9/§29).
- * 1 pt = 20 twips; the group height is approximated as 6000 twips.
+ * Estimate the rendered height of the title-page group in twips from the
+ * metadata actually present (spec §17 — "bottom" must sit AT the bottom, so
+ * the old fixed 6000-twip approximation is replaced by a per-field estimate:
+ * line height ≈ 1.15 × font size, 1 pt = 20 twips, plus each paragraph's
+ * after/before spacing exactly as buildFrontMatter emits them).
  */
-function titlePageSpacingBefore(options: DocumentOptions): number {
+export function estimateTitleGroupHeightTwips(metadata: DocumentMetadata): number {
+  let h = Math.round(28 * 1.15 * 20) + 400; // title (28pt) + after 400
+  if (metadata.subtitle) h += Math.round(14 * 1.15 * 20) + 200;
+  if (metadata.author) h += Math.round(14 * 1.15 * 20) + 200;
+  if (metadata.course) h += Math.round(12 * 1.15 * 20) + 100;
+  if (metadata.university) h += Math.round(12 * 1.15 * 20) + 100;
+  h += Math.round(11 * 1.15 * 20) + 600; // "Generated: …" + before 600
+  if (metadata.version) h += Math.round(11 * 1.15 * 20) + 100;
+  if (metadata.description) h += Math.round(11 * 1.15 * 20) + 400;
+  return h;
+}
+
+/**
+ * Compute the title paragraph's spacing.before so the title-page group sits at
+ * the requested vertical position within the page text area (spec §9/§29/§17).
+ * 1 pt = 20 twips; the group height is estimated from the metadata.
+ */
+export function titlePageSpacingBefore(
+  options: DocumentOptions,
+  metadata: DocumentMetadata = {},
+): number {
   const [pageWTwips, pageHTwips] = PAGEDimensions[options.pageSize] ?? PAGEDimensions.A4;
   // Landscape swaps the portrait dimensions (mirrors the section size setup).
   const pageHeightTwips = options.landscape ? pageWTwips : pageHTwips;
@@ -289,14 +312,17 @@ function titlePageSpacingBefore(options: DocumentOptions): number {
   const marginBottomTwips = Math.round(options.margins.bottom * MM_TO_TWIP_TITLE_PAGE);
   const textAreaHeight = Math.max(0, pageHeightTwips - marginTopTwips - marginBottomTwips);
   const offsetTwips = Math.round((options.titlePageVerticalOffsetPt ?? 100) * 20);
+  const groupHeight = estimateTitleGroupHeightTwips(metadata);
   const vertical = options.titlePageVerticalAlignment ?? 'top';
   if (vertical === 'center') {
     // Center/Center places the group AT the center — the offset is a
     // top-mode nudge and must not skew centering (spec §9/§29).
-    return Math.max(0, Math.round((textAreaHeight - TITLE_GROUP_HEIGHT_TWIPS) / 2));
+    return Math.max(0, Math.round((textAreaHeight - groupHeight) / 2));
   }
   if (vertical === 'bottom') {
-    return Math.max(marginTopTwips, Math.max(0, textAreaHeight - TITLE_GROUP_HEIGHT_TWIPS) - offsetTwips);
+    // The GROUP's bottom edge lands AT the text-area bottom (spec §17) —
+    // the offset applies only in top mode, so "bottom" reads as bottom.
+    return Math.max(marginTopTwips, Math.max(0, textAreaHeight - groupHeight));
   }
   // top — with the 100pt default offset this preserves the historical ~2000
   // twips of breathing room below the top margin.
@@ -312,7 +338,7 @@ export function buildFrontMatter(model: DocumentModel): Paragraph[] {
   // horizontal alignment, and the group's vertical position comes from the
   // title paragraph's spacing.before.
   const alignment = titlePageAlignmentType(model.options.titlePageHorizontalAlignment);
-  const titleSpacingBefore = titlePageSpacingBefore(model.options);
+  const titleSpacingBefore = titlePageSpacingBefore(model.options, model.metadata ?? {});
 
   out.push(
     new Paragraph({
@@ -442,24 +468,53 @@ export function buildFrontMatter(model: DocumentModel): Paragraph[] {
     );
   }
 
-  // Page break after front matter
-  out.push(
-    new Paragraph({
-      children: [new PageBreak()],
-    }),
-  );
+  // NOTE: no trailing PageBreak paragraph — the page break after the title
+  // page is expressed as pageBreakBefore on the NEXT section's first
+  // paragraph (TOC heading / first project heading). A trailing break run
+  // used to overflow to a blank second page when the group filled the page
+  // (Vertical = Bottom), producing an empty page (spec §17).
 
   return out;
+}
+
+/**
+ * spacing.before for the TOC heading so the TOC content group sits at the
+ * requested vertical position (spec §4). 'top' keeps the historical 200.
+ */
+export function tocSpacingBefore(options: DocumentOptions, model: DocumentModel): number {
+  const vertical = options.tocVerticalAlignment ?? 'top';
+  if (vertical === 'top') return 200;
+  const [pageWTwips, pageHTwips] = PAGEDimensions[options.pageSize] ?? PAGEDimensions.A4;
+  const pageHeightTwips = options.landscape ? pageWTwips : pageHTwips;
+  const marginTopTwips = Math.round(options.margins.top * MM_TO_TWIP_TITLE_PAGE);
+  const marginBottomTwips = Math.round(options.margins.bottom * MM_TO_TWIP_TITLE_PAGE);
+  const textAreaHeight = Math.max(0, pageHeightTwips - marginTopTwips - marginBottomTwips);
+  // ~14pt per rendered line (heading + placeholder + entries incl. spacing).
+  const lineCount =
+    2 + model.projects.reduce((acc, p) => acc + 1 + p.files.length, 0);
+  const groupHeight = Math.round(lineCount * 280);
+  if (vertical === 'center') {
+    return Math.max(0, Math.round((textAreaHeight - groupHeight) / 2));
+  }
+  return Math.max(0, textAreaHeight - groupHeight);
 }
 
 /** Build a table-of-contents section. */
 function buildToc(model: DocumentModel): Paragraph[] {
   const out: Paragraph[] = [];
+  // spec §4 — the TOC is one content group: every paragraph shares the
+  // configured horizontal alignment, and the group is vertically positioned
+  // via the heading's spacing.before.
+  const alignment = titlePageAlignmentType(model.options.tocHorizontalAlignment ?? 'left');
+  const spacingBefore = tocSpacingBefore(model.options, model);
   out.push(
     new Paragraph({
       text: 'Table of Contents',
       heading: HeadingLevel.HEADING_1,
-      spacing: { before: 200, after: 200 },
+      alignment,
+      // spec §15/§16 — the TOC opens its own page after the title page.
+      pageBreakBefore: model.options.includeFrontMatter === true,
+      spacing: { before: spacingBefore, after: 200 },
     }),
   );
 
@@ -475,6 +530,7 @@ function buildToc(model: DocumentModel): Paragraph[] {
           size: 18,
         }),
       ],
+      alignment,
       spacing: { after: 200 },
     }),
   );
@@ -492,6 +548,7 @@ function buildToc(model: DocumentModel): Paragraph[] {
             font: model.options.headingFont,
           }),
         ],
+        alignment,
         spacing: { before: 100, after: 40 },
       }),
     );
@@ -509,6 +566,7 @@ function buildToc(model: DocumentModel): Paragraph[] {
               font: model.options.bodyFont,
             }),
           ],
+          alignment,
           spacing: { after: 20 },
         }),
       );
@@ -517,11 +575,10 @@ function buildToc(model: DocumentModel): Paragraph[] {
     n += 1;
   }
 
-  out.push(
-    new Paragraph({
-      children: [new PageBreak()],
-    }),
-  );
+  // NOTE: no trailing PageBreak paragraph — every project heading already
+  // carries pageBreakBefore (projectIndex > 1 || includeToc), and a trailing
+  // break run could spill onto a blank page when the TOC ends at a page
+  // boundary (same class of bug as the title page, spec §16).
 
   return out;
 }
@@ -842,7 +899,7 @@ async function buildDocx(model: DocumentModel): Promise<DocxDocument> {
         text: `${projectIndex}. ${project.label}`,
         heading: HeadingLevel.HEADING_1,
         spacing: { before: 240, after: 120 },
-        pageBreakBefore: projectIndex > 1 || opts.includeToc,
+        pageBreakBefore: projectIndex > 1 || opts.includeToc || opts.includeFrontMatter,
       }),
     );
 
@@ -914,6 +971,15 @@ async function buildDocx(model: DocumentModel): Promise<DocxDocument> {
               right: mmToTwip(opts.margins.right),
               bottom: mmToTwip(opts.margins.bottom),
               left: mmToTwip(opts.margins.left),
+              // Header/footer zone distances (§10) — the same spacing the
+              // previews honor. Word's default (720 twips) applies when the
+              // preset carries no spacing so historical files are unchanged.
+              ...(opts.headerSpacingMm != null
+                ? { header: mmToTwip(opts.headerSpacingMm) }
+                : {}),
+              ...(opts.footerSpacingMm != null
+                ? { footer: mmToTwip(opts.footerSpacingMm) }
+                : {}),
             },
           },
         },

@@ -462,3 +462,23 @@ export const WEIGHT_MAP: Record<FontWeight, number> = {
   semibold: 600,
   bold: 700,
 };
+
+/**
+ * Vertical flex justification for ONE preview page (spec §4/§9/§10):
+ *   - title pages follow the title page's vertical alignment;
+ *   - TOC pages follow the TOC's own vertical alignment (spec §4);
+ *   - content and project-intro pages ALWAYS start at the top of the usable
+ *     area — a page break resets normal flow and the title/TOC alignment
+ *     must never leak into a new project's page (spec §10).
+ */
+export function pageContentAlignment(
+  kind: PreviewPage['kind'],
+  titleVertical: 'top' | 'center' | 'bottom',
+  tocVertical: 'top' | 'center' | 'bottom',
+): 'flex-start' | 'center' | 'flex-end' {
+  const toJustify = (v: 'top' | 'center' | 'bottom') =>
+    v === 'center' ? 'center' : v === 'bottom' ? 'flex-end' : 'flex-start';
+  if (kind === 'title') return toJustify(titleVertical);
+  if (kind === 'toc') return toJustify(tocVertical);
+  return 'flex-start';
+}

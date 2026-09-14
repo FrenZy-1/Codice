@@ -11,10 +11,19 @@
  * The list of available themes is derived from Shiki's `bundledThemes`
  * export via `syntaxThemeRegistry.ts` — we do NOT maintain a separate
  * hardcoded list.
+ *
+ * Robustness guarantees (spec §8/§20):
+ *   - Language ids are validated against Shiki's `bundledLanguages` before
+ *     they ever reach `loadLanguage()` / `codeToTokens()`. Ids the installed
+ *     Shiki version does not ship (e.g. `ignore` for `.gitignore`) fall back
+ *     to plaintext — the file still renders, stays selectable and stays
+ *     exportable, and no "Language `x` not found" error can surface.
+ *   - `plainHighlightedFile()` builds a plaintext fallback so callers can
+ *     always render source text even when highlighting throws.
  */
 
 import type { HighlightedFile, HighlightedLine, HighlightToken } from '@/types';
-import { resolveSyntaxTheme } from '@/lib/themes/syntaxThemeRegistry';
+import { resolveSyntaxTheme, findSyntaxTheme } from '@/lib/themes/syntaxThemeRegistry';
 
 /** Singleton Shiki highlighter promise. */
 let highlighterPromise: Promise<any> | null = null;
@@ -24,6 +33,63 @@ const loadedLanguages = new Set<string>();
 
 /** Set of themes we have already loaded. */
 const loadedThemes = new Set<string>();
+
+/** Languages Shiki always understands without a TextMate grammar. */
+const PLAIN_LANGUAGE_IDS = new Set(['plaintext', 'plain', 'text', 'txt']);
+
+/** Cached set of language ids shipped by the installed Shiki version. */
+let bundledLanguageIds: Set<string> | null = null;
+
+async function getBundledLanguageIds(): Promise<Set<string>> {
+  if (!bundledLanguageIds) {
+    try {
+      const shiki = await import('shiki');
+      bundledLanguageIds = new Set(Object.keys((shiki as any).bundledLanguages ?? {}));
+    } catch {
+      bundledLanguageIds = new Set();
+    }
+  }
+  return bundledLanguageIds;
+}
+
+/**
+ * Resolve a requested language id to one the installed Shiki actually
+ * supports (spec §20). Unknown ids — `ignore` for `.gitignore`-style files,
+ * removed grammars, typos — become `plaintext` instead of a runtime error.
+ */
+export async function resolveSupportedLanguage(lang: string | null): Promise<string> {
+  if (!lang || PLAIN_LANGUAGE_IDS.has(lang)) return 'plaintext';
+  const supported = await getBundledLanguageIds();
+  // An empty set means Shiki itself failed to import — stay plaintext-safe.
+  if (supported.size === 0) return 'plaintext';
+  return supported.has(lang) ? lang : 'plaintext';
+}
+
+/**
+ * Build a plaintext HighlightedFile from raw source (spec §8). Used when
+ * highlighting throws so preview panes render the source instead of a
+ * perpetual "Loading…" state.
+ */
+export function plainHighlightedFile(
+  fileId: string,
+  relativePath: string,
+  source: string,
+): HighlightedFile {
+  const lines: HighlightedLine[] = source.split('\n').map((text, i) => ({
+    lineNumber: i + 1,
+    text,
+    tokens:
+      text.length > 0
+        ? [{ start: 0, length: text.length, scopes: [] } as HighlightToken]
+        : [],
+  }));
+  return {
+    fileId,
+    relativePath,
+    language: null,
+    lines: lines.length > 0 ? lines : [{ lineNumber: 1, text: '', tokens: [] }],
+  };
+}
 
 /**
  * Get (or create) a Shiki highlighter instance.
@@ -54,7 +120,8 @@ async function ensureTheme(theme: string): Promise<void> {
     await hl.loadTheme(safeTheme);
     loadedThemes.add(safeTheme);
   } catch {
-    // Theme unavailable — fall back to default.
+    // Theme unavailable — mark as loaded to avoid retry storms; callers use
+    // getThemeColors() which falls back to registry defaults.
     loadedThemes.add(safeTheme);
   }
 }
@@ -90,7 +157,7 @@ export async function highlightFile(
 ): Promise<HighlightedFile> {
   const safeTheme = resolveSyntaxTheme(theme);
   await ensureTheme(safeTheme);
-  const lang = language ?? 'plaintext';
+  const lang = await resolveSupportedLanguage(language);
   await ensureLanguage(lang);
 
   const hl = await getHighlighter();
@@ -149,13 +216,27 @@ export async function getThemeColors(
   theme: string,
 ): Promise<{ background: string; foreground: string }> {
   const safeTheme = resolveSyntaxTheme(theme);
-  await ensureTheme(safeTheme);
-  const hl = await getHighlighter();
-  const themeData = hl.getTheme(safeTheme);
-  return {
-    background: themeData.bg,
-    foreground: themeData.fg,
-  };
+  try {
+    await ensureTheme(safeTheme);
+    const hl = await getHighlighter();
+    const themeData = hl.getTheme(safeTheme);
+    if (themeData?.bg) {
+      return {
+        background: themeData.bg,
+        foreground: themeData.fg,
+      };
+    }
+  } catch {
+    // fall through to registry defaults
+  }
+  // Registry fallback: the code background must follow the selected theme's
+  // lightness class even when Shiki cannot hand us the exact colors (spec
+  // §6 — never leave a stale background behind).
+  const meta = findSyntaxTheme(safeTheme);
+  if (meta?.dark) {
+    return { background: '#0d1117', foreground: '#e6edf3' };
+  }
+  return { background: '#ffffff', foreground: '#24292e' };
 }
 
 /** Preload common languages to make first highlight faster. */

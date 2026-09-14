@@ -16,6 +16,7 @@ import type {
   PageStyle,
   ProjectHeaderStyle,
   ProjectStructureStyle,
+  TocStyle,
   TitlePageStyle,
   TypographyStyle,
   HeaderFooterLayout,
@@ -65,6 +66,12 @@ export const DEFAULT_MISC = {
   pageBreakBetweenFiles: true,
   numberHeadings: true,
   showFileMetadata: true,
+};
+
+/** Default table-of-contents page alignment (spec §4). */
+export const DEFAULT_TOC_STYLE: TocStyle = {
+  horizontalAlignment: 'left',
+  verticalAlignment: 'top',
 };
 
 /** Default document color palette (light). */
@@ -210,7 +217,9 @@ export type PresetInput = {
     ? Partial<PageStyle>
     : K extends 'titlePage'
       ? Partial<TitlePageStyle>
-      : DocumentPreset[K];
+      : K extends 'toc'
+        ? Partial<TocStyle>
+        : DocumentPreset[K];
 };
 
 /**
@@ -293,6 +302,12 @@ export function migratePreset(raw: PresetInput): DocumentPreset {
     verticalAlignment: safeEnum(raw.titlePage?.verticalAlignment, VERTICAL_ALIGNMENTS, 'top'),
   };
 
+  // Migrate the TOC page style (spec §4) — older presets lack it entirely.
+  const toc: TocStyle = {
+    horizontalAlignment: safeEnum(raw.toc?.horizontalAlignment, ALIGNMENTS, DEFAULT_TOC_STYLE.horizontalAlignment),
+    verticalAlignment: safeEnum(raw.toc?.verticalAlignment, VERTICAL_ALIGNMENTS, DEFAULT_TOC_STYLE.verticalAlignment),
+  };
+
   return {
     id: raw.id ?? '',
     name: raw.name ?? 'Preset',
@@ -309,6 +324,7 @@ export function migratePreset(raw: PresetInput): DocumentPreset {
     projectHeaders,
     projectStructure,
     titlePage,
+    toc,
     colors: { ...DEFAULT_DOCUMENT_COLORS, ...(raw.colors ?? {}) },
     misc,
     metadata: raw.metadata,

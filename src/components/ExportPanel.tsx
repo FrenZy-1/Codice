@@ -496,73 +496,83 @@ export function ExportPanel() {
     (p) => getSelectedFiles(p.id).size > 0,
   ).length > 1;
 
+  // spec §13 — the export controls live in a compact VERTICAL rail between
+  // the sidebar and the preview (the former bottom footer is gone). The
+  // whole panel scrolls if the viewport is short; progress and history
+  // render below the controls.
   return (
-    <div className="space-y-3">
-      <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
-        <div>
-          <label className="label block mb-1">Filename</label>
-          <input
-            type="text"
-            className="input"
-            value={state.outputFilename}
-            onChange={(e) =>
-              dispatch({ type: 'SET_OUTPUT_FILENAME', filename: e.target.value })
-            }
-          />
+    <div className="flex h-full min-h-0 w-full flex-col gap-3 overflow-y-auto p-3">
+      <div>
+        <div className="mb-1.5 flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wide text-secondary">
+          <Download size={12} />
+          Export
         </div>
-        <div>
-          <label className="label block mb-1">Format</label>
-          <select
-            className="select"
-            value={state.outputFormat}
-            onChange={(e) =>
-              dispatch({
-                type: 'SET_OUTPUT_FORMAT',
-                format: e.target.value as 'docx' | 'pdf' | 'odt',
-              })
-            }
-          >
-            <option value="docx">DOCX (Word)</option>
-            <option value="pdf">PDF</option>
-            <option value="odt">ODT (OpenDocument)</option>
-          </select>
-        </div>
-        <div>
-          <label className="label block mb-1">Mode</label>
-          <select
-            className="select"
-            value={showModeToggle ? state.outputMode : 'combined'}
-            onChange={(e) =>
-              dispatch({
-                type: 'SET_OUTPUT_MODE',
-                mode: e.target.value as OutputMode,
-              })
-            }
-            disabled={!showModeToggle}
-            title={
-              showModeToggle
-                ? 'Choose how to package multiple projects'
-                : 'Only available with multiple projects selected'
-            }
-          >
-            <option value="combined">Combined (single document)</option>
-            <option value="separate">Separate (ZIP archive)</option>
-          </select>
+        <div className="space-y-2">
+          <div>
+            <label className="label block mb-1">Filename</label>
+            <input
+              type="text"
+              className="input"
+              value={state.outputFilename}
+              onChange={(e) =>
+                dispatch({ type: 'SET_OUTPUT_FILENAME', filename: e.target.value })
+              }
+            />
+          </div>
+          <div>
+            <label className="label block mb-1">Format</label>
+            <select
+              className="select"
+              value={state.outputFormat}
+              onChange={(e) =>
+                dispatch({
+                  type: 'SET_OUTPUT_FORMAT',
+                  format: e.target.value as 'docx' | 'pdf' | 'odt',
+                })
+              }
+            >
+              <option value="docx">DOCX (Word)</option>
+              <option value="pdf">PDF</option>
+              <option value="odt">ODT (OpenDocument)</option>
+            </select>
+          </div>
+          <div>
+            <label className="label block mb-1">Mode</label>
+            <select
+              className="select"
+              value={showModeToggle ? state.outputMode : 'combined'}
+              onChange={(e) =>
+                dispatch({
+                  type: 'SET_OUTPUT_MODE',
+                  mode: e.target.value as OutputMode,
+                })
+              }
+              disabled={!showModeToggle}
+              title={
+                showModeToggle
+                  ? 'Choose how to package multiple projects'
+                  : 'Only available with multiple projects selected'
+              }
+            >
+              <option value="combined">Combined (single document)</option>
+              <option value="separate">Separate (ZIP archive)</option>
+            </select>
+          </div>
         </div>
       </div>
 
-      <div className="flex items-center justify-between gap-2">
-        <div className="text-xs text-muted">
+      <div className="space-y-1.5">
+        <div className="text-[11px] text-muted">
           {showModeToggle
             ? state.outputMode === 'combined'
               ? `${state.projects.filter(p => getSelectedFiles(p.id).size > 0).length} projects → 1 document`
               : `${state.projects.filter(p => getSelectedFiles(p.id).size > 0).length} projects → ZIP archive`
             : `${totalSelected} file${totalSelected === 1 ? '' : 's'} selected`}
         </div>
-        <div className="flex items-center gap-1.5">
+        <div className="flex flex-col gap-1.5">
           <button
             type="button"
-            className="btn-secondary"
+            className="btn-secondary w-full justify-center"
             onClick={handleSnapshotRequest}
             disabled={isSnapshotting || isExporting || totalSelected === 0}
             title="Preview and download the selected source files as a ZIP archive — mirrors the document's contents"
@@ -572,10 +582,10 @@ export function ExportPanel() {
             ) : (
               <Package size={14} />
             )}
-            <span className="hidden sm:inline">Source ZIP</span>
+            <span>Source ZIP</span>
           </button>
           <button
-            className="btn-primary"
+            className="btn-primary w-full justify-center"
             onClick={() => void handleExport()}
             disabled={isExporting || totalSelected === 0}
           >

@@ -341,19 +341,30 @@ export function buildTitlePageLines(input: TitlePageLinesInput): TitlePageLine[]
     nextGap = 24;
   };
 
+  const toRgbTuple = (hex: string): [number, number, number] => {
+    const c = parseHex(hex);
+    return [c.r, c.g, c.b];
+  };
+  const titleColorRgb: [number, number, number] = options.headingColor
+    ? toRgbTuple(options.headingColor)
+    : [20, 20, 20];
+  const secondaryRgb: [number, number, number] = options.secondaryColor
+    ? toRgbTuple(options.secondaryColor)
+    : [80, 80, 80];
+
   lines.push({
     text: md.title ?? 'Project Report',
     font: headingFont,
     style: 'bold',
     size: 32,
-    color: [20, 20, 20],
+    color: titleColorRgb,
     gapBefore: 0,
   });
 
-  if (md.subtitle) pushMeta(md.subtitle, 'italic', 14, [80, 80, 80]);
-  if (md.author) pushMeta(md.author, 'normal', 14, [80, 80, 80]);
-  if (md.course) pushMeta(md.course, 'normal', 14, [80, 80, 80]);
-  if (md.university) pushMeta(md.university, 'normal', 14, [80, 80, 80]);
+  if (md.subtitle) pushMeta(md.subtitle, 'italic', 14, secondaryRgb);
+  if (md.author) pushMeta(md.author, 'normal', 14, secondaryRgb);
+  if (md.course) pushMeta(md.course, 'normal', 14, secondaryRgb);
+  if (md.university) pushMeta(md.university, 'normal', 14, secondaryRgb);
 
   // A visible gap, then date / version / description as part of the group.
   nextGap = Math.max(nextGap, 36);
@@ -430,7 +441,9 @@ export function planTitlePageLayout(input: TitlePageLayoutInput): TitlePageLayou
     // offset is a top-mode nudge and does not skew centering.
     groupTop = contentTop + (contentH - totalHeight) / 2;
   } else if (vAlign === 'bottom') {
-    groupTop = contentBottom - totalHeight - offset * 0.5;
+    // Bottom = the group's bottom edge sits AT the content-area bottom
+    // (spec §17). The offset applies only in top mode.
+    groupTop = contentBottom - totalHeight;
   } else {
     groupTop = contentTop + offset;
   }
@@ -488,25 +501,64 @@ function renderFrontMatter(state: LayoutState, model: DocumentModel) {
 
 function renderToc(state: LayoutState, model: DocumentModel) {
   const { doc, options } = state;
-  renderHeading1(state, 'Table of Contents');
+
+  // spec §4 — the TOC is a page-level CONTENT GROUP with its own
+  // horizontal + vertical alignment (independent of text alignment of the
+  // individual lines, which the group alignment positions).
+  const hAlign = options.tocHorizontalAlignment ?? 'left';
+  const pdfAlign: 'left' | 'center' | 'right' = hAlign;
+  const xFor = () =>
+    hAlign === 'center'
+      ? (state.margin.left + state.pageW - state.margin.right) / 2
+      : hAlign === 'right'
+        ? state.pageW - state.margin.right
+        : state.margin.left;
+
+  // Vertical: estimate the block height first, then offset the group inside
+  // the usable page area (top / center / bottom) exactly like the title
+  // page group.
+  const perProject = 52; // label line + spacing
+  const perFile = 18;
+  const blockH =
+    40 +
+    model.projects.reduce(
+      (acc, p) => acc + perProject + p.files.length * perFile,
+      0,
+    );
+  const contentTop = state.margin.top;
+  const contentBottom = state.pageH - state.margin.bottom;
+  const vAlign = options.tocVerticalAlignment ?? 'top';
+  let startY = contentTop;
+  if (vAlign === 'center') {
+    startY = contentTop + Math.max(0, (contentBottom - contentTop - blockH) / 2);
+  } else if (vAlign === 'bottom') {
+    startY = Math.max(contentTop, contentBottom - blockH);
+  }
+  state.cursorY = startY;
+
+  renderHeading1(state, 'Table of Contents', hAlign);
+  const headingColor = options.headingColor ? parseHex(options.headingColor) : { r: 20, g: 20, b: 20 };
+  const secondary = options.secondaryColor ? parseHex(options.secondaryColor) : { r: 60, g: 60, b: 60 };
   let n = 1;
   for (const project of model.projects) {
     doc.setFont(pdfFontName(options.headingFont), 'bold');
     doc.setFontSize(13);
-    doc.setTextColor(20, 20, 20);
+    doc.setTextColor(headingColor.r, headingColor.g, headingColor.b);
     ensureSpace(state, 30);
-    doc.text(`${n}. ${project.label}`, state.margin.left, state.cursorY);
+    doc.text(`${n}. ${project.label}`, xFor(), state.cursorY,
+      hAlign === 'left' ? undefined : { align: pdfAlign });
     state.cursorY += 22;
     let m = 1;
     doc.setFont(pdfFontName(options.bodyFont), 'normal');
     doc.setFontSize(11);
-    doc.setTextColor(60, 60, 60);
+    doc.setTextColor(secondary.r, secondary.g, secondary.b);
     for (const file of project.files) {
       ensureSpace(state, 18);
       const meta = options.showFileMetadata
         ? `   ${n}.${m}  ${file.relativePath}  ·  ${languageLabel(file.language)} · ${formatBytes(file.sizeBytes)}`
         : `   ${n}.${m}  ${file.relativePath}`;
-      doc.text(meta, state.margin.left, state.cursorY);
+      doc.text(meta, xFor(), state.cursorY,
+        hAlign === 'left' ? undefined : { align: pdfAlign });
       state.cursorY += 16;
       m += 1;
     }
@@ -633,7 +685,7 @@ function renderTree(
   }
 }
 
-function renderHeading1(state: LayoutState, text: string) {
+function renderHeading1(state: LayoutState, text: string, align: 'left' | 'center' | 'right' = 'left') {
   const { doc, options } = state;
   ensureSpace(state, 40);
   if (state.cursorY > state.margin.top + 1) {
@@ -641,8 +693,17 @@ function renderHeading1(state: LayoutState, text: string) {
   }
   doc.setFont(pdfFontName(options.headingFont), 'bold');
   doc.setFontSize(20);
-  doc.setTextColor(15, 23, 42);
-  doc.text(text, state.margin.left, state.cursorY + 20);
+  // Headings document color drives H1 (spec §5); falls back to the
+  // historical near-black when the option is absent (old tests/models).
+  const c = options.headingColor ? parseHex(options.headingColor) : { r: 15, g: 23, b: 42 };
+  doc.setTextColor(c.r, c.g, c.b);
+  const x =
+    align === 'center'
+      ? (state.margin.left + state.pageW - state.margin.right) / 2
+      : align === 'right'
+        ? state.pageW - state.margin.right
+        : state.margin.left;
+  doc.text(text, x, state.cursorY + 20, align === 'left' ? undefined : { align });
   state.cursorY += 32;
 }
 
@@ -652,7 +713,8 @@ function renderHeading2(state: LayoutState, text: string) {
   state.cursorY += 8;
   doc.setFont(pdfFontName(options.headingFont), 'bold');
   doc.setFontSize(15);
-  doc.setTextColor(15, 23, 42);
+  const c = options.headingColor ? parseHex(options.headingColor) : { r: 15, g: 23, b: 42 };
+  doc.setTextColor(c.r, c.g, c.b);
   doc.text(text, state.margin.left, state.cursorY + 16);
   state.cursorY += 24;
 }
@@ -663,7 +725,8 @@ function renderHeading3(state: LayoutState, text: string) {
   state.cursorY += 6;
   doc.setFont(pdfFontName(options.headingFont), 'bold');
   doc.setFontSize(12);
-  doc.setTextColor(30, 41, 59);
+  const c = options.headingColor ? parseHex(options.headingColor) : { r: 30, g: 41, b: 59 };
+  doc.setTextColor(c.r, c.g, c.b);
   doc.text(text, state.margin.left, state.cursorY + 14);
   state.cursorY += 22;
 }
@@ -1187,7 +1250,9 @@ function applyHeaderFooter(state: LayoutState, model: DocumentModel) {
       doc.setFont(bodyFont, 'normal');
       doc.setFontSize(9);
       doc.setTextColor(120, 120, 120);
-      const headerY = margin.top - 8;
+      // §10 — spacing-derived header offset; floored at the historical
+      // 8pt so every built-in preset renders exactly as before.
+      const headerY = margin.top - Math.max(8, (options.headerSpacingMm ?? 0) * 0.8);
       if (layout === 'single') {
         const text = expandPerPage(
           options.pageHeaderCenter ?? options.pageHeader ?? '',
@@ -1224,7 +1289,8 @@ function applyHeaderFooter(state: LayoutState, model: DocumentModel) {
       doc.setFont(bodyFont, 'normal');
       doc.setFontSize(9);
       doc.setTextColor(120, 120, 120);
-      const footerY = pageH - margin.bottom + 12;
+      // §10 — spacing-derived footer offset; floored at the historical 12pt.
+      const footerY = pageH - margin.bottom + Math.max(12, (options.footerSpacingMm ?? 0) * 1.2);
       if (layout === 'single') {
         const value = options.pageFooterCenter
           ? footerSlotValue(options.pageFooterCenter, state, i, totalPages)

@@ -146,6 +146,8 @@ export interface DocumentOptions {
   wrapLongLines: boolean;
   /** Show project structure tree in the document. */
   includeProjectStructure: boolean;
+  /** Text color for the project structure tree (optional — exporters fall back). */
+  projectStructureColor?: string;
   /** Syntax theme name. */
   syntaxTheme: string;
   /** Header text on every page (or null). */
@@ -153,6 +155,10 @@ export interface DocumentOptions {
   /** Footer template; supports {page} and {pages}. */
   pageFooter: string | null;
   // ---- Structured header/footer layout (optional for backward compat) ----
+  /** Header zone height (mm) — positions the header within the top margin. */
+  headerSpacingMm?: number;
+  /** Footer zone height (mm) — positions the footer within the bottom margin. */
+  footerSpacingMm?: number;
   /** Whether the structured header is shown at all. */
   pageHeaderShow?: boolean;
   /** Header layout preset: how many regions are rendered. */
@@ -189,6 +195,19 @@ export interface DocumentOptions {
   titlePageHorizontalAlignment?: 'left' | 'center' | 'right';
   /** Show file metadata inside the table of contents. */
   showFileMetadata?: boolean;
+  // ---- Table-of-contents page alignment (spec §4) ----
+  /** Horizontal alignment of the TOC content group. */
+  tocHorizontalAlignment?: 'left' | 'center' | 'right';
+  /** Vertical alignment of the TOC content group within its page. */
+  tocVerticalAlignment?: 'top' | 'center' | 'bottom';
+  // ---- Document color semantics (spec §5) — exporters fall back to their
+  // historical fixed colors when these are absent. ----
+  /** Primary body text color (hex). */
+  bodyColor?: string;
+  /** Secondary/metadata text color (hex). */
+  secondaryColor?: string;
+  /** Heading text color (hex). */
+  headingColor?: string;
 }
 
 /** Structured footer slot content type. */

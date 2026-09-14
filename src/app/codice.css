@@ -376,7 +376,14 @@ input[type='color'] {
 }
 
 .codice-highlight {
-  animation: codice-highlight-fade 1s ease-out forwards;
+  /* NO `forwards` fill: a finished animation's fill values would override
+     the element's inline background-color forever (CSS animations beat
+     inline styles in the cascade) — code blocks flashed once kept a
+     transparent background, which read as a "stale/stuck" syntax-theme
+     background (spec §6). With default fill the element returns to its own
+     styles the moment the animation ends — visually identical, since the
+     100% keyframe matches the resting state. */
+  animation: codice-highlight-fade 1s ease-out;
   border-radius: 3px;
 }
 
@@ -426,7 +433,8 @@ input[type='color'] {
   border-width: 1.5px;
   border-radius: 0.5rem;
   text-align: left;
-  cursor: default;
+  /* Clicking opens the native folder picker — it is a button (§12 pointer). */
+  cursor: pointer;
 }
 
 .codice-dropzone-compact.codice-dropzone-active {
@@ -1021,7 +1029,8 @@ button.codice-input-chip:hover {
 
 .codice-outline-panel {
   position: absolute;
-  top: 0.75rem;
+  /* Below the preview zoom toolbar so the panel never covers it (§1). */
+  top: 3rem;
   right: 0.75rem;
   z-index: 30;
   width: 17rem;
@@ -1303,6 +1312,18 @@ button.codice-input-chip:hover {
   /* Undo the fit-to-screen scaling. */
   .codice-preview-frame {
     width: auto !important;
+    min-width: 0 !important;
+  }
+
+  /* The scaled page sits inside a slot/scale wrapper pair — undo both so
+     pages print at full size without the negative-margin compensation. */
+  .codice-page-slot {
+    width: auto !important;
+  }
+
+  .codice-page-scale {
+    transform: none !important;
+    margin-bottom: 0 !important;
   }
 
   .codice-preview-surface {
@@ -1562,4 +1583,32 @@ button.codice-input-chip:hover {
 .codice-tour-dot {
   /* Dots are decorative; expose them only to sighted users. */
   forced-color-adjust: auto;
+}
+
+/* ------------------------------------------------------------------ */
+/* Interactive affordances (§12): every genuinely clickable control gets a
+   pointer cursor; disabled controls look (and cursor) disabled. Specificity
+   stays below class-based overrides (.codice-drag-handle grab, etc.).      */
+/* ------------------------------------------------------------------ */
+
+button:not(:disabled) {
+  cursor: pointer;
+}
+
+button:disabled {
+  cursor: not-allowed;
+}
+
+select:not(:disabled) {
+  cursor: pointer;
+}
+
+input[type='checkbox']:not(:disabled),
+input[type='radio']:not(:disabled) {
+  cursor: pointer;
+}
+
+/* Toggle rows / file rows: the whole label is the click target. */
+label:has(> input[type='checkbox']:not(:disabled)) {
+  cursor: pointer;
 }

@@ -23,10 +23,13 @@
 import { describe, expect, it } from 'vitest';
 import JSZip from 'jszip';
 import {
+  buildSpanAutoStyles,
   buildStylesXml,
   computeTitlePageSpacerCm,
   odtExporter,
   renderCodeLine,
+  resetSpanStyles,
+  spanStyleName,
   xmlEscapeWithSpaces,
 } from '../lib/exporters/odtExporter';
 import type {
@@ -227,6 +230,7 @@ describe('renderCodeLine', () => {
 
   it('keeps the DejaVu fallback span for box-drawing glyph runs', () => {
     const text = '├── src/';
+    resetSpanStyles();
     const xml = renderCodeLine(
       makeLine(1, text, fullToken(text)),
       makeOptions({ showLineNumbers: false }),
@@ -234,7 +238,14 @@ describe('renderCodeLine', () => {
       '#24292e',
     );
     expect(xml).toContain('├──');
-    expect(xml).toContain('fo:font-family="DejaVu Sans Mono"');
+    // ODF: the span references an automatic text style (direct fo:* attributes
+    // on <text:span> are dropped by LibreOffice — spec §7).
+    expect(xml).toMatch(/<text:span text:style-name="CS\d+">├── <\/text:span>/);
+    const fallbackStyle = spanStyleName({ fallbackFont: 'DejaVu Sans Mono' });
+    const autoStyles = buildSpanAutoStyles();
+    expect(autoStyles).toContain(`style:name="${fallbackStyle}"`);
+    expect(autoStyles).toContain('fo:font-family="DejaVu Sans Mono"');
+    resetSpanStyles();
   });
 });
 
@@ -267,15 +278,19 @@ describe('computeTitlePageSpacerCm', () => {
   });
 
   it('center → half of the leftover text height (group ≈ 9cm)', () => {
-    const options = makeOptions({ titlePageVerticalAlignment: 'center', titlePageVerticalOffsetPt: 0 });
+    const options = makeOptions({ titlePageVerticalAlignment: 'center', titlePageVerticalOffsetPt: 0, pageFooterShow: false });
     const expected = Math.max(0, (textHeightCm(options) - 9) / 2);
     expect(computeTitlePageSpacerCm(options, A4_HEIGHT_CM)).toBeCloseTo(expected, 2);
   });
 
-  it('bottom → the full leftover text height', () => {
+  it('bottom → the full leftover text height (footer-aware, group estimated)', () => {
+    // Footer shown → LibreOffice reserves footer space inside the margin,
+    // so the usable text height shrinks by the 1.6cm allowance.
     const options = makeOptions({ titlePageVerticalAlignment: 'bottom', titlePageVerticalOffsetPt: 0 });
-    const expected = Math.max(0, textHeightCm(options) - 9);
-    expect(computeTitlePageSpacerCm(options, A4_HEIGHT_CM)).toBeCloseTo(expected, 2);
+    const noFooter = makeOptions({ titlePageVerticalAlignment: 'bottom', titlePageVerticalOffsetPt: 0, pageFooterShow: false });
+    // usable height − footer allowance − group − the 1.2cm safety band.
+    const expectedWithFooter = Math.max(0, textHeightCm(noFooter) - 1.6 - 9 - 1.2);
+    expect(computeTitlePageSpacerCm(options, A4_HEIGHT_CM)).toBeCloseTo(expectedWithFooter, 2);
   });
 
   it('never pushes the group past the printable area', () => {
