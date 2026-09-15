@@ -26,6 +26,10 @@ export interface OutlineEntry {
   detail?: string;
   /** Indentation depth: 0 = top-level section, 1 = subsection within a project. */
   depth: 0 | 1;
+  /** File rows: owning project id — reorder operations stay within it (§15). */
+  projectId?: string;
+  /** File rows: the file id — reorder target (§14). */
+  fileId?: string;
 }
 
 /** Anchor id for the preview DOM. */
@@ -113,6 +117,8 @@ export function buildDocumentOutline(input: BuildOutlineInput): OutlineEntry[] {
         label: file.relativePath,
         detail: file.language ?? undefined,
         depth: 1,
+        projectId: project.id,
+        fileId: file.fileId,
       });
     }
   });

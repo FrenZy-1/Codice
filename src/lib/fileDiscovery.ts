@@ -534,6 +534,110 @@ export function isZipFile(file: { name: string; type?: string }): boolean {
   return /\.zip$/i.test(file.name) || file.type === 'application/zip' || file.type === 'application/x-zip-compressed';
 }
 
+/**
+ * Fixed id of the synthetic project that holds standalone files (spec §4).
+ *
+ * Standalone (non-folder) files are first-class document inputs: they live
+ * in the project model, appear in the file tree, and are independently
+ * selectable. Repeated additions MERGE into this same project instead of
+ * piling up throwaway "Loose files" projects.
+ */
+export const STANDALONE_PROJECT_ID = 'codice-standalone';
+
+export interface StandaloneDiscovery {
+  /** The newly discovered files (to merge into the standalone project). */
+  files: DiscoveredFile[];
+  /** A ready-to-add project entry for the FIRST addition. */
+  project: ProjectEntry;
+}
+
+/**
+ * Discover standalone (non-folder) files — used by the "Files" picker and
+ * by drag-and-drop of loose files. The result is merged into the persistent
+ * standalone project (spec §4) rather than creating a new project each time.
+ */
+export async function discoverStandaloneFiles(
+  files: File[],
+  filter: {
+    excludedDirs: string[];
+    excludedExtensions: string[];
+    excludedFilenames: string[];
+    includeGlobs: string[];
+    excludeGlobs: string[];
+    includeSource: boolean;
+    includeConfig: boolean;
+    includeMarkdown: boolean;
+    customExtensions: string[];
+  },
+): Promise<StandaloneDiscovery> {
+  if (files.length === 0) {
+    throw new Error('No files were provided.');
+  }
+
+  const projectId = STANDALONE_PROJECT_ID;
+  const warnings: ScanWarning[] = [];
+  const discovered: DiscoveredFile[] = [];
+  let skippedBinary = 0;
+  let skippedLarge = 0;
+
+  for (const file of files) {
+    // A dropped folder entry would carry a relative path — standalone mode
+    // is strictly for files; folder handling stays with the folder flows.
+    const name = file.name;
+
+    if (file.size > SKIP_FILE_THRESHOLD) {
+      skippedLarge++;
+      warnings.push({
+        severity: 'warn',
+        message: `Skipped very large file: ${name} (${formatBytes(file.size)})`,
+        filePath: name,
+      });
+      continue;
+    }
+    if (looksBinary(name)) {
+      skippedBinary++;
+      continue;
+    }
+
+    const handle = new FileHandleImpl(file);
+    discovered.push(makeFile(projectId, name, file.size, handle, filter));
+  }
+
+  if (discovered.length === 0) {
+    throw new Error(
+      'No readable standalone files were found — everything was skipped as binary or too large.',
+    );
+  }
+  if (skippedBinary > 0) {
+    warnings.push({
+      severity: 'info',
+      message: `${skippedBinary} binary file${skippedBinary === 1 ? '' : 's'} ignored`,
+    });
+  }
+  for (const f of discovered) {
+    if (!f.excluded && f.size > LARGE_FILE_THRESHOLD) {
+      warnings.push({
+        severity: 'warn',
+        message: `File exceeds recommended size: ${f.relativePath} (${formatBytes(f.size)})`,
+        filePath: f.relativePath,
+      });
+    }
+  }
+
+  const project: ProjectEntry = {
+    id: projectId,
+    label: 'Standalone files',
+    folderName: 'Standalone files',
+    files: discovered,
+    selectedCount: discovered.filter((f) => !f.excluded).length,
+    selectedSize: discovered.filter((f) => !f.excluded).reduce((s, f) => s + f.size, 0),
+    warnings,
+    addedAt: Date.now(),
+  };
+
+  return { files: discovered, project };
+}
+
 /** Format bytes as a human-readable string. */
 export function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;

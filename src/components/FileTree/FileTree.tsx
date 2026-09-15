@@ -13,7 +13,12 @@ import { formatBytes } from '@/lib/fileDiscovery';
 import { findDuplicateFileNames, duplicateContext, fileSelectionKey } from '@/lib/fileDuplicates';
 import { filterVisibleFiles } from '@/lib/bulkSelection';
 import { languageLabel } from '@/lib/languageDetection';
-import { ChevronRight, ChevronDown, File, Folder, FolderOpen } from '@/components/common/Icons';
+import { ChevronRight, ChevronDown, File, Folder, FolderOpen, MoreVertical } from '@/components/common/Icons';
+import {
+  FileContextMenu,
+  type FileContextMenuState,
+} from '@/components/FileProperties/FileContextMenu';
+import { FilePropertiesDialog } from '@/components/FileProperties/FilePropertiesDialog';
 
 interface TreeNode {
   name: string;
@@ -79,6 +84,12 @@ export function FileTree({
 }: FileTreeProps) {
   const { state, dispatch, getSelectedFiles } = useAppState();
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
+  // §7 — file context menu + properties dialog (right-click or the ⋮ button).
+  const [menu, setMenu] = useState<FileContextMenuState | null>(null);
+  const [propertiesTarget, setPropertiesTarget] = useState<{
+    projectId: string;
+    fileId: string;
+  } | null>(null);
 
   const selectedIds = getSelectedFiles(project.id);
 
@@ -179,6 +190,34 @@ export function FileTree({
     [dispatch, project.id],
   );
 
+  /** Open the context menu (right-click or ⋮ button) for a file. */
+  const openMenu = useCallback(
+    (file: DiscoveredFile, x: number, y: number, invoker?: HTMLElement | null) => {
+      setMenu({
+        fileId: file.id,
+        fileName: file.name,
+        selected: selectedIds.has(file.id),
+        x,
+        y,
+        invoker,
+      });
+    },
+    [selectedIds],
+  );
+
+  /** 'Open in preview' — jump to this file's anchor in the main preview
+   * using its STABLE identity (fileId + owning project id), §15. */
+  const navigateToFile = useCallback(
+    (fileId: string) => {
+      window.dispatchEvent(
+        new CustomEvent('codice:navigate-to-file', {
+          detail: { fileId, projectId: project.id },
+        }),
+      );
+    },
+    [project.id],
+  );
+
   const renderNode = (node: TreeNode, depth: number): React.ReactNode => {
     if (node.isDir) {
       const isExpanded = effectiveExpanded.has(node.path) || depth === 0;
@@ -265,6 +304,10 @@ export function FileTree({
           isExcluded ? 'opacity-50' : ''
         }`}
         style={{ paddingLeft: depth * 12 + 22 }}
+        onContextMenu={(e) => {
+          e.preventDefault();
+          openMenu(file, e.clientX, e.clientY);
+        }}
       >
         <input
           type="checkbox"
@@ -302,6 +345,20 @@ export function FileTree({
             {file.exclusionReason ?? 'excluded'}
           </span>
         )}
+        <button
+          type="button"
+          className="mt-0.5 flex-shrink-0 rounded p-0.5 text-muted opacity-0 transition-opacity hover:text-primary focus-visible:opacity-100 group-hover:opacity-100"
+          title={`File actions for ${file.name} — right-click works too`}
+          aria-label={`File actions for ${file.name}`}
+          aria-haspopup="menu"
+          onClick={(e) => {
+            e.stopPropagation();
+            const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+            openMenu(file, rect.left, rect.bottom + 2, e.currentTarget as HTMLElement);
+          }}
+        >
+          <MoreVertical size={13} />
+        </button>
       </div>
     );
   };
@@ -315,8 +372,32 @@ export function FileTree({
   }
 
   return (
-    <div className="py-1">
+    <div className="py-1" onContextMenu={(e) => e.preventDefault()}>
       {renderNode(tree, 0)}
+      {menu && (
+        <FileContextMenu
+          state={menu}
+          onOpen={() => navigateToFile(menu.fileId)}
+          onProperties={() =>
+            setPropertiesTarget({ projectId: project.id, fileId: menu.fileId })
+          }
+          onToggle={(selected) =>
+            dispatch({
+              type: 'TOGGLE_FILE',
+              projectId: project.id,
+              fileId: menu.fileId,
+              selected,
+            })
+          }
+          onClose={() => setMenu(null)}
+        />
+      )}
+      {propertiesTarget && (
+        <FilePropertiesDialog
+          target={propertiesTarget}
+          onClose={() => setPropertiesTarget(null)}
+        />
+      )}
     </div>
   );
 }

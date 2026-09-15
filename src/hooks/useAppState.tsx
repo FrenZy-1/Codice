@@ -25,7 +25,10 @@ import {
 import type {
   DocumentMetadata,
   DocumentOptions,
+  ImageAsset,
+  FileDetails,
   ProjectEntry,
+  ExportGroup,
 } from '@/types';
 import { defaultFilterConfig, type FilterConfig } from '@/lib/defaultExclusions';
 import {
@@ -48,13 +51,25 @@ import type { DocumentPreset } from '@/lib/presets/documentPreset';
 import { presetToOptions } from '@/lib/presets/presetToOptions';
 import { isRuleDeselected, isRuleSelected } from '@/lib/selectionRules';
 import {
+  type CustomLayoutTemplate,
+} from '@/lib/customLayouts/model';
+import {
+  loadCustomLayouts,
+  storeCustomLayout,
+  updateCustomLayout as persistUpdateCustomLayout,
+  deleteCustomLayout as persistDeleteCustomLayout,
+  duplicateCustomLayout as persistDuplicateCustomLayout,
+  renameCustomLayout as persistRenameCustomLayout,
+  importLayoutJson,
+} from '@/lib/customLayouts/storage';
+import {
   applyUITheme,
   getInitialUITheme,
   persistUITheme,
   type UIThemeMode,
 } from '@/lib/themes/uiTheme';
 
-export type OutputMode = 'combined' | 'separate';
+export type OutputMode = 'combined' | 'separate' | 'groups';
 
 export interface AppState {
   projects: ProjectEntry[];
@@ -84,10 +99,44 @@ export interface AppState {
   outputMode: OutputMode;
   /** Output filename (combined mode). */
   outputFilename: string;
+  // ---- Per-file user content (spec §6-§9) — session-scoped, like uploads ----
+  /** User-defined per-file details (summary/description/note), keyed by fileId. */
+  fileDetails: Record<string, FileDetails>;
+  /** Custom-layout field values per file (fieldId → value; image fields hold asset ids). */
+  fileFieldValues: Record<string, Record<string, string>>;
+  /** Custom-layout field values per project. */
+  projectFieldValues: Record<string, Record<string, string>>;
+  /** Document-level custom-layout field values (repeat=once). */
+  documentFieldValues: Record<string, string>;
+  // ---- Images (spec §10-§12) — session-scoped ----
+  /** Imported image assets (normalized, self-contained data URLs). */
+  imageAssets: ImageAsset[];
+  /** Image asset ids attached to each file, in attachment order. */
+  fileImages: Record<string, string[]>;
+  // ---- Document file order (spec §13-§15) ----
+  /** Canonical presentation order of file ids within each project. */
+  fileOrder: Record<string, string[]>;
+  // ---- Custom layout templates (spec §16-§31) ----
+  /** All stored custom layout templates. */
+  customLayouts: CustomLayoutTemplate[];
+  /** Id of the applied custom layout template (null = standard flow). */
+  appliedLayoutId: string | null;
+  /** Per-SECTION field values of the applied layout: sectionId → fieldId → value. */
+  sectionFieldValues: Record<string, Record<string, string>>;
+  /** File → block assignment of the applied layout: blockId → file ids (§3).
+   * Session-scoped (file ids die with uploads) — one file lives in exactly
+   * one block across the whole template. */
+  layoutAssignments: Record<string, string[]>;
+  // ---- Export groups (§11): arbitrary project combinations per export ----
+  exportGroups: ExportGroup[];
+  // ---- Project merge (§11): undoable merge bookkeeping ----
+  /** mergedProjectId → original source projects (for unmerge). */
+  mergeSources: Record<string, { sources: ProjectEntry[]; mergedAt: number }>;
 }
 
 type Action =
   | { type: 'ADD_PROJECT'; project: ProjectEntry }
+  | { type: 'ADD_STANDALONE_FILES'; project: ProjectEntry; files: ProjectEntry['files'] }
   | { type: 'REMOVE_PROJECT'; projectId: string }
   | { type: 'RENAME_PROJECT'; projectId: string; label: string }
   | { type: 'REORDER_PROJECTS'; from: number; to: number }
@@ -121,12 +170,71 @@ type Action =
   | { type: 'SET_OUTPUT_MODE'; mode: OutputMode }
   | { type: 'SET_OUTPUT_FILENAME'; filename: string }
   | { type: 'CLEAR_PROJECTS' }
-  | { type: 'LOAD_STATE'; state: Partial<AppState> };
+  | { type: 'LOAD_STATE'; state: Partial<AppState> }
+  // ---- File details / images / ordering / custom layouts ----
+  | { type: 'SET_FILE_DETAILS'; fileId: string; details: FileDetails }
+  | { type: 'SET_FILE_ORDER'; projectId: string; order: string[] }
+  | { type: 'RESET_FILE_ORDER'; projectId: string }
+  | { type: 'ADD_IMAGE_ASSETS'; assets: ImageAsset[] }
+  | { type: 'REMOVE_IMAGE_ASSET'; id: string }
+  | { type: 'UPDATE_IMAGE_ASSET'; id: string; caption?: string; name?: string }
+  | { type: 'SET_FILE_IMAGES'; fileId: string; imageIds: string[] }
+  | { type: 'SET_FILE_FIELD_VALUES'; fileId: string; values: Record<string, string> }
+  | { type: 'SET_PROJECT_FIELD_VALUES'; projectId: string; values: Record<string, string> }
+  | { type: 'SET_DOCUMENT_FIELD_VALUES'; values: Record<string, string> }
+  | { type: 'SAVE_CUSTOM_LAYOUT'; template: CustomLayoutTemplate }
+  | { type: 'UPDATE_CUSTOM_LAYOUT'; template: CustomLayoutTemplate }
+  | { type: 'DELETE_CUSTOM_LAYOUT'; id: string }
+  | { type: 'DUPLICATE_CUSTOM_LAYOUT'; template: CustomLayoutTemplate; newName?: string }
+  | { type: 'RENAME_CUSTOM_LAYOUT'; id: string; name: string }
+  | { type: 'IMPORT_CUSTOM_LAYOUT'; json: string; fallbackName?: string }
+  | { type: 'SYNC_CUSTOM_LAYOUTS'; templates: CustomLayoutTemplate[] }
+  | { type: 'SET_APPLIED_LAYOUT'; layoutId: string | null }
+  // ---- v2 layout content + assignment (§3/§4/§8) ----
+  | { type: 'SET_SECTION_FIELD_VALUES'; sectionId: string; values: Record<string, string> }
+  | { type: 'CLEAR_LAYOUT_CONTENT' }
+  /** Assign a file to a block — atomically MOVES it out of any other block
+   * of the applied template (one-file-one-section rule, §3). */
+  | { type: 'ASSIGN_FILE_TO_BLOCK'; blockId: string; fileId: string; position?: number }
+  | { type: 'UNASSIGN_FILE'; fileId: string; blockId?: string }
+  | { type: 'CLEAR_BLOCK_ASSIGNMENTS'; blockId: string }
+  | { type: 'REORDER_ASSIGNED_FILE'; blockId: string; from: number; to: number }
+  // ---- Export groups (§11) ----
+  | { type: 'ADD_EXPORT_GROUP'; group: ExportGroup }
+  | { type: 'UPDATE_EXPORT_GROUP'; group: ExportGroup }
+  | { type: 'DELETE_EXPORT_GROUP'; id: string }
+  // ---- Project merge / unmerge (§11) ----
+  | { type: 'MERGE_PROJECTS'; sourceIds: string[]; label?: string; mergedId: string }
+  | { type: 'UNMERGE_PROJECTS'; mergedId: string };
 
 function reducer(state: AppState, action: Action): AppState {
   switch (action.type) {
     case 'ADD_PROJECT':
       return { ...state, projects: [...state.projects, action.project] };
+    case 'ADD_STANDALONE_FILES': {
+      // Standalone files merge into the PERSISTENT standalone project
+      // (spec §4): first addition adds the project, later additions append
+      // their files (fresh ids → duplicate names stay independent).
+      const existing = state.projects.find((p) => p.id === action.project.id);
+      if (!existing) {
+        return { ...state, projects: [...state.projects, action.project] };
+      }
+      return {
+        ...state,
+        projects: state.projects.map((p) => {
+          if (p.id !== action.project.id) return p;
+          const files = [...p.files, ...action.files];
+          const selected = files.filter((f) => !f.excluded);
+          return {
+            ...p,
+            files,
+            selectedCount: selected.length,
+            selectedSize: selected.reduce((s, f) => s + f.size, 0),
+            warnings: [...p.warnings, ...action.project.warnings].slice(-12),
+          };
+        }),
+      };
+    }
     case 'REMOVE_PROJECT': {
       const projects = state.projects.filter((p) => p.id !== action.projectId);
       const selection = { ...state.selection };
@@ -139,6 +247,20 @@ function reducer(state: AppState, action: Action): AppState {
       delete projectExcludeRules[action.projectId];
       const projectIncludeRules = { ...state.projectIncludeRules };
       delete projectIncludeRules[action.projectId];
+      const fileOrder = { ...state.fileOrder };
+      delete fileOrder[action.projectId];
+      const projectFieldValues = { ...state.projectFieldValues };
+      delete projectFieldValues[action.projectId];
+      // Merged projects vanish entirely — drop their undo record + scrub
+      // them from export groups.
+      const mergeSources = { ...state.mergeSources };
+      if (action.projectId in mergeSources) delete mergeSources[action.projectId];
+      const exportGroups = state.exportGroups
+        .map((g) => ({
+          ...g,
+          projectIds: g.projectIds.filter((id) => id !== action.projectId),
+        }))
+        .filter((g) => g.projectIds.length > 0);
       return {
         ...state,
         projects,
@@ -147,6 +269,10 @@ function reducer(state: AppState, action: Action): AppState {
         inclusions,
         projectExcludeRules,
         projectIncludeRules,
+        fileOrder,
+        projectFieldValues,
+        mergeSources,
+        exportGroups,
       };
     }
     case 'RENAME_PROJECT':
@@ -298,7 +424,246 @@ function reducer(state: AppState, action: Action): AppState {
         inclusions: {},
         projectExcludeRules: {},
         projectIncludeRules: {},
+        fileOrder: {},
+        projectFieldValues: {},
+        fileDetails: {},
+        fileFieldValues: {},
+        fileImages: {},
       };
+    case 'SET_FILE_DETAILS':
+      return {
+        ...state,
+        fileDetails: { ...state.fileDetails, [action.fileId]: action.details },
+      };
+    case 'SET_FILE_ORDER':
+      return {
+        ...state,
+        fileOrder: { ...state.fileOrder, [action.projectId]: action.order },
+      };
+    case 'RESET_FILE_ORDER': {
+      const fileOrder = { ...state.fileOrder };
+      delete fileOrder[action.projectId];
+      return { ...state, fileOrder };
+    }
+    case 'ADD_IMAGE_ASSETS':
+      return {
+        ...state,
+        imageAssets: [...state.imageAssets, ...action.assets],
+      };
+    case 'REMOVE_IMAGE_ASSET':
+      return {
+        ...state,
+        imageAssets: state.imageAssets.filter((a) => a.id !== action.id),
+        // Drop dangling attachments.
+        fileImages: Object.fromEntries(
+          Object.entries(state.fileImages).map(([k, ids]) => [
+            k,
+            ids.filter((id) => id !== action.id),
+          ]),
+        ),
+      };
+    case 'UPDATE_IMAGE_ASSET':
+      return {
+        ...state,
+        imageAssets: state.imageAssets.map((a) =>
+          a.id === action.id
+            ? {
+                ...a,
+                caption: action.caption !== undefined ? action.caption : a.caption,
+                name: action.name !== undefined ? action.name : a.name,
+              }
+            : a,
+        ),
+      };
+    case 'SET_FILE_IMAGES':
+      return {
+        ...state,
+        fileImages: { ...state.fileImages, [action.fileId]: action.imageIds },
+      };
+    case 'SET_FILE_FIELD_VALUES':
+      return {
+        ...state,
+        fileFieldValues: {
+          ...state.fileFieldValues,
+          [action.fileId]: action.values,
+        },
+      };
+    case 'SET_PROJECT_FIELD_VALUES':
+      return {
+        ...state,
+        projectFieldValues: {
+          ...state.projectFieldValues,
+          [action.projectId]: action.values,
+        },
+      };
+    case 'SET_DOCUMENT_FIELD_VALUES':
+      return { ...state, documentFieldValues: action.values };
+    case 'SAVE_CUSTOM_LAYOUT': {
+      const customLayouts = storeCustomLayout(action.template);
+      return { ...state, customLayouts, appliedLayoutId: action.template.id };
+    }
+    case 'UPDATE_CUSTOM_LAYOUT': {
+      const customLayouts = persistUpdateCustomLayout(action.template);
+      return { ...state, customLayouts };
+    }
+    case 'DELETE_CUSTOM_LAYOUT': {
+      const customLayouts = persistDeleteCustomLayout(action.id);
+      const appliedLayoutId =
+        state.appliedLayoutId === action.id ? null : state.appliedLayoutId;
+      return { ...state, customLayouts, appliedLayoutId };
+    }
+    case 'DUPLICATE_CUSTOM_LAYOUT': {
+      const { templates } = persistDuplicateCustomLayout(
+        action.template,
+        action.newName,
+      );
+      return { ...state, customLayouts: templates };
+    }
+    case 'RENAME_CUSTOM_LAYOUT': {
+      const customLayouts = persistRenameCustomLayout(action.id, action.name);
+      return { ...state, customLayouts };
+    }
+    case 'IMPORT_CUSTOM_LAYOUT': {
+      importLayoutJson(action.json, action.fallbackName);
+      return { ...state, customLayouts: loadCustomLayouts() };
+    }
+    case 'SYNC_CUSTOM_LAYOUTS':
+      return { ...state, customLayouts: action.templates };
+    case 'SET_APPLIED_LAYOUT':
+      return { ...state, appliedLayoutId: action.layoutId };
+    case 'SET_SECTION_FIELD_VALUES':
+      return {
+        ...state,
+        sectionFieldValues: {
+          ...state.sectionFieldValues,
+          [action.sectionId]: action.values,
+        },
+      };
+    case 'CLEAR_LAYOUT_CONTENT':
+      return { ...state, sectionFieldValues: {}, fileFieldValues: {} };
+    case 'ASSIGN_FILE_TO_BLOCK': {
+      // One-file-one-section (§3): assigning a file to a block atomically
+      // removes it from every other block of the assignment map.
+      const next: Record<string, string[]> = {};
+      for (const [blockId, ids] of Object.entries(state.layoutAssignments)) {
+        next[blockId] = ids.filter((id) => id !== action.fileId);
+      }
+      const target = [...(next[action.blockId] ?? [])];
+      const pos = action.position ?? target.length;
+      target.splice(Math.max(0, Math.min(pos, target.length)), 0, action.fileId);
+      next[action.blockId] = target;
+      return { ...state, layoutAssignments: next };
+    }
+    case 'UNASSIGN_FILE': {
+      const next: Record<string, string[]> = {};
+      for (const [blockId, ids] of Object.entries(state.layoutAssignments)) {
+        if (action.blockId && blockId !== action.blockId) {
+          next[blockId] = ids;
+          continue;
+        }
+        next[blockId] = ids.filter((id) => id !== action.fileId);
+      }
+      return { ...state, layoutAssignments: next };
+    }
+    case 'CLEAR_BLOCK_ASSIGNMENTS': {
+      const next = { ...state.layoutAssignments };
+      delete next[action.blockId];
+      return { ...state, layoutAssignments: next };
+    }
+    case 'REORDER_ASSIGNED_FILE': {
+      const ids = [...(state.layoutAssignments[action.blockId] ?? [])];
+      const to = Math.max(0, Math.min(action.to, ids.length - 1));
+      if (action.from < 0 || action.from >= ids.length) return state;
+      const [moved] = ids.splice(action.from, 1);
+      ids.splice(to, 0, moved);
+      return {
+        ...state,
+        layoutAssignments: { ...state.layoutAssignments, [action.blockId]: ids },
+      };
+    }
+    case 'ADD_EXPORT_GROUP':
+      return { ...state, exportGroups: [...state.exportGroups, action.group] };
+    case 'UPDATE_EXPORT_GROUP':
+      return {
+        ...state,
+        exportGroups: state.exportGroups.map((g) =>
+          g.id === action.group.id ? action.group : g,
+        ),
+      };
+    case 'DELETE_EXPORT_GROUP':
+      return {
+        ...state,
+        exportGroups: state.exportGroups.filter((g) => g.id !== action.id),
+      };
+    case 'MERGE_PROJECTS': {
+      // §11 — merge N projects into one unified project. File ids, relative
+      // paths and handles are PRESERVED (duplicates from different sources
+      // stay independently addressable). Fully undoable via mergeSources.
+      const sources = state.projects.filter((p) => action.sourceIds.includes(p.id));
+      if (sources.length < 2) return state;
+      const files = sources.flatMap((p) => p.files);
+      const warnings = sources.flatMap((p) => p.warnings).slice(-12);
+      const selected = files.filter((f) => !f.excluded);
+      const merged: ProjectEntry = {
+        id: action.mergedId,
+        label: action.label ?? sources.map((p) => p.label).join(' + '),
+        folderName: sources.map((p) => p.folderName).join('+'),
+        files,
+        selectedCount: selected.length,
+        selectedSize: selected.reduce((s, f) => s + f.size, 0),
+        warnings,
+        addedAt: Date.now(),
+      };
+      // Insert the merged project at the position of the first source.
+      const insertAt = state.projects.findIndex((p) => p.id === sources[0].id);
+      const projects = state.projects.filter((p) => !action.sourceIds.includes(p.id));
+      projects.splice(Math.max(0, insertAt), 0, merged);
+      // §11 — export groups referencing any source project now reference
+      // the merged project (order preserved, duplicates collapsed); undo
+      // swaps them back via UNMERGE_PROJECTS.
+      const exportGroups = state.exportGroups.map((g) => {
+        if (!g.projectIds.some((id) => action.sourceIds.includes(id))) return g;
+        const ids: string[] = [];
+        for (const id of g.projectIds) {
+          if (action.sourceIds.includes(id)) {
+            if (!ids.includes(action.mergedId)) ids.push(action.mergedId);
+          } else {
+            ids.push(id);
+          }
+        }
+        return { ...g, projectIds: ids };
+      });
+      return {
+        ...state,
+        projects,
+        mergeSources: {
+          ...state.mergeSources,
+          [action.mergedId]: { sources, mergedAt: Date.now() },
+        },
+        exportGroups,
+      };
+    }
+    case 'UNMERGE_PROJECTS': {
+      // §11 — split a previously merged project back into its sources:
+      // original names, files, handles and (via file ids) section/block
+      // assignments are restored. Export groups referencing the merged id
+      // get the source ids back (best effort, order preserved).
+      const record = state.mergeSources[action.mergedId];
+      if (!record) return state;
+      const mergedIndex = state.projects.findIndex((p) => p.id === action.mergedId);
+      const projects = state.projects.filter((p) => p.id !== action.mergedId);
+      projects.splice(Math.max(0, mergedIndex), 0, ...record.sources);
+      const mergeSources = { ...state.mergeSources };
+      delete mergeSources[action.mergedId];
+      const exportGroups = state.exportGroups.map((g) => {
+        if (!g.projectIds.includes(action.mergedId)) return g;
+        const idx = g.projectIds.indexOf(action.mergedId);
+        const ids = [...g.projectIds];
+        ids.splice(idx, 1, ...record.sources.map((s) => s.id));
+        return { ...g, projectIds: ids };
+      });
+      return { ...state, projects, mergeSources, exportGroups };
+    }
     case 'LOAD_STATE':
       return { ...state, ...action.state };
     default:
@@ -331,6 +696,19 @@ function buildInitialState(): AppState {
     outputFormat: 'docx',
     outputMode: 'combined',
     outputFilename: 'Codice_Output',
+    fileDetails: {},
+    fileFieldValues: {},
+    projectFieldValues: {},
+    documentFieldValues: {},
+    imageAssets: [],
+    fileImages: {},
+    fileOrder: {},
+    customLayouts: loadCustomLayouts(),
+    appliedLayoutId: null,
+    sectionFieldValues: {},
+    layoutAssignments: {},
+    exportGroups: [],
+    mergeSources: {},
   };
 }
 
@@ -367,6 +745,9 @@ function loadPersistedState(): Partial<AppState> | null {
       const preset = findPreset(parsed.presetId);
       if (preset) result.preset = preset;
     }
+    if (typeof parsed.appliedLayoutId === 'string' || parsed.appliedLayoutId === null) {
+      result.appliedLayoutId = parsed.appliedLayoutId;
+    }
     // Rehydrate Sets.
     const exclusions: Record<string, Set<string>> = {};
     for (const [k, v] of Object.entries(parsed.exclusions ?? {})) {
@@ -398,6 +779,21 @@ function loadPersistedState(): Partial<AppState> | null {
       }
       if (Object.keys(rules).length) result.projectIncludeRules = rules;
     }
+    // Export groups persist (structure only — project ids are pruned of
+    // stale references when projects rehydrate; a group left empty is
+    // dropped entirely).
+    if (Array.isArray(parsed.exportGroups)) {
+      const groups = (parsed.exportGroups as Array<{ id?: unknown; name?: unknown; projectIds?: unknown }>)
+        .filter(
+          (g): g is { id: string; name: string; projectIds: string[] } =>
+            typeof g.id === 'string' &&
+            typeof g.name === 'string' &&
+            Array.isArray(g.projectIds) &&
+            g.projectIds.every((x) => typeof x === 'string'),
+        )
+        .map((g) => ({ id: g.id, name: g.name, projectIds: [...new Set(g.projectIds)] }));
+      if (groups.length) result.exportGroups = groups;
+    }
     return result;
   } catch {
     return null;
@@ -414,6 +810,7 @@ function persistState(state: AppState) {
       outputFilename: state.outputFilename,
       uiTheme: state.uiTheme,
       presetId: state.preset.id,
+      appliedLayoutId: state.appliedLayoutId,
       exclusions: Object.fromEntries(
         Object.entries(state.exclusions).map(([k, v]) => [k, Array.from(v)]),
       ),
@@ -422,6 +819,14 @@ function persistState(state: AppState) {
       ),
       projectExcludeRules: state.projectExcludeRules,
       projectIncludeRules: state.projectIncludeRules,
+      exportGroups: state.exportGroups.map((g) => ({
+        id: g.id,
+        name: g.name,
+        // Only persist ids of projects that still exist; drop empty groups.
+        projectIds: g.projectIds.filter((id) =>
+          state.projects.some((p) => p.id === id),
+        ),
+      })).filter((g) => g.projectIds.length > 0),
     };
     localStorage.setItem(STORAGE_KEY, JSON.stringify(serializable));
   } catch {

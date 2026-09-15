@@ -7,6 +7,8 @@
  *                                                       -> ExporterOutput
  */
 
+import type { ResolvedLayoutBlock } from '@/lib/customLayouts/model';
+
 /** A single detected file inside an uploaded project folder. */
 export interface DiscoveredFile {
   /** Stable id unique within a project. */
@@ -239,6 +241,59 @@ export interface DocumentMetadata {
   version?: string;
 }
 
+/**
+ * User-defined per-file documentation details (spec §6/§8).
+ *
+ * Rendered semantically around the file's code block:
+ *   Description → BEFORE the code block
+ *   Summary     → AFTER the code block
+ *   Note        → AFTER the code block (below Summary)
+ *
+ * Stored PER FILE — never shared between files (duplicate filenames in
+ * different directories stay independent).
+ */
+export interface FileDetails {
+  /** Shown before the code block. */
+  description?: string;
+  /** Shown after the code block. */
+  summary?: string;
+  /** Shown after the code block, below the summary. */
+  note?: string;
+}
+
+/** True when a details object has no user content. */
+export function fileDetailsIsEmpty(details: FileDetails | undefined): boolean {
+  if (!details) return true;
+  return !details.description?.trim() && !details.summary?.trim() && !details.note?.trim();
+}
+
+/**
+ * A user-provided image asset (spec §10/§11).
+ *
+ * The image is stored as a self-contained data URL so exports embed the
+ * real pixels — never a temporary browser blob URL that dies before the
+ * exporter runs. Uploads are normalized to PNG/JPEG at import time so all
+ * three exporters can embed them.
+ */
+export interface ImageAsset {
+  id: string;
+  /** Original file name (kept for labels/captions). */
+  name: string;
+  /** Self-contained data URL (data:image/png;base64,...). */
+  dataUrl: string;
+  /** MIME type of the NORMALIZED data ("image/png" | "image/jpeg"). */
+  mime: 'image/png' | 'image/jpeg';
+  /** Natural width in px (after normalization). */
+  width: number;
+  /** Natural height in px (after normalization). */
+  height: number;
+  /** Approximate byte size of the data URL payload. */
+  sizeBytes: number;
+  /** Optional caption/label rendered below the image. */
+  caption?: string;
+  addedAt: number;
+}
+
 /** One file entry in the document model. */
 export interface DocumentFile {
   projectId: string;
@@ -247,6 +302,27 @@ export interface DocumentFile {
   language: string | null;
   highlighted: HighlightedFile;
   sizeBytes: number;
+  /** User-defined per-file documentation details (spec §6/§9). */
+  details?: FileDetails;
+  /** Resolved image assets attached to this file, in attachment order (spec §10/§12). */
+  images?: DocumentImage[];
+}
+
+/**
+ * An image attached to a document file, fully resolved for exporters —
+ * the pixel data travels INSIDE the document model so no exporter needs
+ * access to the asset registry.
+ */
+export interface DocumentImage {
+  /** ImageAsset id (for stable keys). */
+  id: string;
+  name: string;
+  /** Self-contained data URL. */
+  dataUrl: string;
+  mime: 'image/png' | 'image/jpeg';
+  width: number;
+  height: number;
+  caption?: string;
 }
 
 /** One project section in the document model. */
@@ -265,7 +341,33 @@ export interface DocumentModel {
   options: DocumentOptions;
   projects: DocumentProject[];
   generatedAt: string;
+  /**
+   * Resolved custom layout content (spec §16-§35). Present only when a
+   * custom layout template is applied; exporters render these content
+   * blocks INSTEAD of the standard per-file flow. The blocks carry all
+   * resolved text/image data — exporters never see the template engine.
+   */
+  customLayout?: ResolvedCustomLayout;
 }
+
+/**
+ * A fully-resolved custom-layout content stream (spec §32): the template's
+ * block sequence expanded per repeat target with every field value, file
+ * reference and image already resolved. One canonical representation
+ * consumed by the preview AND all three exporters.
+ */
+export interface ResolvedCustomLayout {
+  /** Template id + name (for provenance/debugging). */
+  templateId: string;
+  templateName: string;
+  blocks: ResolvedLayoutBlock[];
+}
+
+/** Re-exported so consumers of the document model can stay on one import. */
+export type {
+  ResolvedLayoutBlock,
+  ResolvedTextProps,
+} from '@/lib/customLayouts/model';
 
 /** Exporter options. */
 export interface ExportOptions {
@@ -312,4 +414,16 @@ export interface Preset {
 export interface FileSelection {
   fileId: string;
   selected: boolean;
+}
+
+/**
+ * An explicit export group (§11): a named, ordered set of projects that
+ * exports together as ONE document. A project may participate in any
+ * number of groups; combined + separate-per-project modes coexist.
+ */
+export interface ExportGroup {
+  id: string;
+  name: string;
+  /** Ordered project ids — the document contains exactly these projects. */
+  projectIds: string[];
 }

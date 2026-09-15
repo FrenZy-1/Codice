@@ -1029,8 +1029,10 @@ button.codice-input-chip:hover {
 
 .codice-outline-panel {
   position: absolute;
-  /* Below the preview zoom toolbar so the panel never covers it (§1). */
-  top: 3rem;
+  /* Anchored INSIDE the §3 right-side control region — that wrapper already
+     starts below the project tabs + zoom toolbar, so a small top offset is
+     sufficient and the panel can never cover the toolbar (§3). */
+  top: 0.75rem;
   right: 0.75rem;
   z-index: 30;
   width: 17rem;
@@ -1049,6 +1051,51 @@ button.codice-input-chip:hover {
   overflow-y: auto;
   padding: 0.25rem;
   scrollbar-width: thin;
+}
+
+/* §14 — outline rows are wrapped so reorder buttons can share the row. */
+.codice-outline-row-wrapper {
+  min-width: 0;
+}
+
+.codice-outline-row-wrapper .codice-outline-row {
+  flex: 1;
+  min-width: 0;
+  width: auto;
+}
+
+.codice-outline-reorder {
+  display: none;
+  flex-shrink: 0;
+  align-items: center;
+  gap: 1px;
+  padding-right: 0.25rem;
+}
+
+.codice-outline-row-wrapper:hover .codice-outline-reorder,
+.codice-outline-row-wrapper:focus-within .codice-outline-reorder {
+  display: inline-flex;
+}
+
+.codice-outline-reorder-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  border-radius: 4px;
+  color: var(--color-text-muted);
+  transition: background-color 120ms ease, color 120ms ease;
+}
+
+.codice-outline-reorder-btn:hover {
+  background: color-mix(in srgb, var(--color-accent) 14%, transparent);
+  color: var(--color-text-primary);
+}
+
+.codice-outline-reorder-btn:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 1px;
 }
 
 .codice-outline-row {

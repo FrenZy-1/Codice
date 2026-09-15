@@ -80,10 +80,19 @@ function renderPreview() {
 }
 
 describe('document preview structure (§1/§2/§5)', () => {
-  it('anchors the floating pills to a RELATIVE preview root (§1)', () => {
+  it('anchors the floating pills INSIDE a relative region below the toolbar (§1/§3)', () => {
     const { container } = renderPreview();
+    // The §3 refinement: the pills anchor to a dedicated relative wrapper
+    // that sits AFTER the tabs + toolbar rows — they can never overlap the
+    // toolbar regardless of tabs/zoom (layout-system fix, not a magic top).
     const root = container.firstElementChild as HTMLElement;
-    expect(root.className).toContain('relative');
+    const anchor = root.querySelector('.codice-outline-toggle')
+      ?.closest('div.relative');
+    expect(anchor).toBeTruthy();
+    expect(anchor!.className).toContain('relative');
+    // The anchor region must contain the scroll container too — i.e. the
+    // pills float over the preview surface, not over the toolbar.
+    expect(anchor!.querySelector('.codice-print-area')).toBeTruthy();
   });
 
   it('renders a zoom toolbar with out / Fit / in controls (§5)', () => {

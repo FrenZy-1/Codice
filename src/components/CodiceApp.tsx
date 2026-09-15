@@ -31,6 +31,7 @@ import { ProjectsSidebar } from '@/components/ProjectsSidebar';
 import { DocumentPreview } from '@/components/Preview/DocumentPreview';
 import { ExportPanel } from '@/components/ExportPanel';
 import { TemplateCustomizer } from '@/components/Settings/TemplateCustomizer';
+import { CustomLayoutStudio } from '@/components/CustomLayout/CustomLayoutStudio';
 import {
   Code,
   Sparkles,
@@ -42,9 +43,23 @@ import {
   Keyboard,
   Printer,
   Compass,
+  Layers,
+  ChevronLeft,
+  ChevronRight,
 } from '@/components/common/Icons';
 import type { UIThemeMode } from '@/lib/themes/uiTheme';
 import { ensureSyntaxThemeCatalog } from '@/lib/themes/syntaxThemeRegistry';
+
+/** localStorage key for the export-rail collapsed state (spec §5). */
+const RAIL_COLLAPSED_KEY = 'codice-export-rail-collapsed';
+
+function initialRailCollapsed(): boolean {
+  try {
+    return window.localStorage.getItem(RAIL_COLLAPSED_KEY) === '1';
+  } catch {
+    return false;
+  }
+}
 
 /** True when the keyboard event originates from a text-entry control. */
 function isTypingTarget(target: EventTarget | null): boolean {
@@ -75,11 +90,22 @@ function AppInner() {
     null,
   );
   const [customizerOpen, setCustomizerOpen] = useState(false);
+  const [studioOpen, setStudioOpen] = useState(false);
   const [metadataOpen, setMetadataOpen] = useState(false);
   const [helpOpen, setHelpOpen] = useState(false);
   const [tourOpen, setTourOpen] = useState(false);
   // Bumped on every (re)start so the tour remounts at step 1.
   const [tourKey, setTourKey] = useState(0);
+  // §5 — collapsible export rail. The preview automatically reclaims the
+  // freed space (flex layout) — never an overlay.
+  const [railCollapsed, setRailCollapsed] = useState<boolean>(initialRailCollapsed);
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(RAIL_COLLAPSED_KEY, railCollapsed ? '1' : '0');
+    } catch {
+      // ignore
+    }
+  }, [railCollapsed]);
 
   // Auto-start the guided tour on the very first visit only.
   useEffect(() => {
@@ -128,6 +154,7 @@ function AppInner() {
       window.localStorage.removeItem('codice-app-state-v2');
       window.localStorage.removeItem('codice-ui-theme');
       window.localStorage.removeItem('codice-custom-presets-v1');
+      window.localStorage.removeItem('codice-custom-layouts-v1');
       window.location.reload();
     }
   };
@@ -269,6 +296,23 @@ function AppInner() {
             <span className="hidden sm:inline">Template</span>
           </button>
           <button
+            onClick={() => setStudioOpen(true)}
+            className="btn-secondary"
+            title="Custom layout studio — compose what the document contains"
+            data-tour="layouts"
+          >
+            <Layers size={14} />
+            <span className="hidden sm:inline">Layouts</span>
+            {state.appliedLayoutId && (
+              <span
+                className="h-1.5 w-1.5 flex-shrink-0 rounded-full"
+                style={{ background: 'var(--color-accent)' }}
+                aria-hidden="true"
+                title="A custom layout is applied"
+              />
+            )}
+          </button>
+          <button
             onClick={handleReset}
             className="btn-ghost"
             title="Reset to defaults"
@@ -304,10 +348,49 @@ function AppInner() {
         </aside>
 
         <aside
-          className="order-3 flex w-full flex-shrink-0 flex-col overflow-hidden border-t border-app bg-surface lg:order-2 lg:w-60 lg:border-t-0 lg:border-r"
+          className={`order-3 flex w-full flex-shrink-0 flex-col overflow-hidden border-t border-app bg-surface lg:order-2 lg:border-t-0 lg:border-r ${
+            railCollapsed ? 'lg:w-11' : 'lg:w-60'
+          }`}
           data-tour="export"
         >
-          <ExportPanel />
+          {/* §5 — collapse/expand toggle (desktop only; on narrow screens the
+              rail is a stacked section and stays visible). Keyboard + screen
+              reader accessible via aria-expanded/controls (§41). */}
+          <button
+            type="button"
+            onClick={() => setRailCollapsed((v) => !v)}
+            className="hidden h-7 w-full flex-shrink-0 items-center justify-center border-b border-app text-muted transition-colors hover:bg-app hover:text-primary lg:flex"
+            title={railCollapsed ? 'Expand export rail' : 'Collapse export rail'}
+            aria-label={railCollapsed ? 'Expand export rail' : 'Collapse export rail'}
+            aria-expanded={!railCollapsed}
+            aria-controls="codice-export-rail"
+          >
+            {railCollapsed ? <ChevronRight size={13} /> : <ChevronLeft size={13} />}
+          </button>
+          {/* Collapsed rail: keep the panel for small screens (stacked), but
+              replace it with a slim vertical label on desktop. */}
+          {railCollapsed ? (
+            <>
+              <div
+                className="hidden min-h-0 flex-1 items-start justify-center pt-3 lg:flex"
+                aria-hidden="true"
+              >
+                <span
+                  className="text-[10px] font-semibold uppercase tracking-widest text-muted"
+                  style={{ writingMode: 'vertical-rl' }}
+                >
+                  Export
+                </span>
+              </div>
+              <div id="codice-export-rail" className="min-h-0 flex-1 lg:hidden">
+                <ExportPanel />
+              </div>
+            </>
+          ) : (
+            <div id="codice-export-rail" className="min-h-0 flex-1">
+              <ExportPanel />
+            </div>
+          )}
         </aside>
 
         <main
@@ -322,6 +405,8 @@ function AppInner() {
         open={customizerOpen}
         onClose={() => setCustomizerOpen(false)}
       />
+
+      <CustomLayoutStudio open={studioOpen} onClose={() => setStudioOpen(false)} />
 
       <MetadataDialog
         open={metadataOpen}

@@ -12,6 +12,7 @@
  */
 
 import type { DocumentPreset, FontWeight } from '@/lib/presets/documentPreset';
+import type { DocumentImage, FileDetails } from '@/types';
 
 /* ------------------------------------------------------------------ */
 /* Geometry                                                            */
@@ -53,6 +54,10 @@ export interface PaginationFile {
    * highlighting loads. May be empty.
    */
   code?: string;
+  /** User-defined per-file details (spec §6/§9). */
+  details?: FileDetails;
+  /** Images attached to this file, in attachment order (spec §10/§12). */
+  images?: DocumentImage[];
 }
 
 export interface PaginationProject {
@@ -83,6 +88,48 @@ export type PreviewElement =
   | { type: 'paragraph'; text: string; rich?: ParagraphRichRun[] }
   | { type: 'statusCard' }
   | { type: 'fileHeader'; projectIdx: number; fileIdx: number; outlineId?: string }
+  | {
+      /** A labeled detail paragraph — file details or custom-layout labels (§6). */
+      type: 'fileDetail';
+      projectIdx?: number;
+      fileIdx?: number;
+      label: string;
+      text: string;
+    }
+  | {
+      /** An attached image (embedded data URL — never a temp URL, §12). */
+      type: 'image';
+      projectIdx?: number;
+      fileIdx?: number;
+      imageIdx?: number;
+      /** Standalone image (custom layout) — takes precedence when set. */
+      image?: DocumentImage;
+    }
+  | { type: 'pageBreak' }
+  | {
+      /** A visual container (§26) — children render inside the box. */
+      type: 'panel';
+      fillColor?: string | null;
+      borderColor?: string | null;
+      borderWidthPt?: number;
+      radiusPt?: number;
+      paddingPt?: number;
+      /** Explicit box height (pt) for EMPTY panels — filled boxes/dividers. */
+      heightPt?: number;
+      children: PreviewElement[];
+    }
+  | {
+      /** A horizontal rule (§6): a filled bar separating content areas. */
+      type: 'divider';
+      heightPx: number;
+      fillColor?: string;
+    }
+  | {
+      /** Side-by-side regions (§25) — HTML preview renders them truly side by side. */
+      type: 'columns';
+      count: 2 | 3;
+      columns: PreviewElement[][];
+    }
   | {
       type: 'code';
       projectIdx: number;
@@ -189,10 +236,16 @@ export function buildDocumentElements(
         outlineId: file.outlineFileId ? `outline-file-${file.outlineFileId}` : undefined,
       });
       els.push({ type: 'fileHeader', projectIdx: p, fileIdx: f });
-      els.push({
-        type: 'paragraph',
-        text: `The file ${file.path} is presented below with the configured code typography, spacing, and syntax theme. Adjust the template controls on the left to see this content respond instantly.`,
-      });
+      // §6 — semantic detail placement: Description BEFORE the code block.
+      if (file.details?.description?.trim()) {
+        els.push({
+          type: 'fileDetail',
+          projectIdx: p,
+          fileIdx: f,
+          label: 'Description',
+          text: file.details.description,
+        });
+      }
       els.push({
         type: 'code',
         projectIdx: p,
@@ -201,6 +254,29 @@ export function buildDocumentElements(
         toLine: Number.MAX_SAFE_INTEGER,
         startLineNumber: 1,
       });
+      // §10 — attached images after the code block.
+      (file.images ?? []).forEach((_img, imgIdx) => {
+        els.push({ type: 'image', projectIdx: p, fileIdx: f, imageIdx: imgIdx });
+      });
+      // §6 — Summary and Note AFTER the code block.
+      if (file.details?.summary?.trim()) {
+        els.push({
+          type: 'fileDetail',
+          projectIdx: p,
+          fileIdx: f,
+          label: 'Summary',
+          text: file.details.summary,
+        });
+      }
+      if (file.details?.note?.trim()) {
+        els.push({
+          type: 'fileDetail',
+          projectIdx: p,
+          fileIdx: f,
+          label: 'Note',
+          text: file.details.note,
+        });
+      }
     });
 
     if (p === 0 && opts.includeNotesBlock) {
@@ -310,8 +386,66 @@ export function paginateDocument(
     if (kind) current.kind = kind;
   };
 
-  const fileAt = (el: { projectIdx: number; fileIdx: number }): PaginationFile | undefined =>
-    projects[el.projectIdx]?.files[el.fileIdx];
+  const fileAt = (el: { projectIdx?: number; fileIdx?: number }): PaginationFile | undefined =>
+    el.projectIdx !== undefined && el.fileIdx !== undefined
+      ? projects[el.projectIdx]?.files[el.fileIdx]
+      : undefined;
+
+  /**
+   * Approximate height of one element WITHOUT pagination state — used for
+   * container children (panel/columns) whose content is measured as a whole.
+   */
+  const estimateHeight = (el: PreviewElement): number => {
+    switch (el.type) {
+      case 'paragraph':
+      case 'fileDetail': {
+        const lines = Math.max(1, Math.ceil(el.text.length / bodyCharsPerLine));
+        return (
+          (el.type === 'fileDetail' ? 14 : 0) +
+          lines * bodyFontSizePx * preset.typography.lineSpacing +
+          preset.typography.paragraphSpacingPt
+        );
+      }
+      case 'image': {
+        const img =
+          el.image ??
+          (el.projectIdx !== undefined && el.fileIdx !== undefined
+            ? projects[el.projectIdx]?.files[el.fileIdx]?.images?.[el.imageIdx ?? 0]
+            : undefined);
+        const maxW = contentW * 0.62;
+        const maxH = contentH * 0.55;
+        let drawH = 120;
+        if (img && img.width > 0 && img.height > 0) {
+          drawH =
+            img.height * Math.min(maxW / img.width, maxH / img.height, 1);
+        }
+        return drawH + (img?.caption ? 18 : 0) + 12;
+      }
+      case 'spacer':
+        return el.height;
+      case 'divider':
+        return el.heightPx;
+      case 'heading': {
+        const h = preset.headings[el.level];
+        return h.sizePt * h.lineHeight * PT_TO_PX + h.spaceBeforePt + h.spaceAfterPt;
+      }
+      case 'panel': {
+        const pad = (el.paddingPt ?? 6) * PT_TO_PX * 2;
+        if (el.children.length === 0 && el.heightPt) {
+          return Math.max(el.heightPt * PT_TO_PX, pad);
+        }
+        return pad + el.children.reduce((acc, c) => acc + estimateHeight(c), 0);
+      }
+      case 'columns': {
+        const heights = el.columns.map((col) =>
+          col.reduce((acc, c) => acc + estimateHeight(c), 0),
+        );
+        return Math.max(40, ...heights);
+      }
+      default:
+        return 0;
+    }
+  };
 
   for (const el of elements) {
     // Explicit page breaks — content actually moves to a new page.
@@ -387,6 +521,64 @@ export function paginateDocument(
         push(el, height);
         break;
       }
+      case 'fileDetail': {
+        // §6 — labeled detail paragraph (Description/Summary/Note/custom).
+        const file = fileAt(el);
+        if (file) {
+          current.fileName = file.name;
+          current.projectName = projects[el.projectIdx ?? 0]?.label ?? null;
+        }
+        const lines = Math.max(1, Math.ceil(el.text.length / bodyCharsPerLine));
+        const height =
+          14 +
+          lines * bodyFontSizePx * preset.typography.lineSpacing +
+          preset.typography.paragraphSpacingPt;
+        if (used + height > contentH && current.elements.length > 0) flush();
+        push(el, height);
+        break;
+      }
+      case 'pageBreak': {
+        // §19 — explicit page break element (custom layouts).
+        flush();
+        break;
+      }
+      case 'image': {
+        // §12 — images respect page boundaries and never overflow the page:
+        // they are aspect-fit into a box of 62% content width / 55% height.
+        const file = fileAt(el);
+        const img =
+          el.image ??
+          file?.images?.[el.imageIdx ?? 0];
+        if (file) {
+          current.fileName = file.name;
+          current.projectName = projects[el.projectIdx ?? 0]?.label ?? null;
+        }
+        const maxW = contentW * 0.62;
+        const maxH = contentH * 0.55;
+        let drawH = 120;
+        if (img && img.width > 0 && img.height > 0) {
+          const scale = Math.min(maxW / img.width, maxH / img.height, 1);
+          drawH = img.height * scale;
+        }
+        const height = drawH + (img?.caption ? 18 : 0) + 12;
+        if (used + height > contentH && current.elements.length > 0) flush();
+        push(el, height);
+        break;
+      }
+      case 'panel': {
+        // §26 — container measured as a whole; moved to its own page if it
+        // does not fit (its content is capped by construction).
+        const height = estimateHeight(el);
+        if (used + height > contentH && current.elements.length > 0) flush();
+        push(el, height);
+        break;
+      }
+      case 'columns': {
+        const height = estimateHeight(el);
+        if (used + height > contentH && current.elements.length > 0) flush();
+        push(el, height);
+        break;
+      }
       case 'code': {
         const file = fileAt(el);
         if (file) {
@@ -431,6 +623,7 @@ export function paginateDocument(
               fromLine: idx,
               toLine: lastFittingSourceLine,
               startLineNumber: idx + 1,
+              ...(el.outlineId ? { outlineId: el.outlineId } : {}),
             },
             chunkHeight,
           );
@@ -445,6 +638,12 @@ export function paginateDocument(
       case 'spacer': {
         if (used + el.height > contentH) flush();
         push(el, el.height);
+        break;
+      }
+      case 'divider': {
+        // §6 — horizontal rule: a small filled bar; never splits across pages.
+        if (used + el.heightPx > contentH && current.elements.length > 0) flush();
+        push(el, el.heightPx);
         break;
       }
       default:

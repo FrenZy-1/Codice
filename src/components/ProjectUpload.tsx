@@ -11,14 +11,17 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useAppState } from '@/hooks/useAppState';
+import { useToast } from '@/components/common/Toast';
 import {
   discoverFromFiles,
   discoverFromDirectoryHandle,
   discoverFromZipArchive,
+  discoverStandaloneFiles,
   isZipFile,
 } from '@/lib/fileDiscovery';
+import { normalizeImageFiles, isImageFile } from '@/lib/imageAssets';
 import type { ProjectEntry } from '@/types';
-import { FolderPlus, Loader, AlertTriangle, FileArchive } from '@/components/common/Icons';
+import { FolderPlus, Loader, AlertTriangle, FileArchive, FilePlus, ImagePlus } from '@/components/common/Icons';
 
 interface Props {
   onProjectAdded?: (projectId: string) => void;
@@ -26,12 +29,31 @@ interface Props {
 
 export function ProjectUpload({ onProjectAdded }: Props) {
   const { state, dispatch } = useAppState();
+  const toast = useToast();
   const inputRef = useRef<HTMLInputElement>(null);
   const zipInputRef = useRef<HTMLInputElement>(null);
+  const filesInputRef = useRef<HTMLInputElement>(null);
+  const imageInputRef = useRef<HTMLInputElement>(null);
   const [isDragging, setIsDragging] = useState(false);
   const [isProcessing, setIsProcessing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [progress, setProgress] = useState<string | null>(null);
+  // §12 — import a folder's first-level subdirectories as SEPARATE
+  // projects (one folder-picker operation → many projects).
+  const [splitSubfolders, setSplitSubfolders] = useState<boolean>(() => {
+    try {
+      return window.localStorage.getItem('codice-split-subfolders') === '1';
+    } catch {
+      return false;
+    }
+  });
+  useEffect(() => {
+    try {
+      window.localStorage.setItem('codice-split-subfolders', splitSubfolders ? '1' : '0');
+    } catch {
+      // ignore
+    }
+  }, [splitSubfolders]);
 
   const filter = state.filter;
   /** When projects are already loaded the dropzone shrinks (spec §15) so
@@ -61,6 +83,71 @@ export function ProjectUpload({ onProjectAdded }: Props) {
       onProjectAdded?.(project.id);
     },
     [dispatch, onProjectAdded],
+  );
+
+  /** §16 — route image files into the image library. Images dropped or
+   * picked in the main upload area were previously rejected as "binary"
+   * source files — now they import cleanly and appear in File properties
+   * / layout image fields. */
+  const handleImageFiles = useCallback(
+    async (files: File[]) => {
+      if (files.length === 0) return 0;
+      const { assets, errors } = await normalizeImageFiles(files);
+      if (assets.length > 0) {
+        dispatch({ type: 'ADD_IMAGE_ASSETS', assets });
+      }
+      toast.push({
+        kind: assets.length > 0 ? 'success' : 'error',
+        title:
+          assets.length > 0
+            ? `Added ${assets.length} image${assets.length === 1 ? '' : 's'} to the library`
+            : 'Image import failed',
+        message:
+          assets.length > 0
+            ? 'Attach them in File properties or a layout image field.'
+            : errors.join(' · ') || 'The files could not be decoded.',
+      });
+      for (const e of errors.slice(0, 2)) {
+        toast.push({ kind: 'error', title: 'Image skipped', message: e });
+      }
+      return assets.length;
+    },
+    [dispatch, toast],
+  );
+
+  /** Add standalone files — merged into the persistent standalone project
+   * (spec §4): first-class document inputs, never temporary uploads.
+   * Image files are routed to the image library instead (§16). */
+  const addStandaloneFiles = useCallback(
+    async (files: File[]) => {
+      const images = files.filter((f) => isImageFile(f));
+      const usable = files.filter((f) => !isZipFile(f) && !isImageFile(f));
+      if (images.length > 0) await handleImageFiles(images);
+      if (usable.length === 0) return images.length;
+      setIsProcessing(true);
+      setError(null);
+      setProgress(`Adding ${usable.length} file${usable.length === 1 ? '' : 's'}…`);
+      try {
+        const { files: discovered, project } = await discoverStandaloneFiles(
+          usable,
+          filter,
+        );
+        dispatch({
+          type: 'ADD_STANDALONE_FILES',
+          project,
+          files: discovered,
+        });
+        onProjectAdded?.(project.id);
+        setProgress(`Added ${discovered.length} standalone file${discovered.length === 1 ? '' : 's'}`);
+        return discovered.length;
+      } catch (err) {
+        setError(err instanceof Error ? err.message : 'Failed to add files');
+        return images.length > 0 ? images.length : 0;
+      } finally {
+        setIsProcessing(false);
+      }
+    },
+    [filter, dispatch, onProjectAdded, handleImageFiles],
   );
 
   /** Unpack one or more ZIP archives into projects. */
@@ -97,11 +184,83 @@ export function ProjectUpload({ onProjectAdded }: Props) {
       const rest = arr.filter((f) => !isZipFile(f));
       if (zips.length > 0) await handleZipFiles(zips);
       if (rest.length === 0) return;
+      // §16 — loose image picks (no folder context) go to the library.
+      const hasRelative = (f: File) => Boolean((f as any).webkitRelativePath);
+      const looseImages = rest.filter((f) => isImageFile(f) && !hasRelative(f));
+      const folderish = rest.filter((f) => !isImageFile(f) || hasRelative(f));
+      if (looseImages.length > 0) await handleImageFiles(looseImages);
+      if (folderish.length === 0) return;
+
       setIsProcessing(true);
       setError(null);
-      setProgress(`Scanning ${rest.length} files…`);
+      // §12 — multi-folder in ONE operation: when enabled, a folder pick
+      // whose files span multiple first-level subdirectories becomes one
+      // project per subdirectory. The browser picker itself only allows a
+      // single directory per pick (drag-drop of multiple folders always
+      // worked); this makes one pick yield many projects.
+      //
+      // webkitRelativePath = "<pickedFolder>/<sub>/<path…>", so the
+      // "first-level subdirectories of the picked folder" are segment 1.
+      // Files at the picked folder's own root (no segment 2) stay together
+      // under the picked folder's name.
+      const relOf = (f: File) => (f as any).webkitRelativePath as string | undefined;
+      const anyRelative = folderish.some((f) => Boolean(relOf(f)));
+      const topLevel = new Set<string>();
+      for (const f of folderish) {
+        const rel = relOf(f);
+        if (rel) {
+          const seg = rel.split('/');
+          topLevel.add(seg.length > 2 ? seg[1] : seg[0]);
+        }
+      }
+      if (splitSubfolders && anyRelative && topLevel.size > 1) {
+        // Regroup: rebase each file's relative path onto its subfolder so
+        // discoverFromFiles derives the right project name + inner paths.
+        const groups = new Map<string, File[]>();
+        for (const f of folderish) {
+          const rel = relOf(f);
+          let key: string;
+          let rebased: string;
+          if (rel) {
+            const seg = rel.split('/');
+            if (seg.length > 2) {
+              key = seg[1];
+              rebased = rel.slice(seg[0].length + 1);
+            } else {
+              key = seg[0];
+              rebased = rel;
+            }
+          } else {
+            key = 'Loose files';
+            rebased = f.name;
+          }
+          const copy = new File([f], f.name, { type: f.type, lastModified: f.lastModified });
+          Object.defineProperty(copy, 'webkitRelativePath', {
+            value: rebased,
+            configurable: true,
+          });
+          const list = groups.get(key) ?? [];
+          list.push(copy);
+          groups.set(key, list);
+        }
+        let added = 0;
+        for (const [, groupFiles] of groups) {
+          try {
+            const project = await discoverFromFiles(groupFiles, filter);
+            addProject(project);
+            added++;
+          } catch {
+            // per-group failure should not abort the others
+          }
+        }
+        setProgress(`Added ${added} projects from ${groups.size} folders`);
+        setIsProcessing(false);
+        return;
+      }
+
+      setProgress(`Scanning ${folderish.length} files…`);
       try {
-        const project = await discoverFromFiles(rest, filter);
+        const project = await discoverFromFiles(folderish, filter);
         addProject(project);
         setProgress(
           `Added project "${project.label}" with ${project.files.length} files`,
@@ -112,7 +271,7 @@ export function ProjectUpload({ onProjectAdded }: Props) {
         setIsProcessing(false);
       }
     },
-    [filter, addProject, handleZipFiles],
+    [filter, addProject, handleZipFiles, handleImageFiles, splitSubfolders],
   );
 
   const handleDirPicker = useCallback(async () => {
@@ -170,7 +329,14 @@ export function ProjectUpload({ onProjectAdded }: Props) {
       }
       if (entries.length === 0) {
         if (droppedZips.length === 0) {
-          await handleFiles(e.dataTransfer.files);
+          // Loose (non-folder) dropped files: images go to the image
+          // library (§16), everything else becomes standalone document
+          // inputs (spec §4).
+          const dropped = Array.from(e.dataTransfer.files).filter((f) => !isZipFile(f));
+          const images = dropped.filter((f) => isImageFile(f));
+          const others = dropped.filter((f) => !isImageFile(f));
+          if (images.length > 0) await handleImageFiles(images);
+          if (others.length > 0) await addStandaloneFiles(others);
         }
         return;
       }
@@ -206,7 +372,7 @@ export function ProjectUpload({ onProjectAdded }: Props) {
         setIsProcessing(false);
       }
     },
-    [filter, addProject, handleFiles, handleZipFiles],
+    [filter, addProject, handleFiles, handleZipFiles, addStandaloneFiles, handleImageFiles],
   );
 
   return (
@@ -264,6 +430,28 @@ export function ProjectUpload({ onProjectAdded }: Props) {
               <button
                 type="button"
                 className="codice-input-chip cursor-pointer"
+                title="Add standalone files — merged into the Standalone files project"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  filesInputRef.current?.click();
+                }}
+              >
+                <FilePlus size={10} /> Files
+              </button>
+              <button
+                type="button"
+                className="codice-input-chip cursor-pointer"
+                title="Add images to the image library — attach them in File properties or layout image fields"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  imageInputRef.current?.click();
+                }}
+              >
+                <ImagePlus size={10} /> Images
+              </button>
+              <button
+                type="button"
+                className="codice-input-chip cursor-pointer"
                 title="Upload a .zip archive — unpacked in your browser"
                 onClick={(e) => {
                   e.stopPropagation();
@@ -292,10 +480,32 @@ export function ProjectUpload({ onProjectAdded }: Props) {
             or click to browse — your files stay in your browser
           </div>
           {!isProcessing && (
-            <div className="mt-1 flex items-center gap-1.5">
+            <div className="mt-1 flex flex-wrap items-center justify-center gap-1.5">
               <span className="codice-input-chip" title="Upload a folder">
                 <FolderPlus size={10} /> Folder
               </span>
+              <button
+                type="button"
+                className="codice-input-chip cursor-pointer"
+                title="Add standalone files — merged into the Standalone files project"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  filesInputRef.current?.click();
+                }}
+              >
+                <FilePlus size={10} /> Files
+              </button>
+              <button
+                type="button"
+                className="codice-input-chip cursor-pointer"
+                title="Add images to the image library — attach them in File properties or layout image fields"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  imageInputRef.current?.click();
+                }}
+              >
+                <ImagePlus size={10} /> Images
+              </button>
               <button
                 type="button"
                 className="codice-input-chip cursor-pointer"
@@ -307,6 +517,22 @@ export function ProjectUpload({ onProjectAdded }: Props) {
               >
                 <FileArchive size={10} /> ZIP
               </button>
+              <label
+                className="flex cursor-pointer items-center gap-1 text-[10px] text-secondary"
+                title="Import each first-level subdirectory as a separate project — one folder pick becomes many projects (multi-folder upload, §12)"
+              >
+                <input
+                  type="checkbox"
+                  className="h-3 w-3"
+                  checked={splitSubfolders}
+                  onChange={(e) => {
+                    e.stopPropagation();
+                    setSplitSubfolders(e.target.checked);
+                  }}
+                  onClick={(e) => e.stopPropagation()}
+                />
+                Split subfolders into projects
+              </label>
             </div>
           )}
         </div>
@@ -336,6 +562,36 @@ export function ProjectUpload({ onProjectAdded }: Props) {
         aria-label="Upload ZIP archives"
         onChange={(e) => {
           if (e.target.files) handleFiles(e.target.files);
+          e.target.value = '';
+        }}
+      />
+
+      {/* §4 — standalone file picker: any number of individual files, added
+          as first-class document inputs into the persistent standalone
+          project. Images are routed to the image library (§16). */}
+      <input
+        ref={filesInputRef}
+        type="file"
+        multiple
+        className="hidden"
+        aria-label="Add standalone files"
+        onChange={(e) => {
+          if (e.target.files) void addStandaloneFiles(Array.from(e.target.files));
+          e.target.value = '';
+        }}
+      />
+
+      {/* §16 — image picker for the main upload area: imports into the
+          image library (never treated as source files). */}
+      <input
+        ref={imageInputRef}
+        type="file"
+        accept="image/png,image/jpeg,image/webp,image/gif,image/svg+xml,image/bmp"
+        multiple
+        className="hidden"
+        aria-label="Add images to the library"
+        onChange={(e) => {
+          if (e.target.files) void handleImageFiles(Array.from(e.target.files));
           e.target.value = '';
         }}
       />

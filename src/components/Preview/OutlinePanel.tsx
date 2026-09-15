@@ -9,14 +9,16 @@
  */
 
 import { useState } from 'react';
+import { useAppState } from '@/hooks/useAppState';
 import {
   formatOutlineText,
   outlineGlyph,
   outlineKindTone,
   type OutlineEntry,
 } from '@/lib/documentOutline';
+import { moveFileInOrder } from '@/lib/documentOrder';
 import { useToast } from '@/components/common/Toast';
-import { X, Copy, Check } from '@/components/common/Icons';
+import { X, Copy, Check, ChevronUp, ChevronDown } from '@/components/common/Icons';
 
 export function OutlinePanel({
   entries,
@@ -32,6 +34,26 @@ export function OutlinePanel({
 }) {
   const [copied, setCopied] = useState(false);
   const toast = useToast();
+  // §14 — file reorder from the Outline. SAME canonical state as the
+  // sidebar's Document order panel: fileOrder[projectId] (§13).
+  const { state, dispatch } = useAppState();
+
+  const moveFile = (entry: OutlineEntry, delta: number) => {
+    if (!entry.fileId || !entry.projectId) return;
+    const project = state.projects.find((p) => p.id === entry.projectId);
+    if (!project) return;
+    const order = moveFileInOrder(
+      state.fileOrder[entry.projectId],
+      project.files,
+      entry.fileId,
+      delta,
+    );
+    dispatch({
+      type: 'SET_FILE_ORDER',
+      projectId: entry.projectId,
+      order,
+    });
+  };
 
   const copyOutline = async () => {
     const text = formatOutlineText(entries);
@@ -102,9 +124,15 @@ export function OutlinePanel({
       </header>
 
       <div className="codice-outline-list" role="list">
-        {entries.map((entry) => (
-          <button
+        {entries.map((entry) => {
+          const reorderable =
+            entry.kind === 'file' && Boolean(entry.fileId && entry.projectId);
+          return (
+          <div
             key={entry.id}
+            className="codice-outline-row-wrapper flex items-center"
+          >
+          <button
             type="button"
             role="listitem"
             className="codice-outline-row"
@@ -127,7 +155,37 @@ export function OutlinePanel({
               <span className="codice-outline-badge">{entry.detail}</span>
             )}
           </button>
-        ))}
+          {reorderable && (
+            <span className="codice-outline-reorder" aria-hidden={false}>
+              <button
+                type="button"
+                className="codice-outline-reorder-btn"
+                title={`Move ${entry.label} earlier in the document`}
+                aria-label={`Move ${entry.label} earlier in the document`}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  moveFile(entry, -1);
+                }}
+              >
+                <ChevronUp size={11} />
+              </button>
+              <button
+                type="button"
+                className="codice-outline-reorder-btn"
+                title={`Move ${entry.label} later in the document`}
+                aria-label={`Move ${entry.label} later in the document`}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  moveFile(entry, 1);
+                }}
+              >
+                <ChevronDown size={11} />
+              </button>
+            </span>
+          )}
+          </div>
+          );
+        })}
       </div>
 
       <footer className="border-t border-app px-3 py-1.5 text-[10px] text-muted">

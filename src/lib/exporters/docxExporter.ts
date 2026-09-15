@@ -16,6 +16,7 @@ import {
   Footer,
   Header,
   HeadingLevel,
+  ImageRun,
   LevelFormat,
   Packer,
   PageBreak,
@@ -34,16 +35,26 @@ import {
   convertMillimetersToTwip,
 } from 'docx';
 import type {
+  DocumentFile,
+  DocumentImage,
   DocumentMetadata,
   DocumentModel,
   DocumentOptions,
+  DocumentProject,
   ExportOptions,
   ExportResult,
   FooterSlotType,
   HighlightedFile,
   HighlightedLine,
   HighlightToken,
+  ResolvedLayoutBlock,
 } from '@/types';
+import {
+  IMAGE_MAX_HEIGHT_RATIO,
+  IMAGE_MAX_WIDTH_RATIO,
+  dataUrlToBytes,
+  fitImageBox,
+} from '@/lib/imageAssets';
 import type { DocumentExporter } from './types';
 import { parseHex } from './colors';
 import { getThemeColors } from '@/lib/highlight/highlighter';
@@ -70,6 +81,125 @@ function hexNoHash(hex: string): string {
 function runColor(color: string | undefined, fallback: string): string {
   if (!color) return fallback;
   return hexNoHash(color);
+}
+
+/** Pixels per millimetre at 96 dpi (docx ImageRun transformation unit). */
+const PX_PER_MM = 96 / 25.4;
+
+/** Muted label color shared by file headers and detail labels. */
+const DETAIL_LABEL_COLOR = '586069';
+
+/** Aspect-fit box (px at 96 dpi) for embedded images: 62% width / 55% height of the content area. */
+function maxImageBoxPx(
+  options: DocumentOptions,
+  pageWmm: number,
+  pageHmm: number,
+): { w: number; h: number } {
+  const contentWpx = Math.max(0, (pageWmm - options.margins.left - options.margins.right) * PX_PER_MM);
+  const contentHpx = Math.max(0, (pageHmm - options.margins.top - options.margins.bottom) * PX_PER_MM);
+  return {
+    w: contentWpx * IMAGE_MAX_WIDTH_RATIO,
+    h: contentHpx * IMAGE_MAX_HEIGHT_RATIO,
+  };
+}
+
+/**
+ * Image paragraphs for a document image: a centered aspect-fit ImageRun
+ * (real pixel bytes decoded from the data URL) plus an optional italic
+ * secondary caption below (spec §8/§12).
+ */
+function buildImageParagraphs(
+  img: DocumentImage,
+  options: DocumentOptions,
+  box: { w: number; h: number },
+  align: 'left' | 'center' | 'right' = 'center',
+): Paragraph[] {
+  const { w, h } = fitImageBox(img.width, img.height, box.w, box.h);
+  const imageRun = new ImageRun({
+    type: img.mime === 'image/jpeg' ? 'jpg' : 'png',
+    data: dataUrlToBytes(img.dataUrl),
+    transformation: {
+      width: Math.max(1, Math.round(w)),
+      height: Math.max(1, Math.round(h)),
+    },
+  });
+  const alignment =
+    align === 'left'
+      ? AlignmentType.LEFT
+      : align === 'right'
+        ? AlignmentType.RIGHT
+        : AlignmentType.CENTER;
+  const out: Paragraph[] = [
+    new Paragraph({
+      alignment,
+      spacing: { before: 120, after: img.caption?.trim() ? 40 : 120 },
+      children: [imageRun],
+    }),
+  ];
+  if (img.caption?.trim()) {
+    out.push(
+      new Paragraph({
+        alignment,
+        spacing: { after: 120 },
+        children: [
+          new TextRun({
+            text: img.caption,
+            italics: true,
+            size: halfPoints(Math.max(6, options.bodyFontSize - 2)),
+            color: DETAIL_LABEL_COLOR,
+            font: options.bodyFont,
+          }),
+        ],
+      }),
+    );
+  }
+  return out;
+}
+
+/** Small uppercase bolder letter-spaced label above a details paragraph. */
+function buildDetailLabelParagraph(label: string, options: DocumentOptions, color?: string): Paragraph {
+  return new Paragraph({
+    keepNext: true,
+    spacing: { before: 160, after: 40 },
+    children: [
+      new TextRun({
+        text: label.toUpperCase(),
+        bold: true,
+        size: halfPoints(Math.max(6, options.bodyFontSize - 2)),
+        color: color ? hexNoHash(color) : DETAIL_LABEL_COLOR,
+        font: options.bodyFont,
+        characterSpacing: 20,
+      }),
+    ],
+  });
+}
+
+/** Body paragraph for the details text (uses the body font/size). */
+function buildDetailTextParagraph(text: string, options: DocumentOptions, color?: string): Paragraph {
+  return new Paragraph({
+    spacing: { after: 120 },
+    children: [
+      new TextRun({
+        text,
+        size: halfPoints(options.bodyFontSize),
+        font: options.bodyFont,
+        color: color ? hexNoHash(color) : undefined,
+      }),
+    ],
+  });
+}
+
+/** Label + text pair for one user details field (Description/Summary/Note). */
+function buildDetailBlock(
+  label: string,
+  text: string,
+  options: DocumentOptions,
+  color?: string,
+): Paragraph[] {
+  return [
+    buildDetailLabelParagraph(label, options, color),
+    buildDetailTextParagraph(text, options, color),
+  ];
 }
 
 /** Page size mapping. */
@@ -852,6 +982,332 @@ function buildFooter(opts: DocumentOptions, contentWidthTwips: number, ctx: Toke
 
 
 
+// ---------------------------------------------------------------------------
+// Custom layout stream (spec §35) — the resolved ResolvedLayoutBlock[] is
+// rendered INSTEAD of the standard flow, reusing the exact same per-file
+// header / code-line / image machinery so code looks identical.
+// ---------------------------------------------------------------------------
+
+interface DocxLayoutContext {
+  options: DocumentOptions;
+  lineNumberWidth: number;
+  defaultColor: string;
+  imageBox: { w: number; h: number };
+  contentWidthTwips: number;
+}
+
+/** Find a DocumentFile by its highlighted fileId across all projects. */
+function findDocFile(model: DocumentModel, fileId: string): DocumentFile | undefined {
+  for (const project of model.projects) {
+    const file = project.files.find((f) => f.highlighted.fileId === fileId);
+    if (file) return file;
+  }
+  return undefined;
+}
+
+function docxAlignment(align: 'left' | 'center' | 'right' | undefined) {
+  if (align === 'left') return AlignmentType.LEFT;
+  if (align === 'right') return AlignmentType.RIGHT;
+  return AlignmentType.CENTER;
+}
+
+/** Compact metadata (title-page group) for the `metadata` layout block. */
+function buildCompactMetadataDocx(model: DocumentModel): Paragraph[] {
+  const md = model.metadata;
+  const options = model.options;
+  const alignment = titlePageAlignmentType(options.titlePageHorizontalAlignment);
+  const out: Paragraph[] = [];
+  const push = (
+    text: string,
+    size: number,
+    extra: { bold?: boolean; italics?: boolean; color?: string; before?: number; after?: number } = {},
+  ) => {
+    out.push(
+      new Paragraph({
+        alignment,
+        spacing: { before: extra.before ?? 0, after: extra.after ?? 100 },
+        children: [
+          new TextRun({
+            text,
+            size: halfPoints(size),
+            bold: extra.bold,
+            italics: extra.italics,
+            color: extra.color,
+            font: extra.bold ? options.headingFont : options.bodyFont,
+          }),
+        ],
+      }),
+    );
+  };
+  push(md.title ?? 'Project Report', 28, { bold: true, after: 200 });
+  if (md.subtitle) push(md.subtitle, 14, { italics: true });
+  if (md.author) push(md.author, 14);
+  if (md.course) push(md.course, 12);
+  if (md.university) push(md.university, 12);
+  push(`Generated: ${new Date(model.generatedAt).toLocaleString()}`, 11, {
+    color: DETAIL_LABEL_COLOR,
+    before: 200,
+  });
+  if (md.version) push(`Version: ${md.version}`, 11, { color: DETAIL_LABEL_COLOR });
+  if (md.description) push(md.description, 11);
+  return out;
+}
+
+/** Render the resolved custom layout blocks into docx elements. */
+function renderDocxLayoutBlocks(
+  model: DocumentModel,
+  ctx: DocxLayoutContext,
+): (Paragraph | Table)[] {
+  return renderDocxBlocks(model, model.customLayout?.blocks ?? [], ctx);
+}
+
+/** Render one list of blocks (top-level stream or panel/column children). */
+function renderDocxBlocks(
+  model: DocumentModel,
+  blocks: readonly ResolvedLayoutBlock[],
+  ctx: DocxLayoutContext,
+): (Paragraph | Table)[] {
+  const out: (Paragraph | Table)[] = [];
+  for (const block of blocks) {
+    renderDocxLayoutBlock(model, block, ctx, out);
+  }
+  return out;
+}
+
+const DOCX_NO_BORDER = { style: BorderStyle.NONE, size: 0, color: 'auto' };
+
+function renderDocxLayoutBlock(
+  model: DocumentModel,
+  block: ResolvedLayoutBlock,
+  ctx: DocxLayoutContext,
+  out: (Paragraph | Table)[],
+): void {
+  const options = ctx.options;
+  switch (block.kind) {
+    case 'heading': {
+      const heading =
+        block.level === 1
+          ? HeadingLevel.HEADING_1
+          : block.level === 2
+            ? HeadingLevel.HEADING_2
+            : HeadingLevel.HEADING_3;
+      const hasOverrides =
+        block.align || block.fontSizePt || block.bold !== undefined || block.italic !== undefined || block.color;
+      out.push(
+        new Paragraph({
+          heading,
+          text: hasOverrides ? undefined : block.text,
+          alignment: block.align ? docxAlignment(block.align) : undefined,
+          spacing: { before: 240, after: 120 },
+          children: hasOverrides
+            ? [
+                new TextRun({
+                  text: block.text,
+                  font: options.headingFont,
+                  bold: block.bold,
+                  italics: block.italic,
+                  size: block.fontSizePt ? halfPoints(block.fontSizePt) : undefined,
+                  color: block.color ? hexNoHash(block.color) : undefined,
+                }),
+              ]
+            : undefined,
+        }),
+      );
+      break;
+    }
+    case 'paragraph': {
+      out.push(
+        new Paragraph({
+          alignment: block.align ? docxAlignment(block.align) : undefined,
+          spacing: { after: 120 },
+          children: [
+            new TextRun({
+              text: block.text,
+              font: options.bodyFont,
+              size: halfPoints(block.fontSizePt ?? options.bodyFontSize),
+              bold: block.bold,
+              italics: block.italic,
+              color: block.color ? hexNoHash(block.color) : undefined,
+            }),
+          ],
+        }),
+      );
+      break;
+    }
+    case 'labeled': {
+      out.push(...buildDetailBlock(block.label, block.text, options, block.color));
+      break;
+    }
+    case 'fileHeader': {
+      const file = findDocFile(model, block.fileId);
+      if (file && options.showFileHeaders !== false) {
+        out.push(buildFileHeader(file, options));
+      }
+      break;
+    }
+    case 'code': {
+      const file = findDocFile(model, block.fileId);
+      if (file) {
+        for (const line of file.highlighted.lines) {
+          out.push(buildCodeLine(line, options, ctx.lineNumberWidth, ctx.defaultColor));
+        }
+      }
+      break;
+    }
+    case 'image': {
+      const img: DocumentImage = {
+        id: block.imageId,
+        name: block.name,
+        dataUrl: block.dataUrl,
+        mime: block.mime,
+        width: block.width,
+        height: block.height,
+        caption: block.captionVisible && block.caption ? block.caption : undefined,
+      };
+      out.push(...buildImageParagraphs(img, options, ctx.imageBox, block.align ?? 'center'));
+      break;
+    }
+    case 'pageBreak': {
+      out.push(new Paragraph({ children: [new PageBreak()] }));
+      break;
+    }
+    case 'divider': {
+      // §6 — horizontal rule: an empty paragraph with a thick bottom border
+      // in the bar color. The bar's thickness maps onto the border size.
+      const thickness = Math.max(2, Math.round(block.heightPt * 8));
+      out.push(
+        new Paragraph({
+          spacing: { before: 60, after: 120 },
+          border: {
+            bottom: {
+              style: BorderStyle.SINGLE,
+              size: thickness,
+              color: block.fillColor ? hexNoHash(block.fillColor) : '888888',
+            },
+          },
+          children: [],
+        }),
+      );
+      break;
+    }
+    case 'spacer': {
+      // 1pt exact line box + the requested after-spacing → a vertical gap.
+      out.push(
+        new Paragraph({
+          spacing: {
+            before: 0,
+            after: Math.round(block.heightPt * 20),
+            line: 20,
+            lineRule: 'exact',
+          },
+          children: [],
+        }),
+      );
+      break;
+    }
+    case 'panel': {
+      // 1x1 table: borders/shading around the children stacked in the cell.
+      // Radius is not expressible in DOCX tables — degraded (ignored).
+      const pad = Math.round((block.paddingPt ?? 8) * 20);
+      const border = block.borderColor
+        ? {
+            style: BorderStyle.SINGLE,
+            size: Math.max(2, Math.round((block.borderWidthPt ?? 1) * 8)),
+            color: hexNoHash(block.borderColor),
+          }
+        : DOCX_NO_BORDER;
+      const children = renderDocxBlocks(model, block.children, ctx);
+      out.push(
+        new Table({
+          width: { size: 100, type: WidthType.PERCENTAGE },
+          borders: {
+            top: border,
+            bottom: border,
+            left: border,
+            right: border,
+            insideHorizontal: DOCX_NO_BORDER,
+            insideVertical: DOCX_NO_BORDER,
+          },
+          rows: [
+            new TableRow({
+              children: [
+                new TableCell({
+                  shading: block.fillColor
+                    ? {
+                        type: ShadingType.SOLID,
+                        color: hexNoHash(block.fillColor),
+                        fill: hexNoHash(block.fillColor),
+                      }
+                    : undefined,
+                  margins: { top: pad, bottom: pad, left: pad, right: pad },
+                  children: children.length > 0 ? children : [new Paragraph({})],
+                }),
+              ],
+            }),
+          ],
+        }),
+      );
+      break;
+    }
+    case 'columns': {
+      // One row of N borderless cells, each stacking its column's blocks.
+      const count = block.count;
+      const cellWidthTwips = Math.floor(ctx.contentWidthTwips / count);
+      out.push(
+        new Table({
+          width: { size: 100, type: WidthType.PERCENTAGE },
+          columnWidths: Array.from({ length: count }, () => cellWidthTwips),
+          borders: {
+            top: DOCX_NO_BORDER,
+            bottom: DOCX_NO_BORDER,
+            left: DOCX_NO_BORDER,
+            right: DOCX_NO_BORDER,
+            insideHorizontal: DOCX_NO_BORDER,
+            insideVertical: DOCX_NO_BORDER,
+          },
+          rows: [
+            new TableRow({
+              children: block.columns.map(
+                (stack) =>
+                  new TableCell({
+                    width: { size: Math.floor(100 / count), type: WidthType.PERCENTAGE },
+                    children: renderDocxBlocks(model, stack, ctx),
+                  }),
+              ),
+            }),
+          ],
+        }),
+      );
+      break;
+    }
+    case 'toc': {
+      out.push(...buildToc(model));
+      break;
+    }
+    case 'metadata': {
+      out.push(...buildCompactMetadataDocx(model));
+      break;
+    }
+    case 'projectHeader': {
+      const index = model.projects.findIndex((p) => p.id === block.projectId);
+      const project = model.projects[index];
+      if (project) {
+        out.push(
+          new Paragraph({
+            text: `${index + 1}. ${project.label}`,
+            heading: HeadingLevel.HEADING_1,
+            spacing: { before: 240, after: 120 },
+          }),
+        );
+      }
+      break;
+    }
+    default:
+      // Unknown block kinds are skipped defensively (never crash an export).
+      break;
+  }
+}
+
 /** Build the docx Document object from a DocumentModel. */
 async function buildDocx(model: DocumentModel): Promise<DocxDocument> {
   const opts = model.options;
@@ -859,6 +1315,10 @@ async function buildDocx(model: DocumentModel): Promise<DocxDocument> {
   const orientation = opts.landscape
     ? PageOrientation.LANDSCAPE
     : PageOrientation.PORTRAIT;
+  // Effective page dims (landscape swaps the portrait dimensions), matching
+  // the section geometry below and the PDF exporter's model.
+  const effW = opts.landscape ? pageH : pageW;
+  const effH = opts.landscape ? pageW : pageH;
 
   // Compute the longest line number width across all files (for alignment).
   let maxLineNum = 0;
@@ -880,8 +1340,23 @@ async function buildDocx(model: DocumentModel): Promise<DocxDocument> {
     // ignore
   }
 
-  const children: Paragraph[] = [];
+  const children: (Paragraph | Table)[] = [];
 
+  if (model.customLayout) {
+    // Custom layout stream (spec §35): renders the resolved blocks INSTEAD of
+    // the standard title/TOC/project/file flow. Page geometry, margins,
+    // headers/footers and code styling still come from model.options.
+    children.push(
+      ...renderDocxLayoutBlocks(model, {
+        options: opts,
+        lineNumberWidth,
+        defaultColor,
+        imageBox: maxImageBoxPx(opts, effW, effH),
+        contentWidthTwips:
+          mmToTwip(effW) - mmToTwip(opts.margins.left) - mmToTwip(opts.margins.right),
+      }),
+    );
+  } else {
   if (opts.includeFrontMatter) {
     children.push(...buildFrontMatter(model));
   }
@@ -931,10 +1406,28 @@ async function buildDocx(model: DocumentModel): Promise<DocxDocument> {
         children.push(buildFileHeader(file, opts));
       }
 
+      // Per-file user details — description BEFORE the code block (spec §6).
+      if (file.details?.description?.trim()) {
+        children.push(...buildDetailBlock('Description', file.details.description, opts));
+      }
+
       for (const line of file.highlighted.lines) {
         children.push(buildCodeLine(line, opts, lineNumberWidth, defaultColor));
       }
+
+      // Attached images ride between the code block and the summary (§10/§12).
+      for (const img of file.images ?? []) {
+        children.push(...buildImageParagraphs(img, opts, maxImageBoxPx(opts, effW, effH)));
+      }
+
+      if (file.details?.summary?.trim()) {
+        children.push(...buildDetailBlock('Summary', file.details.summary, opts));
+      }
+      if (file.details?.note?.trim()) {
+        children.push(...buildDetailBlock('Note', file.details.note, opts));
+      }
     }
+  }
   }
 
   // Page header — structured single / dual / triple layouts.
@@ -1000,9 +1493,6 @@ async function buildDocx(model: DocumentModel): Promise<DocxDocument> {
     },
   });
 }
-
-// Re-export DocumentProject for the helper above.
-import type { DocumentProject } from '@/types';
 
 // (Module-level helper builds the project structure tree.)
 type _DocProject = DocumentProject;

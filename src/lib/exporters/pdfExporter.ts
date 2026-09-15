@@ -22,6 +22,7 @@
 
 import { jsPDF } from 'jspdf';
 import type {
+  DocumentImage,
   DocumentModel,
   DocumentOptions,
   ExportOptions,
@@ -29,20 +30,26 @@ import type {
   FooterSlotType,
   HighlightedFile,
   HighlightedLine,
+  ResolvedLayoutBlock,
+  ResolvedTextProps,
 } from '@/types';
 import type { DocumentExporter } from './types';
 import { parseHex, isLightColor } from './colors';
+import { loadGlyphFonts } from './glyphFonts';
 import { getThemeColors } from '@/lib/highlight/highlighter';
 import { formatBytes } from '@/lib/fileDiscovery';
-import { splitRuns, GLYPH_FALLBACK_FONT } from './unicodeFallback';
+import { splitRuns } from './unicodeFallback';
+import {
+  IMAGE_MAX_HEIGHT_RATIO,
+  IMAGE_MAX_WIDTH_RATIO,
+  fitImageBox,
+} from '@/lib/imageAssets';
 import {
   buildStaticTokenContext,
   expandTokens,
   type TokenContext,
 } from '@/lib/tokens';
 
-// GLYPH_FALLBACK_FONT is used via the registered GLYPH_FONT_* names.
-void GLYPH_FALLBACK_FONT;
 
 /** Page dimensions in points (1pt = 1/72 inch). */
 const PAGE_DIMENSIONS_PT: Record<string, [number, number]> = {
@@ -61,34 +68,6 @@ const GLYPH_FONT_BOLD = 'DejaVuSansMono-Bold';
 
 /** Module-level cache for the font base64 payloads. */
 let glyphFontCache: { normal: string; bold: string } | null = null;
-
-async function fetchFontBase64(url: string): Promise<string> {
-  const res = await fetch(url);
-  if (!res.ok) throw new Error(`Font fetch failed: ${url}`);
-  const buf = await res.arrayBuffer();
-  let binary = '';
-  const bytes = new Uint8Array(buf);
-  const chunk = 0x8000;
-  for (let i = 0; i < bytes.length; i += chunk) {
-    binary += String.fromCharCode(...bytes.subarray(i, i + chunk));
-  }
-  return btoa(binary);
-}
-
-/** Load (and cache) the Unicode fallback fonts. Returns null when unavailable. */
-async function loadGlyphFonts(): Promise<{ normal: string; bold: string } | null> {
-  if (glyphFontCache) return glyphFontCache;
-  try {
-    const [normal, bold] = await Promise.all([
-      fetchFontBase64('/fonts/DejaVuSansMono.ttf'),
-      fetchFontBase64('/fonts/DejaVuSansMono-Bold.ttf'),
-    ]);
-    glyphFontCache = { normal, bold };
-  } catch {
-    glyphFontCache = null;
-  }
-  return glyphFontCache;
-}
 
 /**
  * Map a CSS font-family value to the closest jsPDF standard font.
@@ -221,6 +200,13 @@ async function buildPdf(model: DocumentModel): Promise<jsPDF> {
   };
 
   // Front matter
+  if (model.customLayout) {
+    // Custom layout stream (spec §35): the resolved blocks replace the
+    // standard front matter / TOC / project / file flow entirely. Headers,
+    // footers, page geometry and code styling still come from options.
+    renderCustomLayoutPdf(state, model);
+  } else {
+  // Front matter
   if (opts.includeFrontMatter) {
     renderFrontMatter(state, model);
     state.doc.addPage();
@@ -269,8 +255,23 @@ async function buildPdf(model: DocumentModel): Promise<jsPDF> {
       if (opts.showFileHeaders) {
         renderFileHeader(state, file, project.label);
       }
+      // Description BEFORE the code block (spec §6/§8).
+      if (file.details?.description?.trim()) {
+        renderLabeledBlockPdf(state, 'Description', file.details.description);
+      }
       renderCodeBlock(state, file.highlighted);
+      // Images ride between the code block and the summary (§10/§12).
+      for (const img of file.images ?? []) {
+        renderPdfImage(state, img);
+      }
+      if (file.details?.summary?.trim()) {
+        renderLabeledBlockPdf(state, 'Summary', file.details.summary);
+      }
+      if (file.details?.note?.trim()) {
+        renderLabeledBlockPdf(state, 'Note', file.details.note);
+      }
     }
+  }
   }
   snapshotPageMeta(state);
 
@@ -1170,6 +1171,482 @@ function renderCodeBlock(state: LayoutState, file: HighlightedFile) {
   }
 
   state.cursorY += options.codePadding + 4;
+}
+
+// ---------------------------------------------------------------------------
+// Embedded images + user details (spec §8/§12) and the custom layout stream
+// (§35). The layout renderers reuse the standard machinery (file headers,
+// code blocks, headings, TOC, page-advance helper) so custom documents look
+// identical to standard ones where the blocks reference real content.
+// ---------------------------------------------------------------------------
+
+/** A horizontal drawing region (default = the full content area). */
+interface PdfRegion {
+  x: number;
+  width: number;
+}
+
+function defaultRegion(state: LayoutState): PdfRegion {
+  return {
+    x: state.margin.left,
+    width: Math.max(1, state.pageW - state.margin.left - state.margin.right),
+  };
+}
+
+/** X coordinate for an alignment inside a region. */
+function regionX(region: PdfRegion, align: 'left' | 'center' | 'right'): number {
+  if (align === 'center') return region.x + region.width / 2;
+  if (align === 'right') return region.x + region.width;
+  return region.x;
+}
+
+/** jsPDF image format id for a normalized asset mime. */
+function pdfImageFormat(mime: 'image/png' | 'image/jpeg'): 'PNG' | 'JPEG' {
+  return mime === 'image/jpeg' ? 'JPEG' : 'PNG';
+}
+
+/** Aspect-fit box (pt) for an image inside the standard image area. */
+function fittedImageBoxPt(
+  state: LayoutState,
+  img: { width: number; height: number },
+  region: PdfRegion,
+): { w: number; h: number } {
+  const contentH = state.pageH - state.margin.top - state.margin.bottom;
+  const maxW = region.width * IMAGE_MAX_WIDTH_RATIO;
+  const maxH = Math.max(1, contentH * IMAGE_MAX_HEIGHT_RATIO);
+  return fitImageBox(img.width, img.height, maxW, maxH);
+}
+
+/**
+ * Draw one embedded image (REAL pixel bytes decoded from the data URL —
+ * never a browser URL) aspect-fit, centered, plus an optional italic
+ * caption. The Y cursor advances; ensureSpace guarantees the image (and its
+ * caption) never cross the bottom margin / footer area.
+ */
+function renderPdfImage(
+  state: LayoutState,
+  img: DocumentImage,
+  align: 'left' | 'center' | 'right' = 'center',
+) {
+  const { doc, options } = state;
+  const region = defaultRegion(state);
+  const { w, h } = fittedImageBoxPt(state, img, region);
+  const captionSize = Math.max(6, options.bodyFontSize - 2);
+  const captionH = img.caption?.trim() ? captionSize * 1.4 + 4 : 0;
+  ensureSpace(state, h + captionH + 8);
+  const x =
+    align === 'left'
+      ? region.x
+      : align === 'right'
+        ? region.x + region.width - w
+        : region.x + (region.width - w) / 2;
+  doc.addImage(img.dataUrl, pdfImageFormat(img.mime), x, state.cursorY, w, h);
+  state.cursorY += h + 4;
+  if (img.caption?.trim()) {
+    doc.setFont(pdfFontName(options.bodyFont), 'italic');
+    doc.setFontSize(captionSize);
+    const c = options.secondaryColor
+      ? parseHex(options.secondaryColor)
+      : { r: 88, g: 96, b: 105 };
+    doc.setTextColor(c.r, c.g, c.b);
+    doc.text(img.caption, region.x + region.width / 2, state.cursorY + captionSize * 0.9, {
+      align: 'center',
+    });
+    state.cursorY += captionSize * 1.4 + 4;
+  }
+  state.cursorY += 6;
+}
+
+/** Body paragraph (wraps to the region width) with resolved text props. */
+function renderParagraphPdf(
+  state: LayoutState,
+  text: string,
+  props: ResolvedTextProps | undefined,
+  region: PdfRegion,
+) {
+  const { doc, options } = state;
+  if (!text) return;
+  const size = Math.max(1, props?.fontSizePt ?? options.bodyFontSize);
+  const style = props?.italic ? 'italic' : props?.bold ? 'bold' : 'normal';
+  doc.setFont(pdfFontName(options.bodyFont), style);
+  doc.setFontSize(size);
+  const color = props?.color
+    ? parseHex(props.color)
+    : options.bodyColor
+      ? parseHex(options.bodyColor)
+      : { r: 31, g: 41, b: 55 };
+  doc.setTextColor(color.r, color.g, color.b);
+  const lines = doc.splitTextToSize(text, Math.max(1, region.width)) as string[];
+  const lineH = size * 1.4;
+  const align = props?.align ?? 'left';
+  for (const line of lines) {
+    ensureSpace(state, lineH);
+    doc.text(line, regionX(region, align), state.cursorY + size * 0.9, align === 'left' ? undefined : { align });
+    state.cursorY += lineH;
+  }
+  state.cursorY += 6;
+}
+
+/** Small uppercase bold letter-spaced label + body text (spec §8). */
+function renderLabeledBlockPdf(
+  state: LayoutState,
+  label: string,
+  text: string,
+  props?: ResolvedTextProps,
+  region: PdfRegion = defaultRegion(state),
+) {
+  const { doc, options } = state;
+  const labelSize = Math.max(6, options.bodyFontSize - 2);
+  ensureSpace(state, labelSize * 1.6 + 4);
+  doc.setFont(pdfFontName(options.bodyFont), 'bold');
+  doc.setFontSize(labelSize);
+  const labelColor = props?.color
+    ? parseHex(props.color)
+    : options.secondaryColor
+      ? parseHex(options.secondaryColor)
+      : { r: 88, g: 96, b: 105 };
+  doc.setTextColor(labelColor.r, labelColor.g, labelColor.b);
+  const align = props?.align ?? 'left';
+  doc.setCharSpace(0.5);
+  doc.text(label.toUpperCase(), regionX(region, align), state.cursorY + labelSize * 0.9, align === 'left' ? undefined : { align });
+  doc.setCharSpace(0);
+  state.cursorY += labelSize * 1.4 + 4;
+  renderParagraphPdf(state, text, props, region);
+}
+
+/** Heading for the custom layout stream (level 1-3 with overrides). */
+function renderLayoutHeadingPdf(
+  state: LayoutState,
+  text: string,
+  level: 1 | 2 | 3,
+  props: ResolvedTextProps,
+) {
+  const { doc, options } = state;
+  const size = Math.max(1, props.fontSizePt ?? (level === 1 ? 20 : level === 2 ? 15 : 12));
+  const bold = props.bold !== false;
+  const italic = props.italic === true;
+  const style = bold && italic ? 'bolditalic' : bold ? 'bold' : italic ? 'italic' : 'normal';
+  ensureSpace(state, size * 2);
+  if (level === 1 && state.cursorY > state.margin.top + 1) state.cursorY += 12;
+  if (level === 2) state.cursorY += 8;
+  if (level === 3) state.cursorY += 6;
+  doc.setFont(pdfFontName(options.headingFont), style);
+  doc.setFontSize(size);
+  const fallback = level === 3 ? { r: 30, g: 41, b: 59 } : { r: 15, g: 23, b: 42 };
+  const c = props.color
+    ? parseHex(props.color)
+    : options.headingColor
+      ? parseHex(options.headingColor)
+      : fallback;
+  doc.setTextColor(c.r, c.g, c.b);
+  const region = defaultRegion(state);
+  const align = props.align ?? 'left';
+  doc.text(text, regionX(region, align), state.cursorY + size * 0.8, align === 'left' ? undefined : { align });
+  state.cursorY += size * 1.6;
+}
+
+/** Find a DocumentFile by its highlighted fileId across all projects. */
+function pdfFileById(model: DocumentModel, fileId: string) {
+  for (const project of model.projects) {
+    const file = project.files.find((f) => f.highlighted.fileId === fileId);
+    if (file) return file;
+  }
+  return undefined;
+}
+
+/** Compact metadata (title-page group) for the `metadata` layout block. */
+function renderCompactMetadataPdf(state: LayoutState, model: DocumentModel) {
+  const { doc, options } = state;
+  doc.setFont(pdfFontName(options.bodyFont), 'normal');
+  doc.setFontSize(11);
+  const region = defaultRegion(state);
+  const hAlign = options.titlePageHorizontalAlignment ?? 'center';
+  const lines = buildTitlePageLines({
+    metadata: model.metadata,
+    options,
+    descriptionWidth: Math.max(region.width, 1),
+    wrapText: (text, width) => doc.splitTextToSize(text, width) as string[],
+    fallbackDate: `Generated: ${new Date(model.generatedAt).toLocaleString()}`,
+  });
+  if (lines.length === 0) return;
+  let y = state.cursorY;
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    y += i === 0 ? line.size * TITLE_ASCENT_FACTOR : line.gapBefore;
+    const pageBefore = state.page;
+    ensureSpace(state, line.size * 1.4);
+    if (state.page !== pageBefore) {
+      // The group broke across pages — continue from the fresh page top.
+      y = state.cursorY + line.size * TITLE_ASCENT_FACTOR;
+    }
+    doc.setFont(line.font, line.style);
+    doc.setFontSize(line.size);
+    doc.setTextColor(line.color[0], line.color[1], line.color[2]);
+    doc.text(line.text, regionX(region, hAlign), y, { align: hAlign });
+  }
+  state.cursorY = y + lines[lines.length - 1].size * TITLE_DESCENT_FACTOR + 10;
+}
+
+/** Render the resolved custom layout blocks (spec §35). */
+function renderCustomLayoutPdf(state: LayoutState, model: DocumentModel) {
+  renderPdfBlocks(state, model, model.customLayout?.blocks ?? [], defaultRegion(state));
+}
+
+function renderPdfBlocks(
+  state: LayoutState,
+  model: DocumentModel,
+  blocks: readonly ResolvedLayoutBlock[],
+  region: PdfRegion,
+) {
+  for (const block of blocks) {
+    renderPdfBlock(state, model, block, region);
+  }
+}
+
+function renderPdfBlock(
+  state: LayoutState,
+  model: DocumentModel,
+  block: ResolvedLayoutBlock,
+  region: PdfRegion,
+) {
+  switch (block.kind) {
+    case 'heading':
+      renderLayoutHeadingPdf(state, block.text, block.level, block);
+      break;
+    case 'paragraph':
+      renderParagraphPdf(state, block.text, block, region);
+      break;
+    case 'labeled':
+      renderLabeledBlockPdf(state, block.label, block.text, block, region);
+      break;
+    case 'fileHeader': {
+      const file = pdfFileById(model, block.fileId);
+      if (file && state.options.showFileHeaders !== false) {
+        state.currentProjectName = file.projectLabel;
+        renderFileHeader(state, file, file.projectLabel);
+      }
+      break;
+    }
+    case 'code': {
+      const file = pdfFileById(model, block.fileId);
+      if (file) {
+        state.currentFileName = file.relativePath;
+        state.currentProjectName = file.projectLabel;
+        renderCodeBlock(state, file.highlighted);
+      }
+      break;
+    }
+    case 'image': {
+      const img: DocumentImage = {
+        id: block.imageId,
+        name: block.name,
+        dataUrl: block.dataUrl,
+        mime: block.mime,
+        width: block.width,
+        height: block.height,
+        caption: block.captionVisible && block.caption ? block.caption : undefined,
+      };
+      renderPdfImage(state, img, block.align ?? 'center');
+      break;
+    }
+    case 'pageBreak':
+      snapshotPageMeta(state);
+      state.doc.addPage();
+      state.page += 1;
+      state.cursorY = state.margin.top;
+      break;
+    case 'divider': {
+      // §6 — horizontal rule: a filled bar of heightPt across the content
+      // region; page-advance when it cannot fit (footer-safe).
+      const barH = Math.max(0.75, block.heightPt);
+      const gap = 4;
+      if (state.cursorY + barH + gap > state.pageH - state.margin.bottom) {
+        snapshotPageMeta(state);
+        state.doc.addPage();
+        state.page += 1;
+        state.cursorY = state.margin.top;
+      }
+      const x = state.margin.left;
+      const w = state.pageW - state.margin.left - state.margin.right;
+      const { r, g, b } = parseHex(block.fillColor ?? '#888888');
+      state.doc.setFillColor(r, g, b);
+      state.doc.rect(x, state.cursorY, w, barH, 'F');
+      state.cursorY += barH + gap;
+      break;
+    }
+    case 'spacer':
+      state.cursorY = Math.min(state.cursorY + block.heightPt, state.pageH - state.margin.bottom);
+      break;
+    case 'panel':
+      renderPanelPdf(state, model, block, region);
+      break;
+    case 'columns':
+      renderColumnsPdf(state, model, block, region);
+      break;
+    case 'toc':
+      renderToc(state, model);
+      break;
+    case 'metadata':
+      renderCompactMetadataPdf(state, model);
+      break;
+    case 'projectHeader': {
+      const index = model.projects.findIndex((p) => p.id === block.projectId);
+      const project = model.projects[index];
+      if (project) {
+        state.currentProjectName = project.label;
+        renderHeading1(state, `${index + 1}. ${project.label}`);
+      }
+      break;
+    }
+    default:
+      // Unknown block kinds are skipped defensively (never crash an export).
+      break;
+  }
+}
+
+/**
+ * Estimate the rendered height (pt) of a text-ish child block inside a
+ * panel/column — null when the child cannot be measured for the rect
+ * (code blocks, nested containers). Unmeasurable children are rendered
+ * AFTER the rect at full width — degraded, but never dropped.
+ * Pure with respect to drawing (measurement only touches text metrics).
+ */
+function measurePdfBlockHeight(
+  state: LayoutState,
+  block: ResolvedLayoutBlock,
+  region: PdfRegion,
+): number | null {
+  const { doc, options } = state;
+  switch (block.kind) {
+    case 'paragraph': {
+      const size = Math.max(1, block.fontSizePt ?? options.bodyFontSize);
+      doc.setFont(pdfFontName(options.bodyFont), 'normal');
+      const lines = doc.splitTextToSize(block.text, Math.max(1, region.width)) as string[];
+      return lines.length * size * 1.4 + 6;
+    }
+    case 'labeled': {
+      const labelSize = Math.max(6, options.bodyFontSize - 2);
+      const size = Math.max(1, block.fontSizePt ?? options.bodyFontSize);
+      doc.setFont(pdfFontName(options.bodyFont), 'normal');
+      const lines = doc.splitTextToSize(block.text, Math.max(1, region.width)) as string[];
+      return labelSize * 1.4 + 4 + lines.length * size * 1.4 + 6;
+    }
+    case 'heading': {
+      const size = block.fontSizePt ?? (block.level === 1 ? 20 : block.level === 2 ? 15 : 12);
+      return (block.level === 1 ? 12 : block.level === 2 ? 8 : 6) + size * 1.6;
+    }
+    case 'image': {
+      const { h } = fittedImageBoxPt(state, block, region);
+      const captionSize = Math.max(6, options.bodyFontSize - 2);
+      const captionH = block.captionVisible && block.caption ? captionSize * 1.4 + 4 : 0;
+      return h + captionH + 10;
+    }
+    case 'spacer':
+      return block.heightPt;
+    case 'pageBreak':
+      return 0;
+    default:
+      return null;
+  }
+}
+
+/**
+ * PDF panel: a filled/bordered rounded rect drawn behind a stack of text-ish
+ * children (rendered inside with the configured padding). Children that
+ * cannot be measured (code containers, nested panels/columns) render after
+ * the rect at full width — content is never dropped.
+ */
+function renderPanelPdf(
+  state: LayoutState,
+  model: DocumentModel,
+  block: Extract<ResolvedLayoutBlock, { kind: 'panel' }>,
+  region: PdfRegion,
+) {
+  const { doc } = state;
+  const pad = block.paddingPt ?? 8;
+  const inner: PdfRegion = { x: region.x + pad, width: Math.max(1, region.width - pad * 2) };
+
+  // Measure the leading measurable children so the rect covers them.
+  const measured: Array<{ block: ResolvedLayoutBlock }> = [];
+  let measuredH = 0;
+  for (const child of block.children) {
+    const h = measurePdfBlockHeight(state, child, inner);
+    if (h == null) break;
+    measured.push({ block: child });
+    measuredH += h;
+  }
+  const rest = block.children.slice(measured.length);
+
+  const totalH = measuredH + pad * 2;
+  const maxPanelH = state.pageH - state.margin.top - state.margin.bottom;
+  ensureSpace(state, Math.min(totalH, maxPanelH));
+  const rectTop = state.cursorY;
+  const rectH = Math.max(2, Math.min(totalH, state.pageH - state.margin.bottom - rectTop));
+
+  if (block.fillColor || block.borderColor) {
+    const radius = Math.max(0, Math.min(block.radiusPt ?? 0, rectH / 2, region.width / 2));
+    const style = block.fillColor && block.borderColor ? 'FD' : block.fillColor ? 'F' : 'S';
+    if (block.fillColor) {
+      const { r, g, b } = parseHex(block.fillColor);
+      doc.setFillColor(r, g, b);
+    }
+    if (block.borderColor) {
+      const { r, g, b } = parseHex(block.borderColor);
+      doc.setDrawColor(r, g, b);
+      doc.setLineWidth(Math.max(0.1, block.borderWidthPt ?? 1));
+    }
+    doc.roundedRect(region.x, rectTop, region.width, rectH, radius, radius, style);
+  }
+
+  state.cursorY = rectTop + pad;
+  for (const m of measured) renderPdfBlock(state, model, m.block, inner);
+  state.cursorY = Math.max(state.cursorY, rectTop + rectH) + 8;
+  for (const child of rest) renderPdfBlock(state, model, child, region);
+}
+
+/**
+ * PDF columns: the region is split into N gutters, each rendering its own
+ * block stack with an independent page/Y cursor (columns may have different
+ * heights). The final cursor lands at the deepest position so following
+ * content never overlaps either column.
+ */
+function renderColumnsPdf(
+  state: LayoutState,
+  model: DocumentModel,
+  block: Extract<ResolvedLayoutBlock, { kind: 'columns' }>,
+  region: PdfRegion,
+) {
+  const { doc } = state;
+  const count = block.count;
+  if (count < 1 || block.columns.length === 0) return;
+  const gutterGap = 12;
+  const colWidth = Math.max(1, (region.width - gutterGap * (count - 1)) / count);
+  const cursors = block.columns.map((_, i) => ({
+    page: state.page,
+    y: state.cursorY,
+    x: region.x + i * (colWidth + gutterGap),
+  }));
+
+  block.columns.forEach((stack, i) => {
+    const gutter: PdfRegion = { x: cursors[i].x, width: colWidth };
+    for (const child of stack) {
+      // Sync the shared layout cursor with this gutter's cursor so the
+      // existing renderers (ensureSpace/page tracking) work unchanged.
+      doc.setPage(cursors[i].page);
+      state.page = cursors[i].page;
+      state.cursorY = cursors[i].y;
+      renderPdfBlock(state, model, child, gutter);
+      cursors[i].page = state.page;
+      cursors[i].y = state.cursorY;
+    }
+  });
+
+  // Final cursor = the deepest position across all gutters.
+  const endPage = Math.max(...cursors.map((c) => c.page));
+  const endY = Math.max(...cursors.filter((c) => c.page === endPage).map((c) => c.y));
+  doc.setPage(endPage);
+  state.page = endPage;
+  state.cursorY = endY;
 }
 
 function ensureSpace(state: LayoutState, needed: number) {

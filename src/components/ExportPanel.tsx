@@ -15,6 +15,18 @@ import { buildDocumentModel } from '@/lib/documentBuilder';
 import { getExporter, runExport } from '@/lib/exporters';
 import { presetToOptions } from '@/lib/presets/presetToOptions';
 import {
+  resolveCustomLayout,
+  type ResolutionInputs,
+} from '@/lib/customLayouts/resolver';
+import {
+  validateCustomLayout,
+  formatMissingRequirements,
+  unassignedFileIds,
+} from '@/lib/customLayouts/validation';
+import { SectionContentDialog } from '@/components/CustomLayout/SectionContentDialog';
+import type { TemplateFieldDefinition } from '@/lib/customLayouts/model';
+import { normalizeImageFiles, ACCEPTED_IMAGE_TYPES } from '@/lib/imageAssets';
+import {
   createHistoryEntry,
   pushHistory,
   clearHistory,
@@ -38,6 +50,8 @@ import {
   Trash,
   Package,
   Check,
+  ImagePlus,
+  Plus,
 } from '@/components/common/Icons';
 
 /** Sentinel error used to unwind the export pipeline on user cancel. */
@@ -99,21 +113,158 @@ export function ExportPanel() {
     0,
   );
 
-  /** Build a DocumentModel for a single project. */
+  /** Build a DocumentModel for a single project — including per-file user
+   * content (details/images, §6-§12) and the resolved custom layout (§32). */
   const buildProjectModel = useCallback(
     async (
       project: ProjectEntry,
       onProgress?: (done: number, total: number, currentPath?: string) => void,
     ): Promise<DocumentModel> => {
       const selectedFileIds = getSelectedFiles(project.id);
-      return buildDocumentModel(
-        [{ project, selectedFileIds }],
+      const model = await buildDocumentModel(
+        [{ project, selectedFileIds, order: state.fileOrder[project.id] }],
         presetToOptions(state.preset),
         state.metadata,
         onProgress,
+        {
+          fileDetails: state.fileDetails,
+          fileImages: state.fileImages,
+          imageAssets: state.imageAssets,
+        },
       );
+      const appliedLayout = state.customLayouts.find(
+        (t) => t.id === state.appliedLayoutId,
+      );
+      if (appliedLayout) {
+        model.customLayout = resolveForModel(appliedLayout, model.projects);
+      }
+      return model;
     },
-    [state.preset, state.metadata, getSelectedFiles],
+    [
+      state.preset,
+      state.metadata,
+      state.fileOrder,
+      state.fileDetails,
+      state.fileImages,
+      state.imageAssets,
+      state.customLayouts,
+      state.appliedLayoutId,
+      state.fileFieldValues,
+      state.projectFieldValues,
+      state.documentFieldValues,
+      getSelectedFiles,
+    ],
+  );
+
+  /** Resolve the applied layout against a built model's projects (§17). */
+  const resolveForModel = useCallback(
+    (
+      template: (typeof state.customLayouts)[number],
+      projects: DocumentModel['projects'],
+    ) => {
+      const inputs: ResolutionInputs = {
+        projects,
+        fileDetails: state.fileDetails,
+        fileFieldValues: state.fileFieldValues,
+        sectionFieldValues: state.sectionFieldValues,
+        fileOrder: state.fileOrder,
+        assignments: state.layoutAssignments,
+        imageAssets: Object.fromEntries(state.imageAssets.map((a) => [a.id, a])),
+        metadata: state.metadata,
+        fileCount: projects.reduce((acc, p) => acc + p.files.length, 0),
+      };
+      return resolveCustomLayout(template, inputs);
+    },
+    [
+      state.fileDetails,
+      state.fileFieldValues,
+      state.sectionFieldValues,
+      state.fileOrder,
+      state.layoutAssignments,
+      state.imageAssets,
+      state.metadata,
+    ],
+  );
+
+  /** §5 — required-field validation BEFORE any export work. Returns true
+   * (and shows the error toast) when the export must be blocked. Works
+   * through the actual resolved layout/data pipeline — never a hardcoded
+   * field list — and identifies the section/block/file that failed. */
+  const validateBeforeExport = useCallback(
+    (projects: ProjectEntry[]): boolean => {
+      const appliedLayout = state.customLayouts.find(
+        (t) => t.id === state.appliedLayoutId,
+      );
+      if (!appliedLayout) return false;
+      const docProjects = projects.map((p) => ({
+        id: p.id,
+        label: p.label,
+        folderName: p.folderName,
+        structurePaths: [],
+        files: p.files
+          .filter((f) => !f.excluded && getSelectedFiles(p.id).has(f.id))
+          .map((f) => ({
+            projectId: p.id,
+            projectLabel: p.label,
+            relativePath: f.relativePath,
+            language: f.language,
+            highlighted: {
+              fileId: f.id,
+              relativePath: f.relativePath,
+              language: f.language,
+              lines: [],
+            },
+            sizeBytes: f.size,
+          })),
+      }));
+      const missing = validateCustomLayout({
+        template: appliedLayout,
+        projects: docProjects,
+        fileDetails: state.fileDetails,
+        fileFieldValues: state.fileFieldValues,
+        sectionFieldValues: state.sectionFieldValues,
+        fileAssignments: state.layoutAssignments,
+      });
+      if (missing.length > 0) {
+        toast.push({
+          kind: 'error',
+          title: 'Cannot export — required fields are missing',
+          message: formatMissingRequirements(missing),
+          durationMs: 12000,
+        });
+        return true;
+      }
+      // Non-blocking: files assigned to no block are silently left out —
+      // surface a warning instead of exporting a surprise.
+      const unassigned = unassignedFileIds({
+        template: appliedLayout,
+        projects: docProjects,
+        fileDetails: state.fileDetails,
+        fileFieldValues: state.fileFieldValues,
+        sectionFieldValues: state.sectionFieldValues,
+        fileAssignments: state.layoutAssignments,
+      });
+      if (unassigned.length > 0) {
+        toast.push({
+          kind: 'warning',
+          title: `${unassigned.length} file${unassigned.length === 1 ? '' : 's'} not in this layout`,
+          message:
+            'Files assigned to no block are not part of a custom layout export — assign them in the Layout studio (File layout editor).',
+          durationMs: 8000,
+        });
+      }
+      return false;
+    },
+    [
+      state.customLayouts,
+      state.appliedLayoutId,
+      state.fileDetails,
+      state.fileFieldValues,
+      state.sectionFieldValues,
+      state.layoutAssignments,
+      getSelectedFiles,
+      toast,
+    ],
   );
 
   /** Trigger a browser download for a single blob. */
@@ -163,12 +314,17 @@ export function ExportPanel() {
       });
       return;
     }
+    // §11 — in groups mode each group has its own Generate button (the main
+    // one is disabled); keyboard Ctrl+E should not bypass that either.
+    if (state.outputMode === 'groups') return;
 
     const activeProjects = state.projects.filter(
       (p) => getSelectedFiles(p.id).size > 0,
     );
 
-    // Separate mode shows what the archive will contain before building it.
+    // §29 — validate required custom-layout fields FIRST. A missing value
+    // blocks the export: no partial document is ever generated.
+    if (validateBeforeExport(activeProjects)) return;
     if (
       !skipPreview &&
       state.outputMode === 'separate' &&
@@ -216,13 +372,26 @@ export function ExportPanel() {
         const projectInputs = activeProjects.map((project) => ({
           project,
           selectedFileIds: getSelectedFiles(project.id),
+          order: state.fileOrder[project.id],
         }));
         const model = await buildDocumentModel(
           projectInputs,
           presetToOptions(state.preset),
           state.metadata,
           watchCancel,
+          {
+            fileDetails: state.fileDetails,
+            fileImages: state.fileImages,
+            imageAssets: state.imageAssets,
+          },
         );
+        // §32 — attach the resolved custom layout to the SAME model.
+        const appliedLayout = state.customLayouts.find(
+          (t) => t.id === state.appliedLayoutId,
+        );
+        if (appliedLayout) {
+          model.customLayout = resolveForModel(appliedLayout, model.projects);
+        }
         setProgress({
           phase: `Exporting to ${state.outputFormat.toUpperCase()}`,
           done: 0,
@@ -380,7 +549,139 @@ export function ExportPanel() {
     buildProjectModel,
     watchCancel,
     resetProjectProgress,
+    state.fileOrder,
+    state.fileDetails,
+    state.fileImages,
+    state.imageAssets,
+    state.customLayouts,
+    state.appliedLayoutId,
+    state.fileFieldValues,
+    state.projectFieldValues,
+    state.documentFieldValues,
+    validateBeforeExport,
+    resolveForModel,
   ]);
+
+  /** Export exactly the projects of ONE export group as a single combined
+   * document (§11 — arbitrary project combinations; a project may belong
+   * to any number of groups). */
+  const handleExportGroup = useCallback(
+    async (groupId: string) => {
+      const group = state.exportGroups.find((g) => g.id === groupId);
+      if (!group) return;
+      const groupProjects = state.projects.filter(
+        (p) => group.projectIds.includes(p.id) && getSelectedFiles(p.id).size > 0,
+      );
+      if (groupProjects.length === 0) {
+        toast.push({
+          kind: 'warning',
+          title: 'Empty group',
+          message: `“${group.name}” has no projects with selected files.`,
+        });
+        return;
+      }
+      // §5 — validation scoped to exactly the group's projects.
+      if (validateBeforeExport(groupProjects)) return;
+
+      cancelRequested.current = false;
+      setIsExporting(true);
+      setProgress({ phase: `Building “${group.name}”`, done: 0, total: 0 });
+      const loadingToastId = toast.push({
+        kind: 'loading',
+        title: `Generating “${group.name}”…`,
+        message: `${groupProjects.length} project${groupProjects.length === 1 ? '' : 's'} → ${state.outputFormat.toUpperCase()}`,
+        durationMs: 0,
+      });
+      try {
+        const exporter = getExporter(state.outputFormat);
+        const projectInputs = groupProjects.map((project) => ({
+          project,
+          selectedFileIds: getSelectedFiles(project.id),
+          order: state.fileOrder[project.id],
+        }));
+        const model = await buildDocumentModel(
+          projectInputs,
+          presetToOptions(state.preset),
+          state.metadata,
+          watchCancel,
+          {
+            fileDetails: state.fileDetails,
+            fileImages: state.fileImages,
+            imageAssets: state.imageAssets,
+          },
+        );
+        const appliedLayout = state.customLayouts.find(
+          (t) => t.id === state.appliedLayoutId,
+        );
+        if (appliedLayout) {
+          model.customLayout = resolveForModel(appliedLayout, model.projects);
+        }
+        setProgress({
+          phase: `Exporting “${group.name}” to ${state.outputFormat.toUpperCase()}`,
+          done: 0,
+          total: 0,
+        });
+        const base = state.outputFilename || 'Codice_Output';
+        const result = await runExport(exporter, model, {
+          format: state.outputFormat,
+          filename: `${base}_${sanitizeFilename(group.name)}`,
+        });
+        downloadBlob(result.blob, result.filename);
+        setHistory((prev) =>
+          pushHistory(
+            prev,
+            createHistoryEntry({
+              blob: result.blob,
+              filename: result.filename,
+              format: state.outputFormat,
+              elapsedMs: result.elapsedMs,
+              detail: `group: ${group.name}`,
+            }),
+          ),
+        );
+        toast.dismiss(loadingToastId);
+        toast.push({
+          kind: 'success',
+          title: 'Group document generated',
+          message: `${result.filename} · ${(result.blob.size / 1024).toFixed(1)} KB`,
+        });
+      } catch (err) {
+        toast.dismiss(loadingToastId);
+        if (err instanceof ExportCancelled) {
+          toast.push({ kind: 'info', title: 'Export cancelled', message: 'No document was generated.' });
+        } else {
+          toast.push({
+            kind: 'error',
+            title: 'Export failed',
+            message: err instanceof Error ? err.message : 'Unknown error',
+            durationMs: 10000,
+          });
+        }
+      } finally {
+        setIsExporting(false);
+        setProgress(null);
+      }
+    },
+    [
+      state.exportGroups,
+      state.projects,
+      state.outputFormat,
+      state.outputFilename,
+      state.preset,
+      state.metadata,
+      state.fileOrder,
+      state.fileDetails,
+      state.fileImages,
+      state.imageAssets,
+      state.customLayouts,
+      state.appliedLayoutId,
+      getSelectedFiles,
+      toast,
+      validateBeforeExport,
+      resolveForModel,
+      watchCancel,
+    ],
+  );
 
   // Ctrl/Cmd+E dispatches 'codice:export' — run the latest export handler.
   const exportRef = useRef(handleExport);
@@ -556,10 +857,25 @@ export function ExportPanel() {
             >
               <option value="combined">Combined (single document)</option>
               <option value="separate">Separate (ZIP archive)</option>
+              <option value="groups">Export groups (arbitrary sets)</option>
             </select>
           </div>
         </div>
       </div>
+
+      {/* §11 — export groups: named, ordered project sets; each exports as
+          one document and a project may belong to any number of groups. */}
+      {showModeToggle && state.outputMode === 'groups' && (
+        <ExportGroupsUI
+          isExporting={isExporting}
+          onExportGroup={(id) => void handleExportGroup(id)}
+        />
+      )}
+
+      {/* §21 — content inputs for the applied custom layout: document-level
+          and per-project fields are filled here; per-file fields live in
+          File properties. Required fields are validated before export. */}
+      <LayoutContentFields />
 
       <div className="space-y-1.5">
         <div className="text-[11px] text-muted">
@@ -587,7 +903,16 @@ export function ExportPanel() {
           <button
             className="btn-primary w-full justify-center"
             onClick={() => void handleExport()}
-            disabled={isExporting || totalSelected === 0}
+            disabled={
+              isExporting ||
+              totalSelected === 0 ||
+              (showModeToggle && state.outputMode === 'groups')
+            }
+            title={
+              showModeToggle && state.outputMode === 'groups'
+                ? 'Pick an export group above and press its Generate button'
+                : undefined
+            }
           >
             {isExporting ? (
               <>
@@ -802,6 +1127,284 @@ export function ExportPanel() {
           )}
         </div>
       )}
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/* §8 — applied layout content: section fields filled here via the      */
+/* SectionContentDialog; block (per-file) fields live in File           */
+/* properties. Required fields are validated before export.             */
+/* ------------------------------------------------------------------ */
+
+function LayoutContentFields() {
+  const { state } = useAppState();
+  const appliedLayout = state.customLayouts.find(
+    (t) => t.id === state.appliedLayoutId,
+  );
+  const [open, setOpen] = useState(false);
+  const [contentTarget, setContentTarget] = useState<{
+    sectionId: string;
+    sectionName: string;
+    fields: TemplateFieldDefinition[];
+  } | null>(null);
+
+  if (!appliedLayout) return null;
+
+  return (
+    <div className="rounded-md border border-app bg-surface/60">
+      <button
+        type="button"
+        className="flex w-full items-center gap-1.5 px-2 py-1.5 text-xs text-secondary transition-colors hover:text-primary"
+        onClick={() => setOpen((v) => !v)}
+        aria-expanded={open}
+        aria-controls="codice-layout-fields"
+      >
+        {open ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
+        <span className="font-medium">“{appliedLayout.name}” content</span>
+        <span className="badge">{appliedLayout.sections.length} sections</span>
+      </button>
+      {open && (
+        <div id="codice-layout-fields" className="codice-fade-in space-y-2 border-t border-app p-2">
+          {appliedLayout.sections.length === 0 && (
+            <p className="text-[11px] text-muted">
+              This template has no sections.
+            </p>
+          )}
+          {appliedLayout.sections.map((section) => {
+            const values = state.sectionFieldValues[section.id] ?? {};
+            const requiredMissing = section.fields.filter(
+              (f) => f.required && !(values[f.id] ?? '').trim(),
+            );
+            return (
+              <div
+                key={section.id}
+                className="flex items-center gap-2 rounded border border-app px-2 py-1.5"
+              >
+                <span className="min-w-0 flex-1">
+                  <span className="block truncate text-xs text-primary">{section.name}</span>
+                  <span className="text-[10px] text-muted">
+                    {section.fields.length} field{section.fields.length === 1 ? '' : 's'}
+                    {section.fields.length > 0 && (
+                      <>
+                        {' · '}
+                        {requiredMissing.length > 0 ? (
+                          <span className="font-semibold text-warning">
+                            {requiredMissing.length} required missing
+                          </span>
+                        ) : (
+                          'filled'
+                        )}
+                      </>
+                    )}
+                  </span>
+                </span>
+                {section.fields.length > 0 && (
+                  <button
+                    type="button"
+                    className="codice-bulk-btn"
+                    onClick={() =>
+                      setContentTarget({
+                        sectionId: section.id,
+                        sectionName: section.name,
+                        fields: section.fields,
+                      })
+                    }
+                  >
+                    Fill content
+                  </button>
+                )}
+              </div>
+            );
+          })}
+          <p className="text-[10px] text-muted">
+            Per-file block fields live in{' '}
+            <strong className="text-secondary">File properties</strong>{' '}
+            (right-click a file in the tree).
+          </p>
+        </div>
+      )}
+      {contentTarget && (
+        <SectionContentDialog
+          sectionId={contentTarget.sectionId}
+          sectionName={contentTarget.sectionName}
+          fields={contentTarget.fields}
+          onClose={() => setContentTarget(null)}
+        />
+      )}
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/* §11 — export groups UI: named, ordered project sets                  */
+/* ------------------------------------------------------------------ */
+
+function ExportGroupsUI({
+  isExporting,
+  onExportGroup,
+}: {
+  isExporting: boolean;
+  onExportGroup: (groupId: string) => void;
+}) {
+  const { state, dispatch, getSelectedFiles } = useAppState();
+  const [creating, setCreating] = useState(false);
+  const [newName, setNewName] = useState('');
+  const [newIds, setNewIds] = useState<string[]>([]);
+
+  const activeProjects = state.projects.filter(
+    (p) => getSelectedFiles(p.id).size > 0,
+  );
+
+  const createGroup = () => {
+    if (newIds.length === 0) return;
+    dispatch({
+      type: 'ADD_EXPORT_GROUP',
+      group: {
+        id: `grp-${Math.random().toString(36).slice(2, 10)}${Date.now().toString(36).slice(-4)}`,
+        name: newName.trim() || `Group ${state.exportGroups.length + 1}`,
+        projectIds: newIds,
+      },
+    });
+    setCreating(false);
+    setNewName('');
+    setNewIds([]);
+  };
+
+  return (
+    <div className="rounded-md border border-app bg-surface/60 p-2">
+      <div className="mb-1.5 flex items-center justify-between">
+        <span className="text-[11px] font-semibold uppercase tracking-wide text-secondary">
+          Export groups
+        </span>
+        <button
+          type="button"
+          className="codice-bulk-btn"
+          onClick={() => setCreating((v) => !v)}
+          aria-expanded={creating}
+        >
+          <Plus size={10} /> New group
+        </button>
+      </div>
+
+      {creating && (
+        <div className="mb-2 space-y-1.5 rounded border border-dashed border-app p-2">
+          <input
+            type="text"
+            className="input"
+            placeholder="Group name (e.g. A + C)"
+            value={newName}
+            onChange={(e) => setNewName(e.target.value)}
+            aria-label="Group name"
+          />
+          <div className="flex flex-wrap gap-1">
+            {activeProjects.map((p) => {
+              const idx = newIds.indexOf(p.id);
+              const on = idx !== -1;
+              return (
+                <button
+                  key={p.id}
+                  type="button"
+                  className={`codice-input-chip ${on ? '!border-[var(--color-accent)] !text-primary' : ''}`}
+                  title={on ? `Remove ${p.label} from the group` : `Add ${p.label} to the group (order = click order)`}
+                  aria-pressed={on}
+                  onClick={() =>
+                    setNewIds((ids) =>
+                      on ? ids.filter((x) => x !== p.id) : [...ids, p.id],
+                    )
+                  }
+                >
+                  {p.label}
+                </button>
+              );
+            })}
+          </div>
+          <div className="flex items-center gap-1.5">
+            <button
+              type="button"
+              className="btn-primary !px-2 !py-1 text-[11px]"
+              onClick={createGroup}
+              disabled={newIds.length === 0}
+            >
+              Create group ({newIds.length})
+            </button>
+            <span className="text-[10px] text-muted">
+              click projects in the order they should appear in the document
+            </span>
+          </div>
+        </div>
+      )}
+
+      {state.exportGroups.length === 0 && !creating && (
+        <p className="px-1 py-2 text-center text-[11px] text-muted">
+          No groups yet — create one (e.g. “A + C”) and generate exactly that
+          combination. A project may belong to any number of groups.
+        </p>
+      )}
+
+      <ul className="space-y-1.5">
+        {state.exportGroups.map((group) => (
+          <li key={group.id} className="rounded border border-app px-2 py-1.5">
+            <div className="flex items-center gap-1.5">
+              <span className="min-w-0 flex-1 truncate text-xs font-medium text-primary">
+                {group.name}
+              </span>
+              <button
+                type="button"
+                className="btn-primary !px-2 !py-1 text-[11px]"
+                onClick={() => onExportGroup(group.id)}
+                disabled={isExporting}
+                title={`Generate one document with exactly: ${group.projectIds
+                  .map((id) => state.projects.find((p) => p.id === id)?.label ?? '?')
+                  .join(' + ')}`}
+              >
+                Generate
+              </button>
+              <button
+                type="button"
+                className="rounded p-0.5 text-muted hover:text-error"
+                title={`Delete group ${group.name}`}
+                aria-label={`Delete group ${group.name}`}
+                onClick={() => dispatch({ type: 'DELETE_EXPORT_GROUP', id: group.id })}
+              >
+                <Trash size={11} />
+              </button>
+            </div>
+            <div className="mt-1 flex flex-wrap gap-1">
+              {group.projectIds.map((pid, i) => {
+                const project = state.projects.find((p) => p.id === pid);
+                if (!project) return null;
+                return (
+                  <span
+                    key={pid}
+                    className="flex items-center gap-1 rounded border border-app px-1.5 py-0.5 text-[10px] text-secondary"
+                  >
+                    <span className="text-muted tabular-nums">{i + 1}</span>
+                    {project.label}
+                    <button
+                      type="button"
+                      className="text-muted hover:text-error"
+                      title={`Remove ${project.label} from group`}
+                      aria-label={`Remove ${project.label} from group`}
+                      onClick={() =>
+                        dispatch({
+                          type: 'UPDATE_EXPORT_GROUP',
+                          group: {
+                            ...group,
+                            projectIds: group.projectIds.filter((x) => x !== pid),
+                          },
+                        })
+                      }
+                    >
+                      <X size={9} />
+                    </button>
+                  </span>
+                );
+              })}
+            </div>
+          </li>
+        ))}
+      </ul>
     </div>
   );
 }

@@ -28,7 +28,7 @@ import { highlightFile, getThemeColors, plainHighlightedFile } from '@/lib/highl
 import { resolveSyntaxTheme } from '@/lib/themes/syntaxThemeRegistry';
 import { fontStack } from '@/lib/fonts/fontCatalog';
 import type { DocumentPreset, FooterSlotType } from '@/lib/presets/documentPreset';
-import type { DocumentMetadata, HighlightedFile } from '@/types';
+import type { DocumentImage, DocumentMetadata, FileDetails, HighlightedFile, ImageAsset } from '@/types';
 import { formatBytes } from '@/lib/fileDiscovery';
 import { languageLabel } from '@/lib/languageDetection';
 import { PreviewWelcome, PreviewNoSelection } from '@/components/Preview/PreviewEmptyStates';
@@ -38,6 +38,14 @@ import { OutlinePanel } from '@/components/Preview/OutlinePanel';
 import { StatsPanel } from '@/components/common/StatsPanel';
 import { ToolbarButton, stepZoomLadder } from '@/components/common/PreviewControls';
 import { ListTree, BarChart, ChevronLeft, ChevronRight, Minus, Plus } from '@/components/common/Icons';
+import { effectiveFileOrder } from '@/lib/documentOrder';
+import {
+  customLayoutToElements,
+  buildLayoutOutline,
+  buildLayoutIndexMaps,
+} from '@/lib/customLayouts/previewElements';
+import { resolveCustomLayout, type ResolutionInputs } from '@/lib/customLayouts/resolver';
+import type { DocumentProject } from '@/types';
 import {
   buildDocumentElements,
   paginateDocument,
@@ -99,7 +107,8 @@ export function DocumentPreview() {
     };
   }, [resolvedTheme]);
 
-  // Gather all selected files across projects.
+  // Gather all selected files across projects — in the CANONICAL document
+  // order (§13/§36) with per-file details + images attached (§6/§10).
   const allSelected = useMemo(() => {
     const result: Array<{
       projectLabel: string;
@@ -108,11 +117,28 @@ export function DocumentPreview() {
       language: string | null;
       sizeBytes: number;
       fileId: string;
+      details?: FileDetails;
+      images?: DocumentImage[];
     }> = [];
     for (const project of state.projects) {
       const selected = getSelectedFiles(project.id);
-      for (const file of project.files) {
+      const ordered = effectiveFileOrder(project.files, state.fileOrder[project.id]);
+      for (const file of ordered) {
         if (selected.has(file.id)) {
+          const details = state.fileDetails[file.id];
+          const imageIds = state.fileImages[file.id] ?? [];
+          const images = imageIds
+            .map((id) => state.imageAssets.find((a) => a.id === id))
+            .filter((a): a is ImageAsset => Boolean(a))
+            .map((a) => ({
+              id: a.id,
+              name: a.name,
+              dataUrl: a.dataUrl,
+              mime: a.mime,
+              width: a.width,
+              height: a.height,
+              caption: a.caption,
+            }));
           result.push({
             projectLabel: project.label,
             projectId: project.id,
@@ -120,12 +146,21 @@ export function DocumentPreview() {
             language: file.language,
             sizeBytes: file.size,
             fileId: file.id,
+            ...(details ? { details } : {}),
+            ...(images.length > 0 ? { images } : {}),
           });
         }
       }
     }
     return result;
-  }, [state.projects, getSelectedFiles]);
+  }, [
+    state.projects,
+    state.fileOrder,
+    state.fileDetails,
+    state.fileImages,
+    state.imageAssets,
+    getSelectedFiles,
+  ]);
 
   const filesToPreview = allSelected.slice(0, PREVIEW_LIMIT);
 
@@ -236,7 +271,9 @@ export function DocumentPreview() {
   useEffect(() => {
     const onToggle = () => setOutlineOpen((v) => !v);
     window.addEventListener('codice:toggle-outline', onToggle);
-    return () => window.removeEventListener('codice:toggle-outline', onToggle);
+    return () => {
+      window.removeEventListener('codice:toggle-outline', onToggle);
+    };
   }, []);
 
   // Measure the container width so the page can be scaled to fit.
@@ -283,6 +320,8 @@ export function DocumentPreview() {
         language: item.language ?? 'plaintext',
         size: item.sizeBytes,
         outlineFileId: item.fileId,
+        ...(item.details ? { details: item.details } : {}),
+        ...(item.images ? { images: item.images } : {}),
       });
     }
     return groups;
@@ -314,9 +353,107 @@ export function DocumentPreview() {
     [highlightedCache, resolvedTheme],
   );
 
+  // §15 — the file context menu's "Open in preview" jumps straight to the
+  // file using its STABLE identity (fileId + owning project), never the
+  // filename. In separate-per-project mode the correct project tab is
+  // activated first, then the anchor is scrolled into view.
+  useEffect(() => {
+    const onNavigateToFile = (e: Event) => {
+      const detail = (e as CustomEvent<{ fileId: string; projectId?: string }>).detail;
+      const fileId = typeof detail === 'string' ? detail : detail?.fileId;
+      const projectId = typeof detail === 'string' ? undefined : detail?.projectId;
+      if (typeof fileId !== 'string') return;
+      const anchorId = `outline-file-${fileId}`;
+      const group = paginationProjects.find((g) =>
+        g.files.some((f) => f.outlineFileId === fileId),
+      );
+      if (group && projectTabId(group) !== validTabId) {
+        setActiveTabId(projectTabId(group));
+        // Allow the tab switch to render, then scroll to the anchor.
+        window.setTimeout(() => navigateToOutline(anchorId), 150);
+        return;
+      }
+      navigateToOutline(anchorId);
+    };
+    window.addEventListener('codice:navigate-to-file', onNavigateToFile);
+    return () => {
+      window.removeEventListener('codice:navigate-to-file', onNavigateToFile);
+    };
+  }, [navigateToOutline, paginationProjects, validTabId]);
+
+  // ---- Applied custom layout (§16-§33) — ONE canonical data flow:
+  // state data → resolver → resolved blocks → THIS preview AND the
+  // exporters. The preview never invents its own template representation.
+  const appliedLayout = useMemo(
+    () =>
+      state.customLayouts.find((t) => t.id === state.appliedLayoutId) ?? null,
+    [state.customLayouts, state.appliedLayoutId],
+  );
+
+  // DocumentProject-shaped projection of the visible pagination groups
+  // (the resolver consumes the document model, not preview internals).
+  const layoutProjects = useMemo<DocumentProject[]>(
+    () =>
+      visiblePaginationProjects.map((g) => ({
+        id: g.outlineProjectId ?? g.label,
+        label: g.label,
+        folderName: g.label,
+        structurePaths: [],
+        files: g.files.map((f) => ({
+          projectId: g.outlineProjectId ?? g.label,
+          projectLabel: g.label,
+          relativePath: f.path,
+          language: null,
+          highlighted: {
+            fileId: f.outlineFileId ?? f.path,
+            relativePath: f.path,
+            language: null,
+            lines: [],
+          },
+          sizeBytes: f.size,
+          details: f.details,
+          images: f.images,
+        })),
+      })),
+    [visiblePaginationProjects],
+  );
+
+  const layoutResolution = useMemo(() => {
+    if (!appliedLayout) return null;
+    const inputs: ResolutionInputs = {
+      projects: layoutProjects,
+      fileDetails: state.fileDetails,
+      fileFieldValues: state.fileFieldValues,
+      sectionFieldValues: state.sectionFieldValues,
+      fileOrder: state.fileOrder,
+      assignments: state.layoutAssignments,
+      imageAssets: Object.fromEntries(state.imageAssets.map((a) => [a.id, a])),
+      metadata: state.metadata,
+      fileCount: layoutProjects.reduce((acc, p) => acc + p.files.length, 0),
+    };
+    return resolveCustomLayout(appliedLayout, inputs);
+  }, [
+    appliedLayout,
+    layoutProjects,
+    state.fileDetails,
+    state.fileFieldValues,
+    state.sectionFieldValues,
+    state.fileOrder,
+    state.layoutAssignments,
+    state.imageAssets,
+    state.metadata,
+  ]);
+
   const elements = useMemo(
-    () => buildDocumentElements(preset, visiblePaginationProjects),
-    [preset, visiblePaginationProjects],
+    () =>
+      layoutResolution
+        ? customLayoutToElements(
+            layoutResolution,
+            visiblePaginationProjects,
+            buildLayoutIndexMaps(visiblePaginationProjects),
+          )
+        : buildDocumentElements(preset, visiblePaginationProjects),
+    [layoutResolution, preset, visiblePaginationProjects],
   );
 
   const pages = useMemo(
@@ -343,23 +480,27 @@ export function DocumentPreview() {
 
   const outline: OutlineEntry[] = useMemo(
     () =>
-      buildDocumentOutline({
-        projects: visiblePaginationProjects.map((g) => ({
-          id: g.outlineProjectId ?? g.label,
-          label: g.label,
-          files: g.files.map((f) => ({
-            fileId: f.outlineFileId ?? f.path,
-            relativePath: f.path,
-            language: f.language,
-            sizeBytes: f.size,
-          })),
-        })),
-        includeTitlePage: preset.titlePage.enabled,
-        hasTitle: Boolean(state.metadata.title),
-        includeToc: preset.misc.includeToc,
-        includeStructure: preset.projectStructure.enabled,
-      }),
+      layoutResolution
+        ? // §33 — the applied layout mirrors into the SAME outline model.
+          buildLayoutOutline(layoutResolution, visiblePaginationProjects)
+        : buildDocumentOutline({
+            projects: visiblePaginationProjects.map((g) => ({
+              id: g.outlineProjectId ?? g.label,
+              label: g.label,
+              files: g.files.map((f) => ({
+                fileId: f.outlineFileId ?? f.path,
+                relativePath: f.path,
+                language: f.language,
+                sizeBytes: f.size,
+              })),
+            })),
+            includeTitlePage: preset.titlePage.enabled,
+            hasTitle: Boolean(state.metadata.title),
+            includeToc: preset.misc.includeToc,
+            includeStructure: preset.projectStructure.enabled,
+          }),
     [
+      layoutResolution,
       visiblePaginationProjects,
       preset.titlePage.enabled,
       preset.misc.includeToc,
@@ -596,13 +737,81 @@ export function DocumentPreview() {
         );
       case 'fileHeader':
         return renderFileHeader(el, key);
+      case 'fileDetail':
+        return renderFileDetail(el, key);
+      case 'image':
+        return renderImage(el, key);
       case 'code':
         return renderCodeChunk(el, key);
       case 'spacer':
         return <div key={key} style={{ height: el.height }} />;
+      case 'divider':
+        return (
+          <div
+            key={key}
+            data-codice-region="divider"
+            style={{
+              height: Math.max(1, el.heightPx),
+              background: el.fillColor ?? preset.colors.mutedText,
+              borderRadius: Math.min(2, Math.max(1, el.heightPx / 2)),
+              margin: `${preset.typography.paragraphSpacingPt}px 0`,
+            }}
+          />
+        );
+      case 'panel':
+        return renderPanel(el, key);
+      case 'columns':
+        return renderColumns(el, key);
       default:
         return null;
     }
+  }
+
+  /** §6 — visual container: fill/border/radius/padding around child blocks. */
+  function renderPanel(el: Extract<PreviewElement, { type: 'panel' }>, key: string) {
+    const hasChildren = el.children.length > 0;
+    return (
+      <div
+        key={key}
+        data-codice-region="panel"
+        style={{
+          background: el.fillColor ?? undefined,
+          border:
+            el.borderWidthPt && el.borderColor
+              ? `${el.borderWidthPt}px solid ${el.borderColor}`
+              : undefined,
+          borderRadius: el.radiusPt ? el.radiusPt * PT_TO_PX : undefined,
+          padding: el.paddingPt ? el.paddingPt * PT_TO_PX : undefined,
+          height:
+            !hasChildren && el.heightPt ? Math.max(1, el.heightPt * PT_TO_PX) : undefined,
+          margin: `${preset.typography.paragraphSpacingPt}px 0`,
+        }}
+      >
+        {el.children.map((child, i) => renderElement(child, `${key}-${i}`))}
+      </div>
+    );
+  }
+
+  /** §6 — side-by-side regions; each column stacks its own children. */
+  function renderColumns(el: Extract<PreviewElement, { type: 'columns' }>, key: string) {
+    return (
+      <div
+        key={key}
+        data-codice-region="columns"
+        style={{
+          display: 'flex',
+          gap: 12,
+          alignItems: 'flex-start',
+          margin: `${preset.typography.paragraphSpacingPt}px 0`,
+        }}
+      >
+        {el.columns.map((col, i) => (
+          <div key={i} style={{ flex: 1, minWidth: 0 }}>
+            {col.map((child, j) => renderElement(child, `${key}-${i}-${j}`))}
+          </div>
+        ))}
+      </div>
+    );
   }
 
   /** Title page — ONE coherent group (§9): group-wide horizontal alignment. */
@@ -930,6 +1139,7 @@ export function DocumentPreview() {
       <div
         key={key}
         data-codice-region="file-header"
+        data-outline-id={el.outlineId}
         style={{
           fontFamily: fontStack(fh.font),
           fontSize: fh.fontSizePt * PT_TO_PX,
@@ -957,6 +1167,91 @@ export function DocumentPreview() {
     );
   }
 
+  /** §6 — a labeled per-file detail (Description / Summary / Note). */
+  function renderFileDetail(
+    el: Extract<PreviewElement, { type: 'fileDetail' }>,
+    key: string,
+  ) {
+    return (
+      <div
+        key={key}
+        data-codice-region="file-detail"
+        style={{ marginBottom: preset.typography.paragraphSpacingPt }}
+      >
+        <div
+          style={{
+            fontSize: Math.max(9, preset.typography.bodyFontSizePt * PT_TO_PX - 2),
+            fontWeight: 600,
+            letterSpacing: 0.4,
+            textTransform: 'uppercase',
+            color: preset.colors.mutedText,
+            marginBottom: 3,
+          }}
+        >
+          {el.label}
+        </div>
+        <p
+          style={{
+            color: preset.colors.primaryText,
+            fontSize: preset.typography.bodyFontSizePt * PT_TO_PX,
+            fontWeight: WEIGHTS[preset.typography.bodyWeight],
+            lineHeight: preset.typography.lineSpacing,
+            margin: 0,
+            fontFamily: fontStack(preset.typography.bodyFont),
+            whiteSpace: 'pre-wrap',
+          }}
+        >
+          {el.text}
+        </p>
+      </div>
+    );
+  }
+
+  /** §10/§12 — an attached image, aspect-fit inside the content column. */
+  function renderImage(
+    el: Extract<PreviewElement, { type: 'image' }>,
+    key: string,
+  ) {
+    const g = el.projectIdx !== undefined ? visiblePaginationProjects[el.projectIdx] : undefined;
+    const file = el.fileIdx !== undefined ? g?.files[el.fileIdx] : undefined;
+    const img = el.image ?? file?.images?.[el.imageIdx ?? 0];
+    if (!img) return null;
+    return (
+      <figure
+        key={key}
+        data-codice-region="image"
+        style={{
+          margin: `${preset.typography.paragraphSpacingPt}pt 0`,
+          textAlign: 'center',
+        }}
+      >
+        <img
+          src={img.dataUrl}
+          alt={img.caption || img.name}
+          style={{
+            maxWidth: '62%',
+            maxHeight: 420,
+            height: 'auto',
+            border: `0.5px solid ${preset.colors.borders}`,
+            borderRadius: 2,
+          }}
+        />
+        {img.caption && (
+          <figcaption
+            style={{
+              fontSize: Math.max(9, preset.typography.bodyFontSizePt * PT_TO_PX - 3),
+              color: preset.colors.secondaryText,
+              marginTop: 4,
+              fontStyle: 'italic',
+            }}
+          >
+            {img.caption}
+          </figcaption>
+        )}
+      </figure>
+    );
+  }
+
   /** One page-chunk of a code block (fromLine..toLine, startLineNumber). */
   function renderCodeChunk(el: Extract<PreviewElement, { type: 'code' }>, key: string) {
     const g = visiblePaginationProjects[el.projectIdx];
@@ -975,6 +1270,7 @@ export function DocumentPreview() {
       <div
         key={key}
         data-codice-region="code"
+        data-outline-id={el.outlineId}
         style={{
           background: effectiveBg,
           fontFamily: glyphCapableStack(fontStack(c.font)),
@@ -1045,7 +1341,7 @@ export function DocumentPreview() {
   /* ---------------- Page rendering ---------------- */
 
   return (
-    <div className="relative flex min-h-0 flex-1 flex-col">
+    <div className="flex min-h-0 flex-1 flex-col">
       {separateMode && (
         <div
           className="codice-print-hidden flex flex-shrink-0 items-center gap-1 overflow-x-auto border-b border-app bg-surface px-2 py-1.5"
@@ -1113,6 +1409,14 @@ export function DocumentPreview() {
           {effectiveW}×{effectiveH}px · {preset.page.landscape ? 'landscape' : 'portrait'}
         </span>
       </div>
+      {/* §3 — right-side control anchor region. Everything that floats on
+          the right (pills, Outline panel, Statistics) is anchored to THIS
+          wrapper, which by construction starts BELOW the project tabs and
+          the zoom toolbar. The pills therefore can never overlap or slide
+          under the toolbar, no matter whether tabs are visible, how wide
+          the preview is, which zoom level is active, or how many projects
+          exist — a layout-system fix, not a magic offset. */}
+      <div className="relative flex min-h-0 flex-1 flex-col">
       <div
         ref={containerRef}
         className="codice-print-area min-h-0 flex-1 overflow-auto bg-app p-6"
@@ -1225,11 +1529,14 @@ export function DocumentPreview() {
       </div>
 
       {/* Floating outline + statistics pills (hidden from print output).
-          Anchored to THIS pane (the root is relative) — top-12 keeps them
-          below the zoom toolbar so they never collide with the app header
-          or cover the toolbar labels (§1). */}
-      <div className="absolute right-4 top-12 z-10 flex flex-col items-end gap-1 codice-print-hidden">
-        {!outlineOpen && outline.length > 0 && (
+          Anchored INSIDE the §3 control region (which starts below the
+          tabs + toolbar rows) — top-3 keeps them just under the toolbar
+          edge without ever covering it. §13 — the Outline pill is visible
+          whenever the preview has content pages; it must never disappear
+          just because the current outline has no entries (e.g. layouts
+          that render code-only blocks). */}
+      <div className="absolute right-4 top-3 z-10 flex flex-col items-end gap-1 codice-print-hidden">
+        {!outlineOpen && pages.length > 0 && (
           <button
             type="button"
             className="codice-outline-toggle"
@@ -1290,6 +1597,7 @@ export function DocumentPreview() {
           </div>
         </div>
       )}
+      </div>
     </div>
   );
 }

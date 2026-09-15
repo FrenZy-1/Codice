@@ -6,7 +6,9 @@
 import { useAppState } from '@/hooks/useAppState';
 import { ProjectUpload } from '@/components/ProjectUpload';
 import { FileTree } from '@/components/FileTree/FileTree';
+import { DocumentOrderPanel } from '@/components/FileProperties/DocumentOrderPanel';
 import { SelectionRulesPanel } from '@/components/common/SelectionRulesPanel';
+import { MergeProjectsDialog } from '@/components/Merge/MergeProjectsDialog';
 import { formatBytes } from '@/lib/fileDiscovery';
 import { dominantLanguage, languageHueColor } from '@/lib/documentStats';
 import {
@@ -28,6 +30,8 @@ import {
   CheckSquare,
   Square,
   FlipHorizontal2,
+  Merge,
+  Split,
 } from '@/components/common/Icons';
 import type { ProjectEntry } from '@/types';
 
@@ -44,6 +48,8 @@ export function ProjectsSidebar({ selectedProjectId, onSelectProject }: Props) {
   const [expandedProjects, setExpandedProjects] = useState<Set<string>>(
     new Set(),
   );
+  // §11 — project merge flow (explicit, undoable via Unmerge).
+  const [mergeTargetId, setMergeTargetId] = useState<string | null>(null);
 
   // ---- Drag-to-reorder (projects order = document section order) ----
   const dragIndex = useRef<number | null>(null);
@@ -253,6 +259,9 @@ export function ProjectsSidebar({ selectedProjectId, onSelectProject }: Props) {
                       onSelectProject('');
                     }
                   }}
+                  onMerge={() => setMergeTargetId(project.id)}
+                  isMerged={Boolean(state.mergeSources[project.id])}
+                  onUnmerge={() => dispatch({ type: 'UNMERGE_PROJECTS', mergedId: project.id })}
                   selectedCount={getSelectedFiles(project.id).size}
                   selectedIds={getSelectedFiles(project.id)}
                 />
@@ -266,6 +275,17 @@ export function ProjectsSidebar({ selectedProjectId, onSelectProject }: Props) {
           </div>
         )}
       </div>
+
+      {/* §13 — canonical document order editor (shared with the Outline). */}
+      <DocumentOrderPanel />
+
+      {/* §11 — explicit, undoable project merge. */}
+      {mergeTargetId && (
+        <MergeProjectsDialog
+          projectId={mergeTargetId}
+          onClose={() => setMergeTargetId(null)}
+        />
+      )}
 
       {/* Stats moved to the preview pane's Statistics pill (spec §16). */}
 
@@ -454,6 +474,9 @@ function ProjectRow({
   isSelected,
   onSelect,
   onRemove,
+  onMerge,
+  isMerged,
+  onUnmerge,
   selectedCount,
   selectedIds,
 }: {
@@ -472,6 +495,11 @@ function ProjectRow({
   isSelected: boolean;
   onSelect: () => void;
   onRemove: () => void;
+  /** §11 — open the merge dialog with this project as the source. */
+  onMerge: () => void;
+  /** §11 — this project is the result of a merge (undoable). */
+  isMerged: boolean;
+  onUnmerge: () => void;
   selectedCount: number;
   selectedIds: Set<string>;
 }) {
@@ -633,6 +661,31 @@ function ProjectRow({
         >
           {formatBytes(selectedSize)}
         </span>
+        {isMerged ? (
+          <button
+            onClick={(e) => {
+              e.stopPropagation();
+              onUnmerge();
+            }}
+            className="text-secondary hover:text-primary"
+            title={`Unmerge ${project.label} — restore the original projects`}
+            aria-label={`Unmerge ${project.label}`}
+          >
+            <Split size={14} />
+          </button>
+        ) : (
+          <button
+            onClick={(e) => {
+              e.stopPropagation();
+              onMerge();
+            }}
+            className="text-secondary hover:text-primary"
+            title={`Merge other projects into ${project.label}`}
+            aria-label={`Merge projects into ${project.label}`}
+          >
+            <Merge size={14} />
+          </button>
+        )}
         <button
           onClick={(e) => {
             e.stopPropagation();
