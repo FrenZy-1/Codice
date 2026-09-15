@@ -116,6 +116,8 @@ export type PreviewElement =
       paddingPt?: number;
       /** Explicit box height (pt) for EMPTY panels — filled boxes/dividers. */
       heightPt?: number;
+      /** §25 — default text color for the panel's content. */
+      textColor?: string;
       children: PreviewElement[];
     }
   | {

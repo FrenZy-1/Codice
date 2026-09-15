@@ -43,12 +43,19 @@ import {
 } from '@/components/common/Icons';
 import {
   SECTION_TYPE_PRESETS,
+  appendSectionPreset,
+  duplicateSection,
   cloneTemplate,
   createBlockDef,
   createEmptyTemplate,
   createExampleTemplate,
   createSection,
+  assignedFileIds,
+  duplicateBlockDef,
   genLayoutId,
+  normalizeTemplate,
+  sanitizeSectionType,
+  sectionTypePreset,
   type CustomLayoutTemplate,
   type SectionChild,
   type SectionTypeId,
@@ -87,6 +94,18 @@ import {
   markLayoutTourDone,
 } from '@/components/CustomLayout/LayoutOnboarding';
 import { SectionContentDialog } from '@/components/CustomLayout/SectionContentDialog';
+import {
+  SectionContentList,
+  SectionFieldsPanel,
+  SectionTypeSeeder,
+  ContentAddControls,
+  makeStandaloneChild,
+  makeFieldChild,
+  moveChild,
+  removeChild,
+  stripFieldBindings,
+} from '@/components/CustomLayout/SectionContentEditor';
+import { sectionFieldsInContentOrder } from '@/lib/customLayouts/model';
 
 type StudioView =
   | { view: 'file' }
@@ -109,11 +128,13 @@ function StudioInner({ onClose }: { onClose: () => void }) {
   const toast = useToast();
 
   // ---- Draft state (remount-fresh, like the other dialogs) ----
+  // normalizeTemplate guarantees the v2.1 invariants on every open: a
+  // file-level children array (§7), content-synced section fields (§5/§6)
+  // and stable node ids (§26).
   const [draft, setDraft] = useState<CustomLayoutTemplate | null>(() => {
     const applied = state.customLayouts.find((t) => t.id === state.appliedLayoutId);
-    if (applied) return cloneTemplate(applied);
-    if (state.customLayouts.length > 0) return cloneTemplate(state.customLayouts[0]);
-    return null;
+    const base = applied ?? state.customLayouts[0] ?? null;
+    return base ? normalizeTemplate(cloneTemplate(base)) : null;
   });
   const [nav, setNav] = useState<StudioView>({ view: 'file' });
   const [collapsed, toggleCollapse] = useCollapseState();
@@ -155,14 +176,14 @@ function StudioInner({ onClose }: { onClose: () => void }) {
   // ---- Template CRUD (persisted via storage.ts; state synced once) ----
   const handleNew = () => {
     const t = createEmptyTemplate(`Layout ${state.customLayouts.length + 1}`);
-    setDraft(t);
+    setDraft(normalizeTemplate(t));
     setNav({ view: 'file' });
     toast.push({ kind: 'info', title: 'Template created', message: `${t.name} — add sections and assign files.` });
   };
 
   const handleExample = () => {
     const t = createExampleTemplate();
-    setDraft(t);
+    setDraft(normalizeTemplate(t));
     setNav({ view: 'file' });
     toast.push({
       kind: 'info',
@@ -481,7 +502,7 @@ function StudioInner({ onClose }: { onClose: () => void }) {
                       className="min-w-0 flex-1 truncate text-left text-primary"
                       title={`${t.name} — open for editing`}
                       onClick={() => {
-                        setDraft(cloneTemplate(t));
+                        setDraft(normalizeTemplate(cloneTemplate(t)));
                         setNav({ view: 'file' });
                       }}
                     >
@@ -590,7 +611,11 @@ function StudioInner({ onClose }: { onClose: () => void }) {
                 setDraft={setDraft}
                 onEditSection={(sectionId) => setNav({ view: 'section', sectionId })}
                 onFillContent={(s) =>
-                  setContentDialog({ sectionId: s.id, sectionName: s.name, fields: s.fields })
+                  setContentDialog({
+                    sectionId: s.id,
+                    sectionName: s.name,
+                    fields: sectionFieldsInContentOrder(s),
+                  })
                 }
                 orderedFiles={orderedFiles}
                 validationUnassigned={validationIssues.unassigned}
@@ -605,7 +630,7 @@ function StudioInner({ onClose }: { onClose: () => void }) {
                   setContentDialog({
                     sectionId: activeSection.id,
                     sectionName: activeSection.name,
-                    fields: activeSection.fields,
+                    fields: sectionFieldsInContentOrder(activeSection),
                   })
                 }
                 onEditBlock={(blockId) =>
@@ -723,6 +748,7 @@ function FileLayoutEditor({
   validationUnassigned: string[];
 }) {
   const { state, dispatch } = useAppState();
+  const toast = useToast();
   const [newType, setNewType] = useState<SectionTypeId>('task');
 
   const assignedIds = useMemo(() => {
@@ -802,9 +828,10 @@ function FileLayoutEditor({
                     {i + 1}. {section.name}
                   </span>
                   <span className="text-[10px] text-muted">
-                    {SECTION_TYPE_PRESETS[section.type].label} · {filesInSection(section)} file
-                    {filesInSection(section) === 1 ? '' : 's'} · {section.fields.length} field
-                    {section.fields.length === 1 ? '' : 's'}
+                    {sectionTypePreset(section.type).label} · {filesInSection(section)} file
+                    {filesInSection(section) === 1 ? '' : 's'} ·{' '}
+                    {sectionFieldsInContentOrder(section).length} field
+                    {sectionFieldsInContentOrder(section).length === 1 ? '' : 's'}
                   </span>
                 </span>
                 <label className="flex items-center gap-1 text-[10px] text-secondary" title="Start this section on a fresh page">
@@ -831,6 +858,18 @@ function FileLayoutEditor({
                   Edit section
                 </button>
                 <span className="flex items-center gap-0.5">
+                  <button type="button" className="rounded p-0.5 text-muted hover:text-primary" title={`Duplicate ${section.name}`} aria-label={`Duplicate ${section.name}`} onClick={() => {
+                    const next = cloneTemplate(draft);
+                    const src = next.sections.find((x) => x.id === section.id);
+                    if (src) {
+                      const idx = next.sections.indexOf(src);
+                      next.sections.splice(idx + 1, 0, duplicateSection(src));
+                    }
+                    next.updatedAt = Date.now();
+                    setDraft(next);
+                  }}>
+                    <Copy size={11} />
+                  </button>
                   <button type="button" className="rounded p-0.5 text-muted hover:text-primary" title="Move section earlier" aria-label={`Move ${section.name} earlier`} onClick={() => moveSection(section.id, -1)}>
                     <ChevronUp size={11} />
                   </button>
@@ -864,7 +903,7 @@ function FileLayoutEditor({
         <select
           className="select w-56"
           value={newType}
-          onChange={(e) => setNewType(e.target.value as SectionTypeId)}
+          onChange={(e) => setNewType(sanitizeSectionType(e.target.value))}
           aria-label="New section type"
         >
           {Object.values(SECTION_TYPE_PRESETS).map((p) => (
@@ -874,20 +913,72 @@ function FileLayoutEditor({
           ))}
         </select>
         <span className="min-w-0 flex-1 truncate text-[11px] text-muted">
-          {SECTION_TYPE_PRESETS[newType].description}
+          {/* Unknown/legacy type strings must degrade, never crash the studio
+              (§26 — identity and enums are data; guard the render). */}
+          {sectionTypePreset(newType).description}
         </span>
         <button
           type="button"
           className="btn-secondary"
           onClick={() => {
             const next = cloneTemplate(draft);
-            next.sections.push(createSection(newType));
+            // Unknown/legacy type falls back to an empty custom section.
+            next.sections.push(createSection(sanitizeSectionType(newType)));
             next.updatedAt = Date.now();
             setDraft(next);
           }}
         >
           Add section
         </button>
+      </div>
+
+      {/* FILE-LEVEL standalone content (§7) — nodes that live directly in
+          the File Layout without belonging to any Section. */}
+      <div className="rounded-md border border-app p-2" data-tour="layout-file-content">
+        <div className="mb-1.5 flex items-baseline justify-between">
+          <span className="text-[11px] font-semibold uppercase tracking-wide text-secondary">
+            Document content — outside any section
+          </span>
+          <span className="text-[10px] text-muted">
+            a document title, a closing summary… resolves before the sections
+          </span>
+        </div>
+        {draft.children && draft.children.length > 0 ? (
+          <SectionContentList
+            items={draft.children}
+            fields={[]}
+            allowBlocks={false}
+            onUpdate={(next) => {
+              const nextDraft = cloneTemplate(draft);
+              nextDraft.children = next;
+              nextDraft.updatedAt = Date.now();
+              setDraft(nextDraft);
+            }}
+          />
+        ) : (
+          <p className="px-1 py-2 text-center text-[11px] text-muted">
+            None — all content currently lives inside sections. Add a heading, divider or
+            closing note here to place it before/after the whole section flow.
+          </p>
+        )}
+        <ContentAddControls
+          scope="file"
+          onAddNode={(type) => {
+            const nextDraft = cloneTemplate(draft);
+            if (!nextDraft.children) nextDraft.children = [];
+            nextDraft.children.push(makeStandaloneChild(type));
+            nextDraft.updatedAt = Date.now();
+            setDraft(nextDraft);
+          }}
+          onAddField={() => {
+            toast.push({
+              kind: 'info',
+              title: 'File-level content holds literal nodes',
+              message:
+                'Use a Text/Heading node with tokens, or an Image node with a library image — file-level content is not bound to section fields.',
+            });
+          }}
+        />
       </div>
 
       {/* Unassigned files tray (§3 — every file lands somewhere, visibly) */}
@@ -973,25 +1064,10 @@ function SectionEditor({
     setDraft(next);
   };
 
-  const moveChild = (childId: string, delta: number) => {
+  const updateChildren = (next: SectionChild[]) => {
     mutate((_t, s) => {
-      const idx = s.children.findIndex((c) => c.id === childId);
-      const to = idx + delta;
-      if (idx < 0 || to < 0 || to >= s.children.length) return;
-      const [moved] = s.children.splice(idx, 1);
-      s.children.splice(to, 0, moved);
+      s.children = next;
     });
-  };
-
-  const removeChild = (childId: string) => {
-    const child = section.children.find((c) => c.id === childId);
-    mutate((_t, s) => {
-      s.children = s.children.filter((c) => c.id !== childId);
-    });
-    // Orphaned block assignments are cleared for hygiene (§3).
-    if (child?.kind === 'block') {
-      dispatch({ type: 'CLEAR_BLOCK_ASSIGNMENTS', blockId: child.block.id });
-    }
   };
 
   const assignedInBlock = (blockId: string) => state.layoutAssignments[blockId] ?? [];
@@ -1010,250 +1086,185 @@ function SectionEditor({
             onChange={(e) => mutate((_t, s) => { s.name = e.target.value; })}
           />
         </div>
-        <div>
-          <label className="label block mb-1">Type — seeds a starting structure</label>
-          <select
-            className="select w-60"
-            value={section.type}
-            onChange={(e) => {
-              const type = e.target.value as SectionTypeId;
-              mutate((_t, s) => {
-                s.type = type;
-                // §1 — the type populates an initial structure; customizing
-                // afterwards is expected. Appending keeps user content.
-                const built = SECTION_TYPE_PRESETS[type].build();
-                s.fields.push(...built.fields);
-                s.children.push(...built.children);
-              });
-              toast.push({
-                kind: 'info',
-                title: `Structure appended — ${SECTION_TYPE_PRESETS[type].label}`,
-                message: 'The type preset added fields and content; customize freely.',
-              });
-            }}
-          >
-            {Object.values(SECTION_TYPE_PRESETS).map((p) => (
-              <option key={p.id} value={p.id}>
-                {p.label}
-              </option>
-            ))}
-          </select>
-        </div>
         <button type="button" className="codice-bulk-btn" onClick={onFillContent}>
           Fill content
         </button>
       </div>
 
-      {/* Section fields (§4 — section scope) */}
-      <FieldsEditorV2
-        title="Section fields — shared by this section"
-        hint="Section fields hold section-level content (Task Title, Output, Answer…). Values are filled once per section."
-        fields={section.fields}
-        onAdd={() =>
-          mutate((_t, s) => {
-            s.fields.push({ id: genLayoutId('fld'), label: `Field ${s.fields.length + 1}`, kind: 'text', required: false });
-          })
-        }
-        onPatch={(id, patch) =>
+      {/* §9 — starter structures are appended ONCE per explicit action. */}
+      <div className="rounded-md border border-dashed border-app p-2">
+        <SectionTypeSeeder
+          onAppend={(type) => {
+            mutate((_t, s) => {
+              appendSectionPreset(s, type);
+            });
+            toast.push({
+              kind: 'info',
+              title: `Structure appended — ${sectionTypePreset(type).label}`,
+              message: 'The starter fields and content were added once; customize freely.',
+            });
+          }}
+        />
+      </div>
+
+      {/* §5/§6 — section fields are DERIVED from the content order. */}
+      <SectionFieldsPanel
+        section={section}
+        onPatchField={(id, patch) =>
           mutate((_t, s) => {
             const f = s.fields.find((x) => x.id === id);
             if (f) Object.assign(f, patch);
           })
         }
-        onRemove={(id) => mutate((_t, s) => { s.fields = s.fields.filter((f) => f.id !== id); })}
+        onDeleteField={(id) =>
+          mutate((_t, s) => {
+            // §6 — deleting a field removes its bound content nodes too,
+            // so settings and content can never diverge.
+            for (const child of s.children) {
+              if (child.kind === 'node') stripFieldBindings(child.node, id);
+            }
+            s.children = s.children.filter(
+              (c) => !(c.kind === 'node' && c.node.fieldId === id),
+            );
+            s.fields = s.fields.filter((f) => f.id !== id);
+          })
+        }
       />
 
-      {/* Children — standalone nodes + block refs, in order (§2) */}
+      {/* Children — standalone nodes + block refs, in order (§2/§8) */}
       <div className="rounded-md border border-app p-2" data-tour="layout-children">
         <div className="mb-1.5 flex items-baseline justify-between">
           <span className="text-[11px] font-semibold uppercase tracking-wide text-secondary">
             Section content — ordered
           </span>
-          <span className="text-[10px] text-muted">standalone nodes and file blocks, top to bottom</span>
+          <span className="text-[10px] text-muted">standalone nodes, fields and file blocks, top to bottom</span>
         </div>
         {section.children.length === 0 ? (
           <p className="px-1 py-3 text-center text-xs text-muted">
-            Empty — add standalone content or a file block below.
+            Empty — add standalone content, a field node or a file block below.
           </p>
         ) : (
-          <ol className="space-y-1" role="list" aria-label="Section children">
-            {section.children.map((child, idx) => (
-              <li key={child.id} className="rounded border border-app bg-surface/60 p-1.5">
-                {child.kind === 'node' ? (
-                  <div className="flex items-center gap-2">
-                    <span className="codice-drag-handle text-muted" aria-hidden="true">
-                      <ChevronRight size={11} />
+          <SectionContentList
+            items={section.children}
+            fields={section.fields}
+            allowBlocks
+            onUpdate={updateChildren}
+            blockCards={(child) => (
+              <div className="space-y-1.5">
+                <div className="flex items-center gap-2">
+                  <span className="codice-drag-handle text-muted" aria-hidden="true">
+                    <ChevronRight size={11} />
+                  </span>
+                  <span className="min-w-0 flex-1 truncate text-xs">
+                    <span className="font-semibold text-primary">Block: {child.block.name}</span>
+                    <span className="ml-1 text-muted">
+                      — {assignedInBlock(child.block.id).length} file
+                      {assignedInBlock(child.block.id).length === 1 ? '' : 's'} assigned · pattern repeats once per file
                     </span>
-                    <span className="min-w-0 flex-1 truncate text-xs text-secondary">
-                      <span className="font-medium text-primary">{nodeLabel(child.node)}</span>
-                      {child.node.text ? ` — “${child.node.text.slice(0, 40)}”` : ''}
-                    </span>
-                    <span className="flex items-center gap-0.5">
-                      <MoveButtons onUp={() => moveChild(child.id, -1)} onDown={() => moveChild(child.id, 1)} onRemove={() => removeChild(child.id)} label="node" />
-                    </span>
-                  </div>
-                ) : (
-                  <div className="space-y-1.5">
-                    <div className="flex items-center gap-2">
-                      <span className="codice-drag-handle text-muted" aria-hidden="true">
-                        <ChevronRight size={11} />
-                      </span>
-                      <span className="min-w-0 flex-1 truncate text-xs">
-                        <span className="font-semibold text-primary">Block: {child.block.name}</span>
-                        <span className="ml-1 text-muted">
-                          — {assignedInBlock(child.block.id).length} file
-                          {assignedInBlock(child.block.id).length === 1 ? '' : 's'} assigned · pattern repeats once per file
+                  </span>
+                  <button type="button" className="codice-bulk-btn" onClick={() => onEditBlock(child.block.id)}>
+                    Edit block
+                  </button>
+                  <span className="flex items-center gap-0.5">
+                    {/* §39 — duplicate the block pattern (fresh ids, unassigned). */}
+                    <button type="button" className="rounded p-0.5 text-muted hover:text-primary" title={`Duplicate ${child.block.name}`} aria-label={`Duplicate ${child.block.name}`} onClick={() => {
+                      const copyChild: SectionChild = { kind: 'block', id: genLayoutId('ch'), block: duplicateBlockDef(child.block) };
+                      const idx = section.children.indexOf(child);
+                      const next = [...section.children];
+                      next.splice(idx + 1, 0, copyChild);
+                      updateChildren(next);
+                    }}>
+                      <Copy size={10} />
+                    </button>
+                    <button type="button" className="rounded p-0.5 text-muted hover:text-primary" title="Move block earlier" aria-label={`Move ${child.block.name} earlier`} onClick={() => updateChildren(moveChild(section.children, child.id, -1))}>
+                      <ChevronUp size={10} />
+                    </button>
+                    <button type="button" className="rounded p-0.5 text-muted hover:text-primary" title="Move block later" aria-label={`Move ${child.block.name} later`} onClick={() => updateChildren(moveChild(section.children, child.id, 1))}>
+                      <ChevronDown size={10} />
+                    </button>
+                    <button
+                      type="button"
+                      className="rounded p-0.5 text-muted hover:text-error"
+                      title={`Remove ${child.block.name}`}
+                      aria-label={`Remove ${child.block.name}`}
+                      onClick={() => {
+                        updateChildren(removeChild(section.children, child.id));
+                        // Orphaned block assignments are cleared for hygiene (§3).
+                        dispatch({ type: 'CLEAR_BLOCK_ASSIGNMENTS', blockId: child.block.id });
+                      }}
+                    >
+                      <Trash size={10} />
+                    </button>
+                  </span>
+                </div>
+                {/* Assigned files (§3 — one instance per file) */}
+                {assignedInBlock(child.block.id).length > 0 && (
+                  <div className="flex flex-wrap gap-1 pl-4">
+                    {assignedInBlock(child.block.id).map((fid, i) => {
+                      const f = fileById(fid);
+                      return (
+                        <span key={fid} className="flex items-center gap-1 rounded border border-app px-1.5 py-0.5 text-[10px] text-secondary">
+                          <span className="text-muted tabular-nums">{i + 1}</span>
+                          <span className="max-w-[160px] truncate">{f?.path ?? fid}</span>
+                          <button
+                            type="button"
+                            className="text-muted hover:text-error"
+                            title={`Unassign ${f?.path ?? 'file'}`}
+                            aria-label={`Unassign ${f?.path ?? 'file'}`}
+                            onClick={() => dispatch({ type: 'UNASSIGN_FILE', fileId: fid, blockId: child.block.id })}
+                          >
+                            <X size={9} />
+                          </button>
                         </span>
-                      </span>
-                      <button type="button" className="codice-bulk-btn" onClick={() => onEditBlock(child.block.id)}>
-                        Edit block
-                      </button>
-                      <MoveButtons onUp={() => moveChild(child.id, -1)} onDown={() => moveChild(child.id, 1)} onRemove={() => removeChild(child.id)} label="block" />
-                    </div>
-                    {/* Assigned files (§3 — one instance per file) */}
-                    {assignedInBlock(child.block.id).length > 0 && (
-                      <div className="flex flex-wrap gap-1 pl-4">
-                        {assignedInBlock(child.block.id).map((fid, i) => {
-                          const f = fileById(fid);
-                          return (
-                            <span key={fid} className="flex items-center gap-1 rounded border border-app px-1.5 py-0.5 text-[10px] text-secondary">
-                              <span className="text-muted tabular-nums">{i + 1}</span>
-                              <span className="max-w-[160px] truncate">{f?.path ?? fid}</span>
-                              <button
-                                type="button"
-                                className="text-muted hover:text-error"
-                                title={`Unassign ${f?.path ?? 'file'}`}
-                                aria-label={`Unassign ${f?.path ?? 'file'}`}
-                                onClick={() => dispatch({ type: 'UNASSIGN_FILE', fileId: fid, blockId: child.block.id })}
-                              >
-                                <X size={9} />
-                              </button>
-                            </span>
-                          );
-                        })}
-                      </div>
-                    )}
+                      );
+                    })}
                   </div>
                 )}
-              </li>
-            ))}
-          </ol>
+              </div>
+            )}
+          />
         )}
 
-        {/* Add controls */}
-        <div className="mt-2 space-y-1.5 border-t border-app pt-2">
-          <div className="flex flex-wrap items-center gap-1">
-            <span className="w-24 flex-shrink-0 text-[10px] text-muted">Standalone</span>
-            {(['heading', 'text', 'image', 'divider', 'spacer', 'pageBreak'] as const).map((t) => (
-              <button
-                key={t}
-                type="button"
-                className="codice-input-chip"
-                onClick={() =>
-                  mutate((_t, s) => {
-                    s.children.push({ kind: 'node', id: genLayoutId('ch'), node: makeNode(t) });
-                  })
-                }
-              >
-                <Plus size={9} /> {standaloneLabel(t)}
-              </button>
-            ))}
-            {(['toc', 'metadata'] as const).map((t) => (
-              <button
-                key={t}
-                type="button"
-                className="codice-input-chip"
-                onClick={() =>
-                  mutate((_t, s) => {
-                    s.children.push({ kind: 'node', id: genLayoutId('ch'), node: makeNode(t) });
-                  })
-                }
-              >
-                <Plus size={9} /> {standaloneLabel(t)}
-              </button>
-            ))}
-          </div>
-          <div className="flex flex-wrap items-center gap-1">
-            <span className="w-24 flex-shrink-0 text-[10px] text-muted">File block</span>
-            {BLOCK_PRESETS.map((p) => (
-              <button
-                key={p.id}
-                type="button"
-                className="codice-input-chip"
-                title={p.description}
-                onClick={() =>
-                  mutate((_t, s) => {
-                    s.children.push({
-                      kind: 'block',
-                      id: genLayoutId('ch'),
-                      block: createBlockDef(p.name, p.nodes),
-                    });
-                  })
-                }
-              >
-                <Plus size={9} /> {p.name}
-              </button>
-            ))}
-          </div>
+        <ContentAddControls
+          scope="section"
+          onAddNode={(type) => updateChildren([...section.children, makeStandaloneChild(type)])}
+          onAddField={(kind) => {
+            const label = kind === 'image' ? 'Image field' : kind === 'textarea' ? 'Paragraph field' : 'Text field';
+            const { child, field } = makeFieldChild(kind, label);
+            mutate((_t, s) => {
+              s.children.push(child);
+              s.fields.push(field);
+            });
+          }}
+        />
+
+        {/* File block presets — the per-file patterns (§3/§9). */}
+        <div className="mt-2 flex flex-wrap items-center gap-1 border-t border-app pt-2">
+          <span className="w-24 flex-shrink-0 text-[10px] text-muted">File block</span>
+          {BLOCK_PRESETS.map((p) => (
+            <button
+              key={p.id}
+              type="button"
+              className="codice-input-chip"
+              title={p.description}
+              onClick={() =>
+                updateChildren([
+                  ...section.children,
+                  {
+                    kind: 'block',
+                    id: genLayoutId('ch'),
+                    block: createBlockDef(p.name, p.nodes),
+                  },
+                ])
+              }
+            >
+              <Plus size={9} /> {p.name}
+            </button>
+          ))}
         </div>
       </div>
     </div>
   );
-}
-
-function MoveButtons({
-  onUp,
-  onDown,
-  onRemove,
-  label,
-}: {
-  onUp: () => void;
-  onDown: () => void;
-  onRemove: () => void;
-  label: string;
-}) {
-  return (
-    <span className="flex items-center gap-0.5">
-      <button type="button" className="rounded p-0.5 text-muted hover:text-primary" title={`Move ${label} earlier`} aria-label={`Move ${label} earlier`} onClick={onUp}>
-        <ChevronUp size={10} />
-      </button>
-      <button type="button" className="rounded p-0.5 text-muted hover:text-primary" title={`Move ${label} later`} aria-label={`Move ${label} later`} onClick={onDown}>
-        <ChevronDown size={10} />
-      </button>
-      <button type="button" className="rounded p-0.5 text-muted hover:text-error" title={`Remove ${label}`} aria-label={`Remove ${label}`} onClick={onRemove}>
-        <Trash size={10} />
-      </button>
-    </span>
-  );
-}
-
-function nodeLabel(node: TemplateNode): string {
-  switch (node.type) {
-    case 'text': return 'Text';
-    case 'heading': return 'Heading';
-    case 'image': return 'Image';
-    case 'divider': return 'Divider';
-    case 'spacer': return 'Spacer';
-    case 'pageBreak': return 'Page break';
-    case 'toc': return 'Table of contents';
-    case 'metadata': return 'Metadata';
-    case 'panel': return 'Panel';
-    case 'columns': return 'Columns';
-    default: return node.type;
-  }
-}
-
-function standaloneLabel(t: 'heading' | 'text' | 'image' | 'divider' | 'spacer' | 'pageBreak' | 'toc' | 'metadata'): string {
-  switch (t) {
-    case 'heading': return 'Heading';
-    case 'text': return 'Text';
-    case 'image': return 'Image';
-    case 'divider': return 'Divider';
-    case 'spacer': return 'Spacer';
-    case 'pageBreak': return 'Page break';
-    case 'toc': return 'TOC';
-    case 'metadata': return 'Metadata';
-  }
 }
 
 /** Block presets (§0 — the Code-vs-File explanation lives in the tooltip). */
@@ -1420,6 +1431,13 @@ function BlockEditor({
   const nodes = block.nodes;
   const assigned = state.layoutAssignments[block.id] ?? [];
 
+  // §10 — files already assigned to ANY block (this one included) are
+  // excluded from this block's dropdown. Unassigning frees the file again.
+  const available = useMemo(() => {
+    const taken = assignedFileIds(draft, state.layoutAssignments);
+    return orderedFiles.filter((f) => !taken.has(f.fileId));
+  }, [draft, state.layoutAssignments, orderedFiles]);
+
   const nodeOps = {
     onAdd: (type: TemplateNode['type'], containerId?: string | null, columnIdx?: number) => {
       const node = makeNode(type);
@@ -1571,8 +1589,18 @@ function BlockEditor({
             dispatch({ type: 'ASSIGN_FILE_TO_BLOCK', blockId: block.id, fileId });
           }}
         >
-          <option value="">+ Assign a file…</option>
-          {orderedFiles.map((f) => (
+          <option value="">
+            {orderedFiles.length === 0
+              ? 'No selected files — upload a project first'
+              : available.length === 0
+                ? 'Every file is already assigned to a block'
+                : '+ Assign a file…'}
+          </option>
+          {/* §10 — a file assigned to ANY block disappears from every
+              assignment dropdown (this one included). Unassign it there
+              first; the model-level reducer guard remains as the final
+              one-file-one-section enforcement. */}
+          {available.map((f) => (
             <option key={f.fileId} value={f.fileId}>
               {f.path} ({f.projectLabel})
             </option>

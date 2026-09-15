@@ -307,12 +307,16 @@ describe('custom layout resolver v2 (§3/§4/§17)', () => {
     expect(resolved.blocks[1]).toMatchObject({ kind: 'heading', text: 'f2.kt' });
   });
 
-  it('a file with NO block assignment renders nothing (and does not crash)', () => {
+  it('a file with NO block assignment renders no file content, but the section keeps its structural place (§3 fallback)', () => {
     const t = createEmptyTemplate('T');
     const block = createBlockDef('Code', [{ type: 'file' }]);
     t.sections[0].children.push({ kind: 'block', id: genLayoutId('ch'), block });
     const resolved = resolveCustomLayout(t, inputs());
-    expect(resolved.blocks).toHaveLength(0);
+    // §3 — an empty section must not silently vanish: the fallback heading
+    // carries the section's own name so every document shows the full
+    // Section structure of the layout.
+    expect(resolved.blocks).toHaveLength(1);
+    expect(resolved.blocks[0]).toMatchObject({ kind: 'heading', text: t.sections[0].name });
   });
 
   it('the block pattern repeats exactly ONCE per file — never duplicates (§3/§27)', () => {

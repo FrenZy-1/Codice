@@ -210,6 +210,14 @@ export interface DocumentOptions {
   secondaryColor?: string;
   /** Heading text color (hex). */
   headingColor?: string;
+  // ---- Panel theme defaults (§25) — layout panels without their own
+  // style fall back to these. ----
+  /** Panel fill/background color (hex). */
+  panelFillColor?: string;
+  /** Panel border color (hex). */
+  panelBorderColor?: string;
+  /** Panel default text color (hex). */
+  panelTextColor?: string;
 }
 
 /** Structured footer slot content type. */

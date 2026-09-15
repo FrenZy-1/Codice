@@ -171,11 +171,13 @@ describe('buildDocumentOutline', () => {
     expect(entries.map((e) => e.label)).toEqual([
       'sample-app',
       'Source Files',
-      'src/App.java',
+      // §16 — unique filenames show the NAME only; the path is the tooltip.
+      'App.java',
       'README.md',
       'second',
       'Source Files',
     ]);
+    expect(entries[2].tooltip).toBe('sample-app/src/App.java');
     const second = entries[4];
     expect(second.kind).toBe('project');
     expect(second.detail).toBe('0 files');
@@ -207,7 +209,8 @@ describe('formatOutlineText', () => {
     expect(text.split('\n')).toEqual([
       '▣ sample-app  (2 files)',
       '  ⋮ Source Files  (2 files)',
-      '  · src/App.java  (java)',
+      // §16 — filename-only label for unique names.
+      '  · App.java  (java)',
       '  · README.md  (markdown)',
     ]);
   });

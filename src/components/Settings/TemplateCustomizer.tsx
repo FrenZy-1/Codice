@@ -1403,6 +1403,20 @@ function ThemeSection({
             />
           </Field>
         </div>
+
+        {/* §25 — panel theme colors: layout panels without their own style
+            fall back to these defaults. */}
+        <div className="mt-2 border-t border-app pt-2">
+          <div className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-muted">
+            Panels (layout containers)
+          </div>
+          <div className="grid grid-cols-2 gap-2">
+            <Field label="Panel fill"><ColorInput value={preset.colors.panelFill} onChange={(v) => patchColors({ panelFill: v })} /></Field>
+            <Field label="Panel border"><ColorInput value={preset.colors.panelBorder} onChange={(v) => patchColors({ panelBorder: v })} /></Field>
+            <Field label="Panel text"><ColorInput value={preset.colors.panelText} onChange={(v) => patchColors({ panelText: v })} /></Field>
+          </div>
+          <PanelOverrides />
+        </div>
       </SubGroup>
 
       <SubGroup label="Code Theme / Colors">
@@ -1532,4 +1546,125 @@ function exportPresetJsonLocal(preset: DocumentPreset): string {
     metadata: preset.metadata,
   };
   return JSON.stringify(exported, null, 2);
+}
+
+
+/**
+ * §25 — per-panel style overrides. Lists every panel/columns node of the
+ * APPLIED layout template (stable node id — never the visible label), so
+ * two panels with identical text stay independently addressable. Edits
+ * write the node's style back to the template.
+ */
+function PanelOverrides() {
+  const { state, dispatch } = useAppState();
+  const applied = state.customLayouts.find((t) => t.id === state.appliedLayoutId);
+  const panels: Array<{
+    nodeId: string;
+    kind: 'panel' | 'columns';
+    section: string;
+    fillColor?: string | null;
+    borderColor?: string | null;
+    textColor?: string;
+  }> = [];
+  if (applied) {
+    for (const section of applied.sections) {
+      for (const child of section.children) {
+        if (child.kind !== 'node') continue;
+        if (child.node.type === 'panel' || child.node.type === 'columns') {
+          panels.push({
+            nodeId: child.node.id,
+            kind: child.node.type,
+            section: section.name,
+            fillColor: child.node.style?.fillColor,
+            borderColor: child.node.style?.borderColor,
+            textColor: child.node.style?.textColor,
+          });
+        }
+      }
+      for (const child of applied.children ?? []) {
+        if (child.kind !== 'node') continue;
+        if (child.node.type === 'panel' || child.node.type === 'columns') {
+          panels.push({
+            nodeId: child.node.id,
+            kind: child.node.type,
+            section: '(document content)',
+            fillColor: child.node.style?.fillColor,
+            borderColor: child.node.style?.borderColor,
+            textColor: child.node.style?.textColor,
+          });
+        }
+      }
+    }
+  }
+
+  if (!applied || panels.length === 0) {
+    return (
+      <p className="mt-1 text-[10px] text-muted">
+        Apply a layout that contains panels to style them individually here.
+      </p>
+    );
+  }
+
+  const patchNodeStyle = (nodeId: string, patch: { fillColor?: string; borderColor?: string; textColor?: string }) => {
+    const next = JSON.parse(JSON.stringify(applied)) as typeof applied;
+    const visit = (nodes: Array<{ node: { id: string; type: string; style?: Record<string, unknown> } }>) => {
+      for (const child of nodes) {
+        if (child.node.id === nodeId) {
+          child.node.style = { ...(child.node.style ?? {}), ...patch };
+        }
+      }
+    };
+    for (const section of next.sections) {
+      visit(section.children.filter((c) => c.kind === 'node') as never);
+    }
+    visit((next.children ?? []).filter((c) => c.kind === 'node') as never);
+    dispatch({ type: 'UPDATE_CUSTOM_LAYOUT', template: next });
+  };
+
+  return (
+    <div className="mt-2 space-y-1.5">
+      <div className="text-[10px] font-semibold uppercase tracking-wide text-muted">
+        Individual panels ({panels.length}) — identified by stable node id
+      </div>
+      {panels.map((panel, i) => (
+        <div key={panel.nodeId} className="flex flex-wrap items-center gap-2 rounded border border-app px-2 py-1.5">
+          <span className="min-w-0 flex-1 text-[11px] text-secondary">
+            <span className="font-medium text-primary">{panel.kind === 'panel' ? 'Panel' : 'Columns'} {i + 1}</span>
+            <span className="ml-1 text-muted">in {panel.section}</span>
+            <span className="ml-1 font-mono text-[9px] text-muted" title={panel.nodeId}>{panel.nodeId.slice(0, 10)}…</span>
+          </span>
+          <label className="flex items-center gap-1 text-[10px] text-muted">
+            fill
+            <input
+              type="color"
+              className="h-6 w-8 cursor-pointer rounded border border-app bg-transparent p-0"
+              value={panel.fillColor ?? '#f6f8fa'}
+              aria-label={`Panel ${i + 1} fill color`}
+              onChange={(e) => patchNodeStyle(panel.nodeId, { fillColor: e.target.value })}
+            />
+          </label>
+          <label className="flex items-center gap-1 text-[10px] text-muted">
+            border
+            <input
+              type="color"
+              className="h-6 w-8 cursor-pointer rounded border border-app bg-transparent p-0"
+              value={panel.borderColor ?? '#d0d7de'}
+              aria-label={`Panel ${i + 1} border color`}
+              onChange={(e) => patchNodeStyle(panel.nodeId, { borderColor: e.target.value })}
+            />
+          </label>
+          <label className="flex items-center gap-1 text-[10px] text-muted">
+            text
+            <input
+              type="color"
+              className="h-6 w-8 cursor-pointer rounded border border-app bg-transparent p-0"
+              value={panel.textColor ?? '#1f2328'}
+              aria-label={`Panel ${i + 1} text color`}
+              onChange={(e) => patchNodeStyle(panel.nodeId, { textColor: e.target.value })}
+            />
+          </label>
+        </div>
+      ))}
+    </div>
+  );
 }

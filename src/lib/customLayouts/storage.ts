@@ -11,7 +11,7 @@
  */
 
 import type { CustomLayoutTemplate, CustomLayoutTemplateV1 } from './model';
-import { cloneTemplate, ensureTemplateV2, genLayoutId } from './model';
+import { cloneTemplate, ensureTemplateV2, genLayoutId, normalizeTemplate } from './model';
 
 const STORAGE_KEY = 'codice-custom-layouts-v1';
 
@@ -36,11 +36,16 @@ function safeParseList(raw: string | null): CustomLayoutTemplate[] {
   }
 }
 
-/** Load every stored template (migrating any legacy v1 entries). */
+/**
+ * Load every stored template (migrating any legacy v1 entries). Each load
+ * runs `normalizeTemplate` so templates saved by older builds pick up the
+ * §5/§6 field-content sync and the §7 file-level children array — the
+ * exporter, preview and studio all observe the same normalized shape.
+ */
 export function loadCustomLayouts(): CustomLayoutTemplate[] {
   if (typeof window === 'undefined') return [];
   try {
-    return safeParseList(window.localStorage.getItem(STORAGE_KEY));
+    return safeParseList(window.localStorage.getItem(STORAGE_KEY)).map(normalizeTemplate);
   } catch {
     return [];
   }

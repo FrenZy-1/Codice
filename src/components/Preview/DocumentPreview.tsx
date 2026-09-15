@@ -24,6 +24,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useAppState } from '@/hooks/useAppState';
+import { usePopoverDismiss } from '@/hooks/usePopoverDismiss';
 import { highlightFile, getThemeColors, plainHighlightedFile } from '@/lib/highlight/highlighter';
 import { resolveSyntaxTheme } from '@/lib/themes/syntaxThemeRegistry';
 import { fontStack } from '@/lib/fonts/fontCatalog';
@@ -77,6 +78,10 @@ function glyphCapableStack(stack: string): string {
 
 /** Preview file limit — the exported document contains ALL selected files. */
 const PREVIEW_LIMIT = 25;
+
+/** §18 — surfaces that count as "inside" each popover for dismissal. */
+const OUTLINE_INSIDE = ['.codice-outline-panel'] as const;
+const STATS_INSIDE = ['[data-stats-popover]'] as const;
 
 export function DocumentPreview() {
   const { state, getSelectedFiles } = useAppState();
@@ -275,6 +280,14 @@ export function DocumentPreview() {
       window.removeEventListener('codice:toggle-outline', onToggle);
     };
   }, []);
+
+  // §18 — popover dismissal: clicking OUTSIDE an open Outline/Statistics
+  // panel closes it (normal popover behavior), Escape closes it, clicking
+  // inside never closes, and the explicit close buttons keep working. The
+  // other popover's surface counts as outside, so the previous popover
+  // closes when the user moves to the competing one.
+  usePopoverDismiss(outlineOpen, () => setOutlineOpen(false), OUTLINE_INSIDE);
+  usePopoverDismiss(statsOpen, () => setStatsOpen(false), STATS_INSIDE);
 
   // Measure the container width so the page can be scaled to fit.
   // The scroll container below is rendered UNCONDITIONALLY (the empty state
@@ -775,7 +788,9 @@ export function DocumentPreview() {
         key={key}
         data-codice-region="panel"
         style={{
-          background: el.fillColor ?? undefined,
+          // §25 — panels fall back to the preset's panel colors when the
+          // layout node declares none of its own.
+          background: el.fillColor ?? preset.colors.panelFill ?? undefined,
           border:
             el.borderWidthPt && el.borderColor
               ? `${el.borderWidthPt}px solid ${el.borderColor}`
@@ -785,6 +800,9 @@ export function DocumentPreview() {
           height:
             !hasChildren && el.heightPt ? Math.max(1, el.heightPt * PT_TO_PX) : undefined,
           margin: `${preset.typography.paragraphSpacingPt}px 0`,
+          // §25 — panel text color (the resolver already propagated it to
+          // children that don't declare their own).
+          color: el.textColor ?? undefined,
         }}
       >
         {el.children.map((child, i) => renderElement(child, `${key}-${i}`))}
@@ -1577,6 +1595,7 @@ export function DocumentPreview() {
             className="codice-fade-in w-80 max-h-full overflow-y-auto rounded-lg border border-app bg-surface-elevated shadow-2xl"
             role="dialog"
             aria-label="Document statistics"
+            data-stats-popover
           >
             <div className="flex items-center justify-between border-b border-app px-3 py-2">
               <div className="flex items-center gap-1.5 text-xs font-semibold text-secondary">

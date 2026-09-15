@@ -12,6 +12,7 @@
  */
 
 import { useState } from 'react';
+import { useAppState } from '@/hooks/useAppState';
 import {
   Plus,
   Trash,
@@ -422,6 +423,10 @@ export function NodeInspector({
   const style = node.style ?? {};
   const bindable =
     node.type === 'text' || node.type === 'heading' || node.type === 'image';
+  // §13 — literal image nodes pick from the library (id typed by hand is
+  // no longer the only option).
+  const { state } = useAppState();
+  const libraryAssets = state.imageAssets;
 
   return (
     <div className="rounded-md border border-app p-2" aria-label="Node inspector" data-tour="layout-inspector">
@@ -507,11 +512,29 @@ export function NodeInspector({
 
         {node.type === 'image' && !node.fieldId && (
           <div className="col-span-2">
-            <label className="label block mb-1">Image asset id (from an imported image)</label>
+            <label className="label block mb-1">Library image</label>
+            {libraryAssets.length > 0 ? (
+              <select
+                className="select"
+                value={node.text ?? ''}
+                onChange={(e) => onPatch({ text: e.target.value })}
+              >
+                <option value="">— pick an image —</option>
+                {libraryAssets.map((a) => (
+                  <option key={a.id} value={a.id}>
+                    {a.name} ({a.width}×{a.height}px)
+                  </option>
+                ))}
+              </select>
+            ) : (
+              <p className="text-[10px] text-muted">
+                Upload images with the Images chip in the upload area first.
+              </p>
+            )}
             <input
               type="text"
-              className="input"
-              placeholder="img-… (or bind to an image field above)"
+              className="input mt-1"
+              placeholder="…or paste an image asset id (img-…)"
               value={node.text ?? ''}
               onChange={(e) => onPatch({ text: e.target.value })}
             />

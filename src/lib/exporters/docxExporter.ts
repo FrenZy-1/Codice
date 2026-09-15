@@ -1209,11 +1209,14 @@ function renderDocxLayoutBlock(
       // 1x1 table: borders/shading around the children stacked in the cell.
       // Radius is not expressible in DOCX tables — degraded (ignored).
       const pad = Math.round((block.paddingPt ?? 8) * 20);
-      const border = block.borderColor
+      // §25 — panels without their own style use the preset's panel colors.
+      const effectiveBorderColor = block.borderColor ?? ctx.options.panelBorderColor ?? undefined;
+      const effectiveFillColor = block.fillColor ?? ctx.options.panelFillColor ?? undefined;
+      const border = effectiveBorderColor
         ? {
             style: BorderStyle.SINGLE,
             size: Math.max(2, Math.round((block.borderWidthPt ?? 1) * 8)),
-            color: hexNoHash(block.borderColor),
+            color: hexNoHash(effectiveBorderColor),
           }
         : DOCX_NO_BORDER;
       const children = renderDocxBlocks(model, block.children, ctx);
@@ -1232,11 +1235,11 @@ function renderDocxLayoutBlock(
             new TableRow({
               children: [
                 new TableCell({
-                  shading: block.fillColor
+                  shading: effectiveFillColor
                     ? {
                         type: ShadingType.SOLID,
-                        color: hexNoHash(block.fillColor),
-                        fill: hexNoHash(block.fillColor),
+                        color: hexNoHash(effectiveFillColor),
+                        fill: hexNoHash(effectiveFillColor),
                       }
                     : undefined,
                   margins: { top: pad, bottom: pad, left: pad, right: pad },

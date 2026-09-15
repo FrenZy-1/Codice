@@ -37,7 +37,9 @@ describe('help dialog', () => {
   it('renders the shortcut list when open', () => {
     render(<HelpDialog open onClose={() => {}} />);
     expect(screen.getByRole('dialog')).toBeTruthy();
-    expect(screen.getByText('Keyboard Shortcuts')).toBeTruthy();
+    // §23 — the help dialog now opens on the shortcuts TAB.
+    expect(screen.getByRole('tab', { name: 'Keyboard shortcuts' })).toBeTruthy();
+    expect(screen.getByRole('tab', { name: 'Guide — how Codice works' })).toBeTruthy();
     expect(screen.getByText('Export document')).toBeTruthy();
   });
 

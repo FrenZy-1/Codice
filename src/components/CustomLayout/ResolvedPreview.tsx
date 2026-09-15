@@ -87,7 +87,7 @@ export function ResolvedPreview({
                 style={{
                   fontFamily: fontStack(preset.typography.bodyFont),
                   fontSize: preset.typography.bodyFontSizePt * (4 / 3),
-                  color: preset.colors.primaryText,
+                  color: block.color ?? preset.colors.primaryText,
                   textAlign: block.align,
                   margin: 0,
                   whiteSpace: 'pre-wrap',
@@ -221,6 +221,8 @@ export function ResolvedPreview({
                     ? Math.max(1, block.heightPt * (4 / 3))
                     : undefined,
                 margin: '8px 0',
+                // §25 — panel text color as the content default.
+                color: block.textColor ?? undefined,
               }}
             >
               {renderBlocks(block.children)}
@@ -262,5 +264,22 @@ export function ResolvedPreview({
     });
   };
 
-  return <>{renderBlocks(blocks)}</>;
+  return (
+    // §19 — the layout preview shares the DOCUMENT surface: the preset's
+    // page background + text colors (like the main + template previews),
+    // never a hardcoded dark theme. Both app themes stay readable.
+    <div
+      data-tour="layout-preview-surface"
+      style={{
+        background: preset.colors.background,
+        color: preset.colors.primaryText,
+        borderRadius: 4,
+        padding: 14,
+        border: `1px solid ${preset.colors.borders}`,
+        minHeight: '100%',
+      }}
+    >
+      {renderBlocks(blocks)}
+    </div>
+  );
 }

@@ -14,7 +14,8 @@ export type OutlineKind =
   | 'project'
   | 'structure'
   | 'files'
-  | 'file';
+  | 'file'
+  | 'heading';
 
 export interface OutlineEntry {
   /** Stable anchor id, also used as `data-outline-id` in the preview. */
@@ -30,6 +31,34 @@ export interface OutlineEntry {
   projectId?: string;
   /** File rows: the file id — reorder target (§14). */
   fileId?: string;
+  /** §16 — full hover text (the path behind a filename-only label). */
+  tooltip?: string;
+}
+
+/**
+ * §16 — Output pill labels show the FILENAME only; the full path lives in
+ * the row tooltip. When two or more files share the same filename the path
+ * is shown inline to disambiguate them. Pure — shared by the standard and
+ * the custom-layout outline builders.
+ */
+export function outlineFileLabel(
+  relativePath: string,
+  duplicateNames: Set<string>,
+): { label: string; showPath: boolean } {
+  const name = relativePath.split('/').pop() ?? relativePath;
+  return { label: name, showPath: duplicateNames.has(name) };
+}
+
+/** Filenames that occur more than once across the given files. */
+export function duplicateFilenames(paths: string[]): Set<string> {
+  const counts = new Map<string, number>();
+  for (const p of paths) {
+    const name = p.split('/').pop() ?? p;
+    counts.set(name, (counts.get(name) ?? 0) + 1);
+  }
+  const dup = new Set<string>();
+  for (const [name, count] of counts) if (count > 1) dup.add(name);
+  return dup;
 }
 
 /** Anchor id for the preview DOM. */
@@ -79,6 +108,10 @@ export function buildDocumentOutline(input: BuildOutlineInput): OutlineEntry[] {
     });
   }
 
+  const dupNames = duplicateFilenames(
+    input.projects.flatMap((p) => p.files.map((f) => f.relativePath)),
+  );
+
   input.projects.forEach((project) => {
     entries.push({
       id: `outline-project-${project.id}`,
@@ -111,14 +144,16 @@ export function buildDocumentOutline(input: BuildOutlineInput): OutlineEntry[] {
       depth: 1,
     });
     for (const file of project.files) {
+      const { label, showPath } = outlineFileLabel(file.relativePath, dupNames);
       entries.push({
         id: `outline-file-${file.fileId}`,
         kind: 'file',
-        label: file.relativePath,
+        label: showPath ? file.relativePath : label,
         detail: file.language ?? undefined,
         depth: 1,
         projectId: project.id,
         fileId: file.fileId,
+        tooltip: `${project.label}/${file.relativePath}`,
       });
     }
   });
@@ -141,6 +176,8 @@ export function outlineGlyph(kind: OutlineKind): string {
       return '⋮';
     case 'file':
       return '·';
+    case 'heading':
+      return '§';
   }
 }
 
@@ -158,6 +195,7 @@ export function outlineKindTone(
     case 'structure':
     case 'files':
     case 'file':
+    case 'heading':
       return 'muted';
   }
 }

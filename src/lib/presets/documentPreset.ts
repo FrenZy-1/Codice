@@ -274,6 +274,11 @@ export interface DocumentColors {
   success: string;
   warning: string;
   error: string;
+  // ---- Panel styling defaults (§25) — used by layout panels that do not
+  // declare their own fill/border/text color. ----
+  panelFill: string;
+  panelBorder: string;
+  panelText: string;
 }
 
 /** Miscellaneous document options that don't fit elsewhere. */

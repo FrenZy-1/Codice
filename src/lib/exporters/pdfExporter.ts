@@ -1562,9 +1562,12 @@ function renderPanelPdf(
   block: Extract<ResolvedLayoutBlock, { kind: 'panel' }>,
   region: PdfRegion,
 ) {
-  const { doc } = state;
+  const { doc, options } = state;
   const pad = block.paddingPt ?? 8;
   const inner: PdfRegion = { x: region.x + pad, width: Math.max(1, region.width - pad * 2) };
+  // §25 — panels without their own style use the preset's panel colors.
+  const fillColor = block.fillColor ?? options.panelFillColor ?? undefined;
+  const borderColor = block.borderColor ?? options.panelBorderColor ?? undefined;
 
   // Measure the leading measurable children so the rect covers them.
   const measured: Array<{ block: ResolvedLayoutBlock }> = [];
@@ -1583,15 +1586,15 @@ function renderPanelPdf(
   const rectTop = state.cursorY;
   const rectH = Math.max(2, Math.min(totalH, state.pageH - state.margin.bottom - rectTop));
 
-  if (block.fillColor || block.borderColor) {
+  if (fillColor || borderColor) {
     const radius = Math.max(0, Math.min(block.radiusPt ?? 0, rectH / 2, region.width / 2));
-    const style = block.fillColor && block.borderColor ? 'FD' : block.fillColor ? 'F' : 'S';
-    if (block.fillColor) {
-      const { r, g, b } = parseHex(block.fillColor);
+    const style = fillColor && borderColor ? 'FD' : fillColor ? 'F' : 'S';
+    if (fillColor) {
+      const { r, g, b } = parseHex(fillColor);
       doc.setFillColor(r, g, b);
     }
-    if (block.borderColor) {
-      const { r, g, b } = parseHex(block.borderColor);
+    if (borderColor) {
+      const { r, g, b } = parseHex(borderColor);
       doc.setDrawColor(r, g, b);
       doc.setLineWidth(Math.max(0.1, block.borderWidthPt ?? 1));
     }

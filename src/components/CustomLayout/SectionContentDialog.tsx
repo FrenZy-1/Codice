@@ -33,6 +33,8 @@ export function SectionContentDialog({
   const existing = state.sectionFieldValues[sectionId] ?? {};
   const [values, setValues] = useState<Record<string, string>>(() => ({ ...existing }));
   const [importing, setImporting] = useState(false);
+  // §13 — existing library assets offered alongside a fresh upload.
+  const libraryAssets = state.imageAssets;
   const imageInputRef = useRef<HTMLInputElement>(null);
   const pendingImageField = useRef<string | null>(null);
 
@@ -109,36 +111,66 @@ export function SectionContentDialog({
                 )}
               </label>
               {f.kind === 'image' ? (
-                <div className="flex flex-wrap items-center gap-2">
-                  {values[f.id] ? (
-                    <img
-                      src={state.imageAssets.find((a) => a.id === values[f.id])?.dataUrl}
-                      alt={f.label}
-                      className="h-14 w-20 rounded border border-app object-cover"
-                    />
-                  ) : (
-                    <span className="text-[11px] text-muted">No image selected</span>
-                  )}
-                  <button
-                    type="button"
-                    className="codice-bulk-btn"
-                    disabled={importing}
-                    onClick={() => {
-                      pendingImageField.current = f.id;
-                      imageInputRef.current?.click();
-                    }}
-                  >
-                    <ImagePlus size={11} />
-                    {values[f.id] ? 'Replace' : 'Add image'}
-                  </button>
-                  {values[f.id] && (
+                <div className="space-y-1.5">
+                  <div className="flex flex-wrap items-center gap-2">
+                    {values[f.id] ? (
+                      <img
+                        src={state.imageAssets.find((a) => a.id === values[f.id])?.dataUrl}
+                        alt={f.label}
+                        className="h-14 w-20 rounded border border-app object-cover"
+                      />
+                    ) : (
+                      <span className="text-[11px] text-muted">No image selected</span>
+                    )}
                     <button
                       type="button"
                       className="codice-bulk-btn"
-                      onClick={() => setValues((v) => ({ ...v, [f.id]: '' }))}
+                      disabled={importing}
+                      onClick={() => {
+                        pendingImageField.current = f.id;
+                        imageInputRef.current?.click();
+                      }}
                     >
-                      <Trash size={11} /> Remove
+                      <ImagePlus size={11} />
+                      {values[f.id] ? 'Replace' : 'Add image'}
                     </button>
+                    {values[f.id] && (
+                      <button
+                        type="button"
+                        className="codice-bulk-btn"
+                        onClick={() => setValues((v) => ({ ...v, [f.id]: '' }))}
+                      >
+                        <Trash size={11} /> Remove
+                      </button>
+                    )}
+                  </div>
+                  {/* §13 — pick from the SAME image library the sidebar
+                      shows; no second storage system. */}
+                  {libraryAssets.length > 0 && (
+                    <div>
+                      <div className="mb-1 text-[10px] text-muted">From the library:</div>
+                      <div className="flex flex-wrap gap-1.5">
+                        {libraryAssets.map((asset) => (
+                          <button
+                            key={asset.id}
+                            type="button"
+                            className={`rounded border p-0.5 transition-colors ${
+                              values[f.id] === asset.id
+                                ? 'border-[var(--color-accent)] ring-1 ring-[var(--color-accent)]'
+                                : 'border-app hover:border-[var(--color-accent)]'
+                            }`}
+                            title={`Pick ${asset.name} (${asset.width}×${asset.height}px)`}
+                            onClick={() => setValues((v) => ({ ...v, [f.id]: asset.id }))}
+                          >
+                            <img
+                              src={asset.dataUrl}
+                              alt={asset.name}
+                              className="h-9 w-14 rounded-sm object-cover"
+                            />
+                          </button>
+                        ))}
+                      </div>
+                    </div>
                   )}
                 </div>
               ) : f.kind === 'textarea' ? (

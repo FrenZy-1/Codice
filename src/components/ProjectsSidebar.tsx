@@ -32,8 +32,9 @@ import {
   FlipHorizontal2,
   Merge,
   Split,
+  ImagePlus,
 } from '@/components/common/Icons';
-import type { ProjectEntry } from '@/types';
+import type { ProjectEntry, ImageAsset } from '@/types';
 
 interface Props {
   selectedProjectId: string | null;
@@ -278,6 +279,12 @@ export function ProjectsSidebar({ selectedProjectId, onSelectProject }: Props) {
 
       {/* §13 — canonical document order editor (shared with the Outline). */}
       <DocumentOrderPanel />
+
+      {/* §13 — the image library is a first-class sidebar citizen: uploaded
+          images are DISCOVERABLE here (thumbnail, name, size) and attachable
+          from File properties / layout image fields. One storage system —
+          the sidebar renders the same imageAssets slice. */}
+      <ImageLibraryPanel />
 
       {/* §11 — explicit, undoable project merge. */}
       {mergeTargetId && (
@@ -698,6 +705,82 @@ function ProjectRow({
           <Trash size={14} />
         </button>
       </div>
+    </div>
+  );
+}
+
+/**
+ * §13 — Image library panel. Uploaded images appear alongside the usable
+ * content in the sidebar (never a disconnected second storage): each asset
+ * shows its thumbnail, name and size; the tooltip carries the full name and
+ * dimensions. Removing an asset here removes it from the SAME registry the
+ * preview and exporters read.
+ */
+function ImageLibraryPanel() {
+  const { state, dispatch } = useAppState();
+  const [open, setOpen] = useState(false);
+  const assets = state.imageAssets;
+
+  if (assets.length === 0) return null;
+
+  return (
+    <div className="border-t border-app">
+      <button
+        type="button"
+        className="flex w-full items-center gap-1.5 px-3 py-2 text-xs text-secondary transition-colors hover:text-primary"
+        onClick={() => setOpen((v) => !v)}
+        aria-expanded={open}
+        aria-controls="codice-image-library"
+        title="Images uploaded to the library — attach them in File properties or a layout image field"
+      >
+        {open ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
+        <span className="font-medium">Image library</span>
+        <span className="badge ml-0.5">{assets.length}</span>
+        <span className="ml-auto text-[10px] text-muted">
+          {open ? '' : 'attachable'}
+        </span>
+      </button>
+      {open && (
+        <div
+          id="codice-image-library"
+          className="codice-fade-in max-h-44 space-y-1 overflow-y-auto px-2 pb-2"
+        >
+          {assets.map((asset: ImageAsset) => (
+            <div
+              key={asset.id}
+              className="group flex items-center gap-2 rounded px-1 py-1 hover:bg-app"
+            >
+              <img
+                src={asset.dataUrl}
+                alt={asset.name}
+                className="h-8 w-12 flex-shrink-0 rounded border border-app object-cover"
+                title={`${asset.name} — ${asset.width}×${asset.height}px`}
+              />
+              <span className="min-w-0 flex-1">
+                <span className="block truncate text-[11px] text-secondary" title={asset.name}>
+                  {asset.name}
+                </span>
+                <span className="block text-[9px] text-muted">
+                  {asset.width}×{asset.height}px · {formatBytes(asset.sizeBytes ?? 0)}
+                </span>
+              </span>
+              <button
+                type="button"
+                className="text-muted opacity-0 transition-opacity hover:text-error group-hover:opacity-100"
+                title={`Remove ${asset.name} from the library`}
+                aria-label={`Remove ${asset.name} from the library`}
+                onClick={() => dispatch({ type: 'REMOVE_IMAGE_ASSET', id: asset.id })}
+              >
+                <Trash size={11} />
+              </button>
+            </div>
+          ))}
+          <p className="px-1 pt-1 text-[10px] text-muted">
+            Attach in File properties (per file) or a layout image field — they render in the
+            preview and all exports.
+          </p>
+        </div>
+      )}
     </div>
   );
 }

@@ -85,5 +85,9 @@ export function presetToOptions(preset: DocumentPreset): DocumentOptions {
     bodyColor: preset.colors.primaryText,
     secondaryColor: preset.colors.secondaryText,
     headingColor: preset.colors.headings,
+    // Panel theme defaults (§25).
+    panelFillColor: preset.colors.panelFill,
+    panelBorderColor: preset.colors.panelBorder,
+    panelTextColor: preset.colors.panelText,
   };
 }

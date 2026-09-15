@@ -32,6 +32,8 @@ import type {
   ResolvedLayoutBlock,
   TemplateNode,
   TemplateBlockType,
+  TemplateFieldType,
+  TemplateSection,
 } from './model';
 import { FILE_CONTEXT_NODES } from './model';
 import { expandTokens } from '@/lib/tokens';
@@ -188,6 +190,40 @@ function fieldValue(ctx: ResolutionContext, fieldId: string | undefined): string
   return ctx.fieldValues[fieldId] ?? ctx.sectionValues?.[fieldId] ?? '';
 }
 
+/** §4 — the kind of the field a node is bound to (when known). Image-kind
+ * fields hold ASSET IDS: a text/heading node bound to them must never
+ * render the raw id as text (the stray "OUTPUT img-…" sequence). The
+ * dedicated image node renders the actual image instead.
+ */
+function boundFieldKind(ctx: ResolutionContext, fieldId: string | undefined): TemplateFieldType | undefined {
+  if (!fieldId) return undefined;
+  return ctx.fieldKinds?.[fieldId];
+}
+
+/**
+ * §25 — a panel's `textColor` is the DEFAULT color for the text inside it:
+ * children that declare their own color keep it, the rest inherit the
+ * panel's. Pure — returns a new list, never mutates the input.
+ */
+function applyPanelTextColor(
+  textColor: string | undefined,
+  children: ResolvedLayoutBlock[],
+): ResolvedLayoutBlock[] {
+  if (!textColor) return children;
+  return children.map((child) => {
+    if (
+      (child.kind === 'paragraph' || child.kind === 'heading' || child.kind === 'labeled') &&
+      !child.color
+    ) {
+      return { ...child, color: textColor };
+    }
+    if (child.kind === 'panel' && !child.textColor) {
+      return { ...child, textColor };
+    }
+    return child;
+  });
+}
+
 /**
  * Resolve one node (with its children) in the given instance context.
  * Returns 0..n resolved blocks — file-bound nodes without file context
@@ -204,6 +240,10 @@ function resolveNode(
 
   switch (node.type) {
     case 'text': {
+      // §4 — text nodes bound to IMAGE-kind fields render nothing: the
+      // image node renders the actual image; the raw asset id is data,
+      // never document text.
+      if (node.fieldId && boundFieldKind(ctx, node.fieldId) === 'image') return [];
       const source = node.fieldId ? fieldValue(ctx, node.fieldId) : (node.text ?? '');
       const text = expandBlockText(source, inputs, ctx, entry);
       if (!text.trim()) return [];
@@ -211,13 +251,24 @@ function resolveNode(
         const label = expandBlockText(labelFor(ctx, node.fieldId) || 'Text', inputs, ctx, entry);
         return [{ kind: 'labeled', label, text, ...textProps(node) }];
       }
-      return [{ kind: 'paragraph', text, ...textProps(node) }];
+      return [{ kind: 'paragraph', text, nodeId: node.id, ...textProps(node) }];
     }
     case 'heading': {
+      // §4 — same guard for headings bound to image-kind fields.
+      if (node.fieldId && boundFieldKind(ctx, node.fieldId) === 'image') return [];
       const source = node.fieldId ? fieldValue(ctx, node.fieldId) : (node.text ?? '');
       const text = expandBlockText(source, inputs, ctx, entry);
       if (!text.trim()) return [];
-      return [{ kind: 'heading', level: style.level ?? 2, text, ...textProps(node) }];
+      return [{
+        kind: 'heading',
+        level: style.level ?? 2,
+        text,
+        nodeId: node.id,
+        // §17 — block headings repeat per file: the anchor is unique per
+        // instance; standalone headings anchor by node id alone.
+        anchorId: entry ? `${node.id}-f-${entry.file.highlighted.fileId}` : node.id,
+        ...textProps(node),
+      }];
     }
     case 'description': {
       if (!entry || !details?.description?.trim()) return [];
@@ -358,12 +409,14 @@ function resolveNode(
       return [
         {
           kind: 'panel',
+          nodeId: node.id,
           fillColor: style.fillColor ?? undefined,
           borderColor: style.borderColor ?? undefined,
           borderWidthPt: style.borderWidthPt,
           radiusPt: style.radiusPt,
           paddingPt: style.paddingPt,
-          children,
+          textColor: style.textColor ?? undefined,
+          children: applyPanelTextColor(style.textColor, children),
         },
       ];
     }
@@ -375,7 +428,7 @@ function resolveNode(
         columns.push(stack.flatMap((c) => resolveNode(c, inputs, ctx, entry)));
       }
       if (columns.every((c) => c.length === 0)) return [];
-      return [{ kind: 'columns', count: count as 2 | 3, columns }];
+      return [{ kind: 'columns', nodeId: node.id, count: count as 2 | 3, columns }];
     }
     default:
       return [];
@@ -413,6 +466,15 @@ function resolveBlockInstance(
 /**
  * Resolve the whole template into the final content stream.
  * Pure — no React, no DOM, no exporter specifics (§17).
+ *
+ * Guarantees (§3/§7):
+ *   - FILE-LEVEL standalone content resolves first (a document title
+ *     heading, a closing summary… — content that belongs to no Section).
+ *   - Every Section of the layout appears in every resolved document, in
+ *     layout order — Sections are the document skeleton and are NEVER
+ *     divided between projects/exports. A Section whose content resolves
+ *     to nothing for the current data still keeps its structural presence
+ *     via a fallback heading carrying the section's name.
  */
 export function resolveCustomLayout(
   template: CustomLayoutTemplate,
@@ -422,11 +484,11 @@ export function resolveCustomLayout(
   const blocks: ResolvedLayoutBlock[] = [];
 
   for (const section of template.sections) {
-    if (section.pageBreakBefore && blocks.length > 0) {
-      blocks.push({ kind: 'pageBreak' });
-    }
-
     const sectionValues = inputs.sectionFieldValues[section.id] ?? {};
+    // §3 — resolve the section into its own slice first so the page-break
+    // marker never masquerades as "content" (an empty section must still
+    // keep its structural place instead of emitting a bare empty page).
+    const sectionBlocks: ResolvedLayoutBlock[] = [];
 
     for (const child of section.children) {
       if (child.kind === 'node') {
@@ -435,22 +497,61 @@ export function resolveCustomLayout(
           fieldValues: sectionValues,
           sectionValues,
           fieldLabels: fieldLabelMap(section),
+          fieldKinds: fieldKindMap(section),
         };
-        blocks.push(...resolveNode(child.node, inputs, ctx, undefined));
+        sectionBlocks.push(...resolveNode(child.node, inputs, ctx, undefined));
       } else {
         // Block pattern — exactly one instance per assigned file (§3).
         const labelMap = {
           ...fieldLabelMap(section),
           ...fieldLabelMapOfBlock(child.block),
         };
+        const kindMap = fieldKindMapOfBlock(section, child.block);
         for (const entry of orderedAssignedFiles(child.block.id, inputs, index)) {
           const ctx: ResolutionContext = {
             fieldValues: sectionValues,
             sectionValues,
             fieldLabels: labelMap,
+            fieldKinds: kindMap,
           };
-          blocks.push(...resolveBlockInstance(child.block.nodes, inputs, ctx, entry));
+          sectionBlocks.push(...resolveBlockInstance(child.block.nodes, inputs, ctx, entry));
         }
+      }
+    }
+
+    // §3 — a Section that produced ZERO content for this document (no
+    // filled fields, no assigned files in this document's scope) still
+    // keeps its place in the document skeleton. The fallback heading is
+    // the section's own name from the layout — never invented data. The
+    // nodeId is derived from the section id, so the outline anchor is
+    // stable across resolutions.
+    if (sectionBlocks.length === 0 && section.children.length > 0) {
+      sectionBlocks.push({
+        kind: 'heading',
+        level: 2,
+        text: expandBlockText(section.name, inputs, {
+          fieldValues: sectionValues,
+          sectionValues,
+        }),
+        nodeId: `sec-${section.id}`,
+      });
+    }
+
+    if (section.pageBreakBefore && blocks.length > 0) {
+      blocks.push({ kind: 'pageBreak' });
+    }
+    blocks.push(...sectionBlocks);
+  }
+
+  // §7 — FILE-LEVEL standalone content resolves BEFORE the sections
+  // (it models content above the whole section flow, e.g. a title).
+  const fileChildren = template.children ?? [];
+  const fileLevel: ResolvedLayoutBlock[] = [];
+  if (fileChildren.length > 0) {
+    const ctx: ResolutionContext = { fieldValues: {}, fieldLabels: {}, fieldKinds: {} };
+    for (const child of fileChildren) {
+      if (child.kind === 'node') {
+        fileLevel.push(...resolveNode(child.node, inputs, ctx, undefined));
       }
     }
   }
@@ -458,7 +559,7 @@ export function resolveCustomLayout(
   return {
     templateId: template.id,
     templateName: template.name,
-    blocks,
+    blocks: [...fileLevel, ...blocks],
   };
 }
 
@@ -473,4 +574,19 @@ function fieldLabelMapOfBlock(block: { fields: Array<{ id: string; label: string
   const map: Record<string, string> = {};
   for (const f of block.fields) map[f.id] = f.label;
   return map;
+}
+
+/** fieldId → kind map for a section's fields (§4 image-field guard). */
+function fieldKindMap(section: TemplateSection): Record<string, TemplateFieldType> {
+  const map: Record<string, TemplateFieldType> = {};
+  for (const f of section.fields) map[f.id] = f.kind;
+  return map;
+}
+
+/** Combined section + block field kinds for block instances (§4). */
+function fieldKindMapOfBlock(
+  section: TemplateSection,
+  block: { fields: Array<{ id: string; kind: TemplateFieldType }> },
+): Record<string, TemplateFieldType> {
+  return { ...fieldKindMap(section), ...Object.fromEntries(block.fields.map((f) => [f.id, f.kind])) };
 }

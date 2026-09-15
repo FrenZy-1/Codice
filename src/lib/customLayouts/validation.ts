@@ -153,6 +153,25 @@ export function unassignedFileIds(input: LayoutValidationInput): string[] {
 }
 
 /**
+ * §21 — the derived "layout needs attention" condition behind the top-right
+ * Layout button's dot. TRUE only when something actionable exists:
+ *   - a required field value is missing (validateCustomLayout), or
+ *   - a selected file is assigned to no block (unassignedFileIds).
+ * FALSE when there is nothing to do: no applied layout, an empty workspace,
+ * or a fully wired layout. It is never a decorative badge.
+ */
+export function layoutAttentionRequired(
+  template: CustomLayoutTemplate | null | undefined,
+  input: Omit<LayoutValidationInput, 'template'>,
+): boolean {
+  if (!template) return false;
+  // Nothing uploaded/selected → nothing to wire yet, no dot.
+  if (input.projects.every((p) => p.files.length === 0)) return false;
+  if (validateCustomLayout({ ...input, template }).length > 0) return true;
+  return unassignedFileIds({ ...input, template }).length > 0;
+}
+
+/**
  * Render the missing list as the toast's multi-line message (§5):
  * `Main.kt is missing: • Description • Output Screenshot`
  */

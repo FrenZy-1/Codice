@@ -141,7 +141,7 @@ export function OutlinePanel({
             data-kind={entry.kind}
             data-outline-row={entry.id}
             onClick={() => onNavigate(entry.id)}
-            title={entry.detail ? `${entry.label} · ${entry.detail}` : entry.label}
+            title={entry.tooltip ?? (entry.detail ? `${entry.label} · ${entry.detail}` : entry.label)}
           >
             <span
               className="codice-outline-glyph"

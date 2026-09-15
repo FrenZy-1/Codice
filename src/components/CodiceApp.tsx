@@ -20,7 +20,7 @@
  * spec §13.)
  */
 
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { AppStateProvider, useAppState } from '@/hooks/useAppState';
 import { ToastProvider, useToast } from '@/components/common/Toast';
 import { MetadataDialog } from '@/components/common/MetadataDialog';
@@ -44,9 +44,14 @@ import {
   Printer,
   Compass,
   Layers,
+  Github,
   ChevronLeft,
   ChevronRight,
 } from '@/components/common/Icons';
+import {
+  layoutAttentionRequired,
+} from '@/lib/customLayouts/validation';
+import type { DocumentProject } from '@/types';
 import type { UIThemeMode } from '@/lib/themes/uiTheme';
 import { ensureSyntaxThemeCatalog } from '@/lib/themes/syntaxThemeRegistry';
 
@@ -145,6 +150,51 @@ function AppInner() {
     0,
   );
 
+  // §21 — the Layout button's attention dot reflects REAL layout state:
+  // unassigned selected files or missing required field values. It is not
+  // a decorative "layout applied" badge — a fully wired layout shows no dot.
+  const layoutNeedsAttention = useMemo(() => {
+    const applied =
+      state.customLayouts.find((t) => t.id === state.appliedLayoutId) ?? null;
+    const docProjects: DocumentProject[] = state.projects.map((p) => ({
+      id: p.id,
+      label: p.label,
+      folderName: p.folderName,
+      structurePaths: [],
+      files: p.files
+        .filter((f) => !f.excluded && getSelectedFiles(p.id).has(f.id))
+        .map((f) => ({
+          projectId: p.id,
+          projectLabel: p.label,
+          relativePath: f.relativePath,
+          language: f.language,
+          highlighted: {
+            fileId: f.id,
+            relativePath: f.relativePath,
+            language: f.language,
+            lines: [],
+          },
+          sizeBytes: f.size,
+        })),
+    }));
+    return layoutAttentionRequired(applied, {
+      projects: docProjects,
+      fileDetails: state.fileDetails,
+      fileFieldValues: state.fileFieldValues,
+      sectionFieldValues: state.sectionFieldValues,
+      fileAssignments: state.layoutAssignments,
+    });
+  }, [
+    state.customLayouts,
+    state.appliedLayoutId,
+    state.projects,
+    state.fileDetails,
+    state.fileFieldValues,
+    state.sectionFieldValues,
+    state.layoutAssignments,
+    getSelectedFiles,
+  ]);
+
   const handleReset = () => {
     if (
       confirm(
@@ -219,7 +269,7 @@ function AppInner() {
   return (
     <div className="flex h-full flex-col">
       {/* Top bar */}
-      <header className="flex items-center gap-3 border-b border-app bg-surface px-4 py-2">
+      <header className="flex flex-wrap items-center gap-x-3 gap-y-1.5 border-b border-app bg-surface px-3 py-2 sm:px-4">
         <div className="flex items-center gap-2">
           <div className="flex h-7 w-7 items-center justify-center rounded bg-brand-600 text-white">
             <Code size={16} />
@@ -234,7 +284,7 @@ function AppInner() {
           </div>
         </div>
 
-        <div className="ml-auto flex items-center gap-2">
+        <div className="ml-auto flex flex-wrap items-center justify-end gap-1 sm:gap-2">
           <div className="hidden sm:flex items-center gap-2 text-xs text-secondary">
             <Sparkles size={12} />
             <span>
@@ -303,15 +353,28 @@ function AppInner() {
           >
             <Layers size={14} />
             <span className="hidden sm:inline">Layouts</span>
-            {state.appliedLayoutId && (
+            {/* §21 — attention dot ONLY when the applied layout genuinely
+                needs action (unassigned files / missing required values). */}
+            {layoutNeedsAttention && (
               <span
                 className="h-1.5 w-1.5 flex-shrink-0 rounded-full"
                 style={{ background: 'var(--color-accent)' }}
                 aria-hidden="true"
-                title="A custom layout is applied"
+                title="This layout needs attention — files unassigned or required fields missing"
               />
             )}
           </button>
+          {/* §22 — GitHub repository link. */}
+          <a
+            href="https://github.com/FrenZy-1/Codice"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="btn-ghost"
+            title="Codice on GitHub (opens in a new tab)"
+            aria-label="Codice on GitHub"
+          >
+            <Github size={14} />
+          </a>
           <button
             onClick={handleReset}
             className="btn-ghost"

@@ -6,7 +6,7 @@
  * per directory.
  */
 
-import { useMemo, useState, useCallback } from 'react';
+import { Fragment, useMemo, useState, useCallback } from 'react';
 import type { DiscoveredFile, ProjectEntry } from '@/types';
 import { useAppState } from '@/hooks/useAppState';
 import { formatBytes } from '@/lib/fileDiscovery';
@@ -20,19 +20,24 @@ import {
 } from '@/components/FileProperties/FileContextMenu';
 import { FilePropertiesDialog } from '@/components/FileProperties/FilePropertiesDialog';
 
-interface TreeNode {
+export interface TreeNode {
   name: string;
   path: string;
   isDir: boolean;
-  file?: DiscoveredFile;
+  /** Leaf files. May hold MORE THAN ONE file when two merged projects
+   * contribute the exact same relative path (§12 — a merged document must
+   * keep every file visible, even when paths collide). */
+  files: DiscoveredFile[];
   children: Map<string, TreeNode>;
 }
 
-function buildTree(files: DiscoveredFile[]): TreeNode {
+/** Exported for tests — §12 duplicate-path leaves. */
+export function buildTree(files: DiscoveredFile[]): TreeNode {
   const root: TreeNode = {
     name: '',
     path: '',
     isDir: true,
+    files: [],
     children: new Map(),
   };
   for (const file of files) {
@@ -47,11 +52,12 @@ function buildTree(files: DiscoveredFile[]): TreeNode {
           name: part,
           path,
           isDir: !isLast,
-          file: isLast ? file : undefined,
+          files: [],
           children: new Map(),
         });
       }
       node = node.children.get(part)!;
+      if (isLast) node.files.push(file);
     }
   }
   return root;
@@ -173,8 +179,8 @@ export function FileTree({
         for (const child of n.children.values()) {
           if (child.isDir) {
             collect(child, acc);
-          } else if (child.file) {
-            acc.push(child.file.id);
+          } else {
+            for (const f of child.files) acc.push(f.id);
           }
         }
       };
@@ -234,10 +240,12 @@ export function FileTree({
       const visit = (n: TreeNode) => {
         for (const c of n.children.values()) {
           if (c.isDir) visit(c);
-          else if (c.file) {
-            const sel = isFileSelected(c.file);
-            if (sel) noneSelected = false;
-            else allSelected = false;
+          else {
+            for (const f of c.files) {
+              const sel = isFileSelected(f);
+              if (sel) noneSelected = false;
+              else allSelected = false;
+            }
           }
         }
       };
@@ -290,76 +298,33 @@ export function FileTree({
       );
     }
 
-    const file = node.file!;
-    const isSelected = isFileSelected(file);
-    const isExcluded =
-      file.excluded && !state.inclusions[project.id]?.has(file.id);
-    // Only duplicated filenames get path context — unique names stay clean.
-    const needsContext = duplicateNames.has(file.name);
-
+    // §12 — a leaf may hold MULTIPLE files with the exact same path
+    // (merged projects). Each file renders as its own selectable row keyed
+    // by its unique id — merged duplicates never collapse into one. The
+    // keyed Fragment keeps React's list reconciliation happy when renderNode
+    // returns multiple rows.
     return (
-      <div
-        key={`file-${fileSelectionKey(file)}`}
-        className={`group flex items-start gap-1.5 rounded px-1.5 py-0.5 hover-surface ${
-          isExcluded ? 'opacity-50' : ''
-        }`}
-        style={{ paddingLeft: depth * 12 + 22 }}
-        onContextMenu={(e) => {
-          e.preventDefault();
-          openMenu(file, e.clientX, e.clientY);
-        }}
-      >
-        <input
-          type="checkbox"
-          className="mt-1 h-3.5 w-3.5"
-          checked={isSelected}
-          onChange={(e) => toggleFile(file, e.target.checked)}
-          aria-label={`Select ${file.relativePath}`}
-        />
-        <span className="mt-0.5 text-secondary">
-          <File size={13} />
-        </span>
-        <span className="min-w-0 flex-1">
-          <span className="block truncate text-sm text-primary" title={file.relativePath}>
-            {file.name}
-          </span>
-          {needsContext && duplicateContext(file) && (
-            <span
-              className="block truncate text-[10px] text-muted"
-              title={file.relativePath}
-            >
-              {duplicateContext(file)}
-            </span>
-          )}
-        </span>
-        {file.language && (
-          <span className="mt-0.5 text-[10px] text-muted uppercase tracking-wide hidden md:inline">
-            {languageLabel(file.language)}
-          </span>
-        )}
-        <span className="mt-0.5 text-[10px] text-muted pr-2 tabular-nums">
-          {formatBytes(file.size)}
-        </span>
-        {isExcluded && (
-          <span className="mt-0.5 text-[10px] text-warning pr-2">
-            {file.exclusionReason ?? 'excluded'}
-          </span>
-        )}
-        <button
-          type="button"
-          className="mt-0.5 flex-shrink-0 rounded p-0.5 text-muted opacity-0 transition-opacity hover:text-primary focus-visible:opacity-100 group-hover:opacity-100"
-          title={`File actions for ${file.name} — right-click works too`}
-          aria-label={`File actions for ${file.name}`}
-          aria-haspopup="menu"
-          onClick={(e) => {
-            e.stopPropagation();
-            const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
-            openMenu(file, rect.left, rect.bottom + 2, e.currentTarget as HTMLElement);
-          }}
-        >
-          <MoreVertical size={13} />
-        </button>
-      </div>
+      <Fragment key={`leaf-${node.path}`}>
+        {node.files.map((file) => {
+          const isSelected = isFileSelected(file);
+          const isExcluded =
+            file.excluded && !state.inclusions[project.id]?.has(file.id);
+          // Only duplicated filenames get path context — unique names stay clean.
+          const needsContext = duplicateNames.has(file.name);
+          return (
+          <FileRow
+            key={`file-${fileSelectionKey(file)}`}
+            file={file}
+            isSelected={isSelected}
+            isExcluded={isExcluded}
+            needsContext={needsContext}
+            depth={depth}
+            onToggle={toggleFile}
+            onContextMenu={openMenu}
+          />
+          );
+        })}
+      </Fragment>
     );
   };
 
@@ -398,6 +363,95 @@ export function FileTree({
           onClose={() => setPropertiesTarget(null)}
         />
       )}
+    </div>
+  );
+}
+
+/** One selectable file row (§12) — identical-path files render as separate
+ * rows because the key is the unique file id, never the path. */
+function FileRow({
+  file,
+  isSelected,
+  isExcluded,
+  needsContext,
+  depth,
+  onToggle,
+  onContextMenu,
+}: {
+  file: DiscoveredFile;
+  isSelected: boolean;
+  isExcluded: boolean;
+  needsContext: boolean;
+  depth: number;
+  onToggle: (file: DiscoveredFile, selected: boolean) => void;
+  onContextMenu: (
+    file: DiscoveredFile,
+    x: number,
+    y: number,
+    invoker?: HTMLElement | null,
+  ) => void;
+}) {
+  return (
+    <div
+      className={`group flex items-start gap-1.5 rounded px-1.5 py-0.5 hover-surface ${
+        isExcluded ? 'opacity-50' : ''
+      }`}
+      style={{ paddingLeft: depth * 12 + 22 }}
+      onContextMenu={(e) => {
+        e.preventDefault();
+        onContextMenu(file, e.clientX, e.clientY);
+      }}
+    >
+      <input
+        type="checkbox"
+        className="mt-1 h-3.5 w-3.5"
+        checked={isSelected}
+        onChange={(e) => onToggle(file, e.target.checked)}
+        aria-label={`Select ${file.relativePath}`}
+      />
+      <span className="mt-0.5 text-secondary">
+        <File size={13} />
+      </span>
+      <span className="min-w-0 flex-1">
+        <span className="block truncate text-sm text-primary" title={file.relativePath}>
+          {file.name}
+        </span>
+        {needsContext && duplicateContext(file) && (
+          <span
+            className="block truncate text-[10px] text-muted"
+            title={file.relativePath}
+          >
+            {duplicateContext(file)}
+          </span>
+        )}
+      </span>
+      {file.language && (
+        <span className="mt-0.5 text-[10px] text-muted uppercase tracking-wide hidden md:inline">
+          {languageLabel(file.language)}
+        </span>
+      )}
+      <span className="mt-0.5 text-[10px] text-muted pr-2 tabular-nums">
+        {formatBytes(file.size)}
+      </span>
+      {isExcluded && (
+        <span className="mt-0.5 text-[10px] text-warning pr-2">
+          {file.exclusionReason ?? 'excluded'}
+        </span>
+      )}
+      <button
+        type="button"
+        className="mt-0.5 flex-shrink-0 rounded p-0.5 text-muted opacity-0 transition-opacity hover:text-primary focus-visible:opacity-100 group-hover:opacity-100"
+        title={`File actions for ${file.name} — right-click works too`}
+        aria-label={`File actions for ${file.name}`}
+        aria-haspopup="menu"
+        onClick={(e) => {
+          e.stopPropagation();
+          const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+          onContextMenu(file, rect.left, rect.bottom + 2, e.currentTarget as HTMLElement);
+        }}
+      >
+        <MoreVertical size={13} />
+      </button>
     </div>
   );
 }

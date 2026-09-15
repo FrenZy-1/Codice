@@ -1564,10 +1564,11 @@ function renderOdtLayoutBlock(
     }
     case 'panel': {
       ctx.flags.tables = true;
+      // §25 — panels without their own style use the preset's panel colors.
       const names = layoutTableStyleNames({
         columns: 1,
-        fillColor: block.fillColor ?? null,
-        borderColor: block.borderColor ?? null,
+        fillColor: block.fillColor ?? ctx.options.panelFillColor ?? null,
+        borderColor: block.borderColor ?? ctx.options.panelBorderColor ?? null,
         borderWidthPt: block.borderWidthPt ?? 1,
         paddingPt: block.paddingPt ?? 8,
         widthCm: ctx.contentWCm,

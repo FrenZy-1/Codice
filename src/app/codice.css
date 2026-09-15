@@ -429,12 +429,23 @@ input[type='color'] {
 /* Compact variant — shown once projects are loaded (spec §15): the dropzone
    shrinks to a single row so the file tree gets the vertical space. */
 .codice-dropzone-compact {
-  padding: 0.5rem 0.625rem;
-  border-width: 1.5px;
+  /* §15 — the COLLAPSED upload area must not keep a large background
+     block behind the Folder/Files/Images/ZIP pills. Transparent, no
+     border, no padding — just the pills (plus the compact hint text).
+     Drag & drop and the click-to-pick behavior are unchanged; the drag
+     active/pulse states below still draw attention when used. */
+  padding: 0.125rem 0;
+  border: none;
   border-radius: 0.5rem;
+  background: transparent;
   text-align: left;
   /* Clicking opens the native folder picker — it is a button (§12 pointer). */
   cursor: pointer;
+}
+
+.codice-dropzone-compact:hover {
+  background: transparent;
+  border: none;
 }
 
 .codice-dropzone-compact.codice-dropzone-active {

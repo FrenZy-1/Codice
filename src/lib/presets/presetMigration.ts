@@ -93,6 +93,9 @@ export const DEFAULT_DOCUMENT_COLORS = {
   success: '#1a7f37',
   warning: '#9a6700',
   error: '#cf222e',
+  panelFill: '#f6f8fa',
+  panelBorder: '#d0d7de',
+  panelText: '#1f2328',
 };
 
 const HEADER_FOOTER_LAYOUTS: HeaderFooterLayout[] = ['single', 'dual', 'triple'];

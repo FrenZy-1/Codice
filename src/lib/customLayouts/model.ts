@@ -86,6 +86,8 @@ export interface TemplateBlockStyle {
   caption?: boolean;
   /** Render a field node with its label above the value (labeled style). */
   label?: boolean;
+  /** Panel text color — default color for text rendered inside a panel. */
+  textColor?: string;
 }
 
 /**
@@ -158,6 +160,13 @@ export interface CustomLayoutTemplate {
   createdAt: number;
   updatedAt: number;
   sections: TemplateSection[];
+  /**
+   * FILE-LEVEL standalone content (§7) — nodes that live directly in the
+   * File Layout without belonging to any Section (a document title heading,
+   * a closing summary, a divider…). Resolved BEFORE the sections. Optional
+   * for backward compatibility; `normalizeTemplate` guarantees the array.
+   */
+  children?: SectionChild[];
 }
 
 /* ------------------------------------------------------------------ */
@@ -191,8 +200,16 @@ export interface ResolvedTextProps {
 }
 
 export type ResolvedLayoutBlock =
-  | ({ kind: 'heading'; level: 1 | 2 | 3; text: string } & ResolvedTextProps)
-  | ({ kind: 'paragraph'; text: string } & ResolvedTextProps)
+  | ({ kind: 'heading'; level: 1 | 2 | 3; text: string;
+       /** Stable source-node id — per-node styling identity (§25/§26). */
+       nodeId?: string;
+       /**
+        * Per-INSTANCE outline anchor (§17/§26). Block headings repeat once
+        * per assigned file, so the anchor adds the file id; standalone
+        * headings anchor by node id alone.
+        */
+       anchorId?: string } & ResolvedTextProps)
+  | ({ kind: 'paragraph'; text: string; nodeId?: string } & ResolvedTextProps)
   /** A labeled content block: file description / summary / note / field text. */
   | ({ kind: 'labeled'; label: string; text: string } & ResolvedTextProps)
   /** The file's standard header block (path/language/size…). */
@@ -219,17 +236,21 @@ export type ResolvedLayoutBlock =
   /** A visual container: fill/border/padding around a stack of blocks (§6). */
   | {
       kind: 'panel';
+      /** Stable source-node id — per-panel theme styling (§25/§26). */
+      nodeId?: string;
       fillColor?: string | null;
       borderColor?: string | null;
       borderWidthPt?: number;
       radiusPt?: number;
       paddingPt?: number;
+      /** Default text color for content inside the panel (§25). */
+      textColor?: string;
       /** Explicit box height for EMPTY panels (dividers/spacer boxes). */
       heightPt?: number;
       children: ResolvedLayoutBlock[];
     }
   /** Side-by-side regions: rendered as columns where the format supports it. */
-  | { kind: 'columns'; count: 2 | 3; columns: ResolvedLayoutBlock[][] }
+  | { kind: 'columns'; nodeId?: string; count: 2 | 3; columns: ResolvedLayoutBlock[][] }
   /** The standard table of contents. */
   | { kind: 'toc' }
   /** The document metadata (title page) block. */
@@ -251,6 +272,8 @@ export interface ResolutionContext {
   sectionValues?: Record<string, string>;
   /** fieldId → label (for labeled rendering of field-backed nodes). */
   fieldLabels?: Record<string, string>;
+  /** fieldId → kind (§4 — image-kind fields must never render as text). */
+  fieldKinds?: Record<string, TemplateFieldType>;
 }
 
 /** Stable id generator for sections/blocks/nodes/fields/templates. */
@@ -509,17 +532,34 @@ export const SECTION_TYPE_PRESETS: Record<SectionTypeId, SectionTypePreset> = {
   },
 };
 
+/**
+ * §26 hardening — section types are DATA (persisted, imported, hand-edited).
+ * An unknown/legacy type string must degrade to an empty custom section,
+ * never crash a render or the reducer.
+ */
+export function sanitizeSectionType(type: string | undefined | null): SectionTypeId {
+  return type && type in SECTION_TYPE_PRESETS
+    ? (type as SectionTypeId)
+    : 'custom';
+}
+
+/** Safe label/description lookup for persisted section types. */
+export function sectionTypePreset(type: string | undefined | null): SectionTypePreset {
+  return SECTION_TYPE_PRESETS[sanitizeSectionType(type)];
+}
+
 /** Create an empty section of the given type. */
 export function createSection(
   type: SectionTypeId,
   name?: string,
 ): TemplateSection {
-  const preset = SECTION_TYPE_PRESETS[type];
+  const safeType = sanitizeSectionType(type);
+  const preset = SECTION_TYPE_PRESETS[safeType];
   const built = preset.build();
   return {
     id: genLayoutId('sec'),
     name: name ?? preset.label,
-    type,
+    type: safeType,
     fields: built.fields,
     children: built.children,
     pageBreakBefore: false,
@@ -742,4 +782,198 @@ export function assignedFileIds(
     for (const id of assignments[block.id] ?? []) ids.add(id);
   });
   return ids;
+}
+
+/* ------------------------------------------------------------------ */
+/* v2.1 — File-level standalone content + field/content sync (§5-§8)   */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Collect the field ids referenced by a template node tree (field-backed
+ * nodes), depth-first. Container children are visited too.
+ */
+export function nodeFieldIds(node: TemplateNode): string[] {
+  const out: string[] = [];
+  if (node.fieldId) out.push(node.fieldId);
+  for (const stack of node.children ?? []) {
+    for (const child of stack) out.push(...nodeFieldIds(child));
+  }
+  return out;
+}
+
+/**
+ * Field ids used by a section's content, in Section Content order (§6).
+ * This is the authoritative ordering — the Section Fields settings are
+ * DERIVED from it.
+ */
+export function sectionFieldIdsInContentOrder(section: TemplateSection): string[] {
+  const out: string[] = [];
+  for (const child of section.children) {
+    if (child.kind === 'node') out.push(...nodeFieldIds(child.node));
+    // Block children bind to BLOCK fields (per-file) — never to the
+    // section's own field list, so they contribute nothing here.
+  }
+  return [...new Set(out)];
+}
+
+/**
+ * The section's field definitions, ordered to match the Section Content
+ * structure (§6). Fields referenced by content but missing a definition are
+ * synthesized so the content always has settings; unreferenced definitions
+ * (orphans created by older builds or repeated type seeds) are dropped.
+ */
+export function sectionFieldsInContentOrder(section: TemplateSection): TemplateFieldDefinition[] {
+  const byId = new Map(section.fields.map((f) => [f.id, f]));
+  const used = new Set<string>();
+  const out: TemplateFieldDefinition[] = [];
+  for (const id of sectionFieldIdsInContentOrder(section)) {
+    used.add(id);
+    const existing = byId.get(id);
+    out.push(
+      existing ?? { id, label: 'Field', kind: 'text', required: false },
+    );
+  }
+  return out;
+}
+
+/**
+ * Normalize a v2 template in place (returns a new object):
+ *   - guarantees `children` exists at the FILE level (§7 standalone content),
+ *   - guarantees every section's field list is synchronized with its content
+ *     (no orphans, no accidental duplicates, content order wins — §5/§6),
+ *   - guarantees every node has a stable id (§26).
+ */
+export function normalizeTemplate(t: CustomLayoutTemplate): CustomLayoutTemplate {
+  const next = cloneTemplate(t);
+  if (!Array.isArray(next.children)) next.children = [];
+  // Give every node (and container descendant) an id when missing (§26).
+  const ensureIds = (node: TemplateNode): void => {
+    if (!node.id) node.id = genLayoutId('n');
+    for (const stack of node.children ?? []) {
+      for (const child of stack) ensureIds(child);
+    }
+  };
+  const ensureChildIds = (children: SectionChild[]): void => {
+    for (const child of children) {
+      if (!child.id) child.id = genLayoutId('ch');
+      if (child.kind === 'node') ensureIds(child.node);
+      else for (const n of child.block.nodes) ensureIds(n);
+    }
+  };
+  ensureChildIds(next.children);
+  for (const section of next.sections) {
+    ensureChildIds(section.children);
+    // §26 — persisted/imported type strings are data; unknown ids become
+    // custom so every SECTION_TYPE_PRESETS lookup stays total.
+    section.type = sanitizeSectionType(section.type);
+    // §5/§6 — content is authoritative; rebuild the field list from it.
+    section.fields = sectionFieldsInContentOrder(section);
+  }
+  return next;
+}
+
+/**
+ * Append a preset structure ONCE for one explicit user action (§9). Fields
+ * merge by id (no phantom duplicates when the same preset is applied
+ * twice) and the built content children are appended to the section.
+ */
+export function appendSectionPreset(
+  section: TemplateSection,
+  type: SectionTypeId,
+): void {
+  const safeType = sanitizeSectionType(type);
+  const built = SECTION_TYPE_PRESETS[safeType].build();
+  section.type = safeType;
+  const existing = new Set(section.fields.map((f) => f.id));
+  section.fields.push(...built.fields.filter((f) => !existing.has(f.id)));
+  section.children.push(...built.children);
+}
+
+/** Create a field-bound content node pair (§5/§6): the field definition
+ * plus a node bound to it, added together so content and settings stay in
+ * sync by construction. */
+export function createBoundFieldNode(
+  kind: TemplateFieldType,
+  label: string,
+  nodeType: 'text' | 'heading' | 'image',
+  nodeExtra: Partial<TemplateNode> = {},
+): { field: TemplateFieldDefinition; node: TemplateNode } {
+  const f: TemplateFieldDefinition = {
+    id: genLayoutId('fld'),
+    label,
+    kind,
+    required: false,
+  };
+  const node: TemplateNode = { id: genLayoutId('n'), type: nodeType, fieldId: f.id, ...nodeExtra };
+  return { field: f, node };
+}
+
+
+/* ------------------------------------------------------------------ */
+/* Duplication (§39 — section/block duplicate with fresh identity)      */
+/* ------------------------------------------------------------------ */
+
+/** Deep-clone a node tree with fresh ids (node + descendants). */
+function cloneNodeFresh(node: TemplateNode): TemplateNode {
+  const copy = cloneTemplate(node);
+  copy.id = genLayoutId('n');
+  for (const stack of copy.children ?? []) {
+    for (const child of stack) {
+      const fresh = cloneNodeFresh(child);
+      Object.assign(child, fresh);
+    }
+  }
+  return copy;
+}
+
+/**
+ * Duplicate a BLOCK definition with fresh ids (§39). File assignments are
+ * keyed by block id, so the copy starts UNASSIGNED — the user picks files
+ * for it explicitly (never implicit re-assignment).
+ */
+export function duplicateBlockDef(block: TemplateBlockDef): TemplateBlockDef {
+  return {
+    id: genLayoutId('blk'),
+    name: `${block.name} (copy)`,
+    fields: cloneTemplate(block.fields).map((f) => ({ ...f, id: genLayoutId('fld') })),
+    nodes: block.nodes.map(cloneNodeFresh),
+  };
+}
+
+/**
+ * Duplicate a SECTION (§39): fresh section/child/field/node ids, same
+ * structure. Field VALUES live in app state keyed by section id, so the
+ * copy starts with empty values.
+ */
+export function duplicateSection(section: TemplateSection): TemplateSection {
+  const copy = cloneTemplate(section);
+  copy.id = genLayoutId('sec');
+  copy.name = `${section.name} (copy)`;
+  const fieldIdMap = new Map<string, string>();
+  copy.fields = section.fields.map((f) => {
+    const id = genLayoutId('fld');
+    fieldIdMap.set(f.id, id);
+    return { ...f, id };
+  });
+  const remapNode = (node: TemplateNode): TemplateNode => {
+    node.id = genLayoutId('n');
+    if (node.fieldId && fieldIdMap.has(node.fieldId)) {
+      node.fieldId = fieldIdMap.get(node.fieldId);
+    }
+    for (const stack of node.children ?? []) {
+      for (const child of stack) remapNode(child);
+    }
+    return node;
+  };
+  for (const child of copy.children) {
+    child.id = genLayoutId('ch');
+    if (child.kind === 'node') {
+      remapNode(child.node);
+    } else {
+      // §39 — block duplicates start unassigned (assignments key by block id).
+      const fresh = duplicateBlockDef(child.block);
+      child.block = fresh;
+    }
+  }
+  return copy;
 }

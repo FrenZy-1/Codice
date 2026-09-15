@@ -35,6 +35,18 @@ export function DocumentOrderPanel() {
     fileId: string;
     below: boolean;
   } | null>(null);
+  // §20 — per-project collapse. Opening ONE project reveals its files like
+  // the Template Settings accordion; the first project starts expanded.
+  // Collapse state is session-local and never touches fileOrder.
+  const [collapsedProjects, setCollapsedProjects] = useState<Set<string>>(new Set());
+  const toggleProject = (projectId: string) => {
+    setCollapsedProjects((prev) => {
+      const next = new Set(prev);
+      if (next.has(projectId)) next.delete(projectId);
+      else next.add(projectId);
+      return next;
+    });
+  };
 
   /** Selected files of every project in effective document order. */
   const groups = useMemo(
@@ -114,12 +126,26 @@ export function DocumentOrderPanel() {
           id="codice-document-order"
           className="codice-fade-in max-h-56 space-y-2 overflow-y-auto px-2 pb-2"
         >
-          {groups.map(({ project, files }) => (
+          {groups.map(({ project, files }, groupIdx) => {
+            const isCollapsed =
+              collapsedProjects.has(project.id) ||
+              (collapsedProjects.size === 0 && groupIdx > 0 && groups.length > 2);
+            return (
             <div key={project.id}>
               <div className="flex items-center gap-1.5 px-1 py-0.5">
-                <span className="min-w-0 flex-1 truncate text-[10px] font-semibold uppercase tracking-wide text-muted">
-                  {project.label}
-                </span>
+                <button
+                  type="button"
+                  className="flex min-w-0 flex-1 items-center gap-1 text-left"
+                  onClick={() => toggleProject(project.id)}
+                  aria-expanded={!isCollapsed}
+                  aria-label={`${isCollapsed ? 'Expand' : 'Collapse'} ${project.label}`}
+                  title={isCollapsed ? `Expand ${project.label}` : `Collapse ${project.label}`}
+                >
+                  {isCollapsed ? <ChevronRight size={11} /> : <ChevronDown size={11} />}
+                  <span className="min-w-0 flex-1 truncate text-[10px] font-semibold uppercase tracking-wide text-muted">
+                    {project.label}
+                  </span>
+                </button>
                 <button
                   type="button"
                   className="codice-bulk-btn"
@@ -132,6 +158,7 @@ export function DocumentOrderPanel() {
                   <RotateCcw size={10} /> Reset
                 </button>
               </div>
+              {!isCollapsed && (
               <ol role="list" aria-label={`Document order of ${project.label}`}>
                 {files.map((file, i) => {
                   const isDragging = dragFileId === file.id;
@@ -211,8 +238,10 @@ export function DocumentOrderPanel() {
                   );
                 })}
               </ol>
+              )}
             </div>
-          ))}
+            );
+          })}
           <p className="px-1 text-[10px] text-muted">
             Drag or use ↑/↓ — the preview, Outline, and exports all follow
             this order. Files stay within their project.

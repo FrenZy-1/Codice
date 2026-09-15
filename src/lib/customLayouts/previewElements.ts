@@ -24,6 +24,10 @@ import type {
   PreviewElement,
   PaginationProject,
 } from '@/lib/preview/documentPagination';
+import {
+  duplicateFilenames,
+  type OutlineEntry,
+} from '@/lib/documentOutline';
 
 /** Index maps for resolving projectId/fileId references to preview indexes. */
 export interface LayoutIndexMaps {
@@ -72,6 +76,10 @@ function textElement(
       text: block.text,
       numberPrefix: '',
       breakBefore: false,
+      // §17 — layout headings are outline anchors (unique per instance).
+      outlineId: (block.anchorId ?? block.nodeId)
+        ? `outline-h-${block.anchorId ?? block.nodeId}`
+        : undefined,
     };
   }
   if (block.kind === 'labeled') {
@@ -152,6 +160,7 @@ export function customLayoutToElements(
             radiusPt: block.radiusPt,
             paddingPt: block.paddingPt,
             heightPt: block.heightPt,
+            textColor: block.textColor,
             children: convert(block.children),
           });
           break;
@@ -193,20 +202,15 @@ export function customLayoutToElements(
 export function buildLayoutOutline(
   resolved: ResolvedCustomLayout,
   projects: PaginationProject[],
-): Array<{ id: string; kind: 'title' | 'toc' | 'project' | 'file'; label: string; detail?: string; depth: 0 | 1 }> {
-  const entries: Array<{
-    id: string;
-    kind: 'title' | 'toc' | 'project' | 'file';
-    label: string;
-    detail?: string;
-    depth: 0 | 1;
-  }> = [];
+): OutlineEntry[] {
+  const entries: OutlineEntry[] = [];
   const projectById = new Map(
     projects.map((p, i) => [p.outlineProjectId ?? String(i), p] as const),
   );
   // One outline entry per file — fileHeader + code both carry the anchor;
   // dedupe so the panel never lists a file twice (§15).
   const seenFiles = new Set<string>();
+  const seenHeadings = new Set<string>();
 
   const walk = (blocks: ResolvedLayoutBlock[]) => {
     for (const block of blocks) {
@@ -223,18 +227,41 @@ export function buildLayoutOutline(
           detail: p ? (p.files.length === 1 ? '1 file' : `${p.files.length} files`) : undefined,
           depth: 0,
         });
+      } else if (block.kind === 'heading') {
+        // §17 — document structure: file-level / section / block headings
+        // (TOC-worthy outline content), each with a stable per-instance
+        // anchor (block headings repeat per file — dedupe defensively).
+        const anchor = block.anchorId ?? block.nodeId;
+        if (anchor && !seenHeadings.has(anchor)) {
+          seenHeadings.add(anchor);
+          entries.push({
+            id: `outline-h-${anchor}`,
+            kind: 'heading',
+            label: block.text,
+            depth: block.level === 1 ? 0 : 1,
+            tooltip: 'Heading in the document layout',
+          });
+        }
       } else if (block.kind === 'fileHeader' || block.kind === 'code') {
         const fileId = block.fileId;
         if (seenFiles.has(fileId)) continue;
         seenFiles.add(fileId);
         const p = projectById.get(block.projectId);
         const file = p?.files.find((f) => f.outlineFileId === fileId);
+        const path = file?.path ?? fileId;
+        const name = path.split('/').pop() ?? path;
         entries.push({
           id: `outline-file-${fileId}`,
           kind: 'file',
-          label: file?.path ?? fileId,
+          // §16 — filename by default; the path only to disambiguate
+          // duplicate filenames; full path always in the tooltip.
+          label: file ? (fileDuplicateNames.has(name) ? path : name) : fileId,
           detail: file?.language,
           depth: 1,
+          tooltip: file && p ? `${p.label}/${file.path}` : path,
+          // Reorder support — same canonical state as the standard outline.
+          projectId: block.projectId,
+          fileId,
         });
       } else if (block.kind === 'panel') {
         walk(block.children);
@@ -243,6 +270,12 @@ export function buildLayoutOutline(
       }
     }
   };
+
+  // Pre-compute duplicate filenames across the visible files (§16).
+  const fileDuplicateNames = duplicateFilenames(
+    projects.flatMap((p) => p.files.map((f) => f.path)),
+  );
+
   walk(resolved.blocks);
   return entries;
 }
