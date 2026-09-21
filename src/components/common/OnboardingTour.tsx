@@ -28,14 +28,21 @@ import { X, ChevronRight, ChevronLeft, Compass } from '@/components/common/Icons
 interface Props {
   open: boolean;
   onFinish: () => void;
+  /** §55 — custom step catalogue (e.g. the Layout studio tour). Defaults
+   * to the main application walk-through. */
+  steps?: TourStepDef[];
+  /** §55 — which "tour done" storage flag to mark on finish. */
+  storageKey?: string;
+  /** Accessible dialog label. */
+  label?: string;
 }
 
 const MEASURE_DEBOUNCE_MS = 60;
 
-export function OnboardingTour({ open, onFinish }: Props) {
+export function OnboardingTour({ open, onFinish, steps: stepsProp, storageKey, label = 'Guided tour' }: Props) {
   // Steps are fixed for the component's lifetime — state (not a ref) so the
   // render body never reads mutable data (react-hooks/refs).
-  const [steps] = useState<TourStepDef[]>(getTourSteps);
+  const [steps] = useState<TourStepDef[]>(() => stepsProp ?? getTourSteps());
   const [index, setIndex] = useState(0);
   const [rect, setRect] = useState<Rect | null>(null);
   const [viewport, setViewport] = useState({ width: 1280, height: 800 });
@@ -47,9 +54,9 @@ export function OnboardingTour({ open, onFinish }: Props) {
   const total = steps.length;
 
   const finish = useCallback(() => {
-    markTourDone();
+    markTourDone(storageKey);
     onFinish();
-  }, [onFinish]);
+  }, [onFinish, storageKey]);
 
   // Re-measure the target rect (rAF-throttled).
   const measure = useCallback(() => {
@@ -168,7 +175,7 @@ export function OnboardingTour({ open, onFinish }: Props) {
   const isLast = index === total - 1;
 
   return (
-    <div className="codice-tour-root" role="dialog" aria-modal="true" aria-label="Guided tour">
+    <div className="codice-tour-root" role="dialog" aria-modal="true" aria-label={label}>
       {/* Dimming layer with the spotlight cut-out */}
       {spot && (
         <div

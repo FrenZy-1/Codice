@@ -2,6 +2,8 @@
  * Color utilities shared across exporters.
  */
 
+import type { ResolvedLayoutBlock } from '@/lib/customLayouts/model';
+
 /** Parse a hex color (#rgb, #rrggbb, or #rrggbbaa) into RGB components. */
 export function parseHex(hex: string): { r: number; g: number; b: number } {
   let h = hex.trim().replace(/^#/, '');
@@ -48,4 +50,41 @@ export function mix(a: string, b: string, t: number): string {
   const g = Math.round(ca.g + (cb.g - ca.g) * t);
   const bl = Math.round(ca.b + (cb.b - ca.b) * t);
   return `#${[r, g, bl].map((v) => v.toString(16).padStart(2, '0')).join('')}`;
+}
+
+/**
+ * §12 — a panel's text color is the DEFAULT color for the text inside it.
+ * Applies the given default to text-ish children that resolved no own color
+ * (the panel's own node style wins over the preset, so exporters resolve
+ * `block.textColor ?? options.panelTextColor` BEFORE calling this). Mirrors
+ * the resolver's propagation so the export matches the preview. Pure —
+ * never mutates the input.
+ */
+export function withPanelTextDefault(
+  children: ResolvedLayoutBlock[],
+  textColor: string | undefined,
+): ResolvedLayoutBlock[] {
+  if (!textColor) return children;
+  return children.map((child) => {
+    if (
+      (child.kind === 'paragraph' || child.kind === 'heading' || child.kind === 'labeled') &&
+      !child.color
+    ) {
+      return { ...child, color: textColor };
+    }
+    if (child.kind === 'panel' && !child.textColor) {
+      return {
+        ...child,
+        textColor,
+        children: withPanelTextDefault(child.children, textColor),
+      };
+    }
+    if (child.kind === 'columns') {
+      return {
+        ...child,
+        columns: child.columns.map((col) => withPanelTextDefault(col, textColor)),
+      };
+    }
+    return child;
+  });
 }

@@ -9,7 +9,9 @@
  *
  * State is persisted to localStorage so users can reload the page without
  * losing their configuration. Uploaded file content is never persisted —
- * only metadata and selection state.
+ * only metadata and selection state; imported cover-page assets are the
+ * one exception: their binary media is too large for localStorage, so
+ * they persist to IndexedDB instead (lib/coverStorage, WS-8a).
  */
 
 import {
@@ -29,8 +31,15 @@ import type {
   FileDetails,
   ProjectEntry,
   ExportGroup,
+  CoverPageAsset,
 } from '@/types';
 import { defaultFilterConfig, type FilterConfig } from '@/lib/defaultExclusions';
+import {
+  applyPrefsToFilterConfig,
+  loadDefaultSelectionPrefs,
+  saveDefaultSelectionPrefs,
+  type DefaultSelectionPrefs,
+} from '@/lib/defaultSelectionPrefs';
 import {
   BUILT_IN_DOCUMENT_PRESETS,
   DEFAULT_DOCUMENT_PRESET_ID,
@@ -52,6 +61,8 @@ import { presetToOptions } from '@/lib/presets/presetToOptions';
 import { isRuleDeselected, isRuleSelected } from '@/lib/selectionRules';
 import {
   type CustomLayoutTemplate,
+  normalizeTemplate,
+  pruneAssignments,
 } from '@/lib/customLayouts/model';
 import {
   loadCustomLayouts,
@@ -68,13 +79,21 @@ import {
   persistUITheme,
   type UIThemeMode,
 } from '@/lib/themes/uiTheme';
+import {
+  loadCoverAssets,
+  saveCoverAssets,
+} from '@/lib/coverStorage';
+import {
+  loadImageAssets,
+  saveImageAssets,
+} from '@/lib/imageStorage';
+import { useToastOptional } from '@/components/common/Toast';
+import { emitPersistSignal } from '@/lib/persistSignal';
 
 export type OutputMode = 'combined' | 'separate' | 'groups';
 
 export interface AppState {
   projects: ProjectEntry[];
-  /** Per-project set of selected file ids (or null = use defaults). */
-  selection: Record<string, Set<string> | null>;
   /** Per-project explicitly-excluded file ids (override defaults). */
   exclusions: Record<string, Set<string>>;
   /** Per-project explicitly-included file ids (override defaults). */
@@ -104,15 +123,16 @@ export interface AppState {
   fileDetails: Record<string, FileDetails>;
   /** Custom-layout field values per file (fieldId → value; image fields hold asset ids). */
   fileFieldValues: Record<string, Record<string, string>>;
-  /** Custom-layout field values per project. */
-  projectFieldValues: Record<string, Record<string, string>>;
-  /** Document-level custom-layout field values (repeat=once). */
+  /** Document-level custom-layout field values (file-level bound nodes, §21). */
   documentFieldValues: Record<string, string>;
   // ---- Images (spec §10-§12) — session-scoped ----
   /** Imported image assets (normalized, self-contained data URLs). */
   imageAssets: ImageAsset[];
   /** Image asset ids attached to each file, in attachment order. */
   fileImages: Record<string, string[]>;
+  // ---- Cover pages (§42-§44) — persisted to IndexedDB (WS-8a) ----
+  /** Imported .docx cover pages (first page only, preserved as-is). */
+  coverPages: CoverPageAsset[];
   // ---- Document file order (spec §13-§15) ----
   /** Canonical presentation order of file ids within each project. */
   fileOrder: Record<string, string[]>;
@@ -127,11 +147,27 @@ export interface AppState {
    * Session-scoped (file ids die with uploads) — one file lives in exactly
    * one block across the whole template. */
   layoutAssignments: Record<string, string[]>;
-  // ---- Export groups (§11): arbitrary project combinations per export ----
+  // ---- Export groups (§11/§22-§29): per-export configuration ----
   exportGroups: ExportGroup[];
+  /** §27 — when true every export uses the applied layout; when false each
+   * export group may select its own layout template via `layoutId`. */
+  sameLayoutForAllExports: boolean;
   // ---- Project merge (§11): undoable merge bookkeeping ----
-  /** mergedProjectId → original source projects (for unmerge). */
-  mergeSources: Record<string, { sources: ProjectEntry[]; mergedAt: number }>;
+  /** mergedProjectId → original source projects + per-project state to restore. */
+  mergeSources: Record<
+    string,
+    {
+      sources: ProjectEntry[];
+      mergedAt: number;
+      /** Per-project state captured at merge time for exact undo (§31). */
+      fileOrder: Record<string, string[]>;
+      exclusions: Record<string, Set<string>>;
+      inclusions: Record<string, Set<string>>;
+      /** §35 — per-project selection rules captured at merge time. */
+      excludeRules: Record<string, string[]>;
+      includeRules: Record<string, string[]>;
+    }
+  >;
 }
 
 type Action =
@@ -140,7 +176,6 @@ type Action =
   | { type: 'REMOVE_PROJECT'; projectId: string }
   | { type: 'RENAME_PROJECT'; projectId: string; label: string }
   | { type: 'REORDER_PROJECTS'; from: number; to: number }
-  | { type: 'SET_SELECTION'; projectId: string; selection: Set<string> | null }
   | {
       type: 'TOGGLE_FILE';
       projectId: string;
@@ -163,6 +198,7 @@ type Action =
   | { type: 'IMPORT_CUSTOM_PRESET'; json: string; fallbackName?: string }
   | { type: 'SET_METADATA'; metadata: Partial<DocumentMetadata> }
   | { type: 'SET_FILTER'; filter: Partial<FilterConfig> }
+  | { type: 'SAVE_DEFAULT_SELECTION_PREFS'; prefs: DefaultSelectionPrefs }
   | { type: 'SET_PROJECT_RULES'; projectId: string; rules: string[] }
   | { type: 'SET_PROJECT_INCLUDE_RULES'; projectId: string; rules: string[] }
   | { type: 'SET_UI_THEME'; mode: UIThemeMode }
@@ -180,8 +216,19 @@ type Action =
   | { type: 'UPDATE_IMAGE_ASSET'; id: string; caption?: string; name?: string }
   | { type: 'SET_FILE_IMAGES'; fileId: string; imageIds: string[] }
   | { type: 'SET_FILE_FIELD_VALUES'; fileId: string; values: Record<string, string> }
-  | { type: 'SET_PROJECT_FIELD_VALUES'; projectId: string; values: Record<string, string> }
   | { type: 'SET_DOCUMENT_FIELD_VALUES'; values: Record<string, string> }
+  // ---- Cover pages (§42) ----
+  | { type: 'ADD_COVER_PAGE'; cover: CoverPageAsset }
+  | { type: 'REMOVE_COVER_PAGE'; id: string }
+  | { type: 'RENAME_COVER_PAGE'; id: string; name: string }
+  /** WS-8a — hydrate the library from IndexedDB on mount. Only fills an
+   * EMPTY list so an in-session import racing the async load is never
+   * clobbered. */
+  | { type: 'RESTORE_COVER_PAGES'; covers: CoverPageAsset[] }
+  /** WS-9a — hydrate the image library from IndexedDB on mount. Only
+   * fills an EMPTY list so an in-session import racing the async load
+   * is never clobbered. */
+  | { type: 'RESTORE_IMAGE_ASSETS'; assets: ImageAsset[] }
   | { type: 'SAVE_CUSTOM_LAYOUT'; template: CustomLayoutTemplate }
   | { type: 'UPDATE_CUSTOM_LAYOUT'; template: CustomLayoutTemplate }
   | { type: 'DELETE_CUSTOM_LAYOUT'; id: string }
@@ -190,24 +237,71 @@ type Action =
   | { type: 'IMPORT_CUSTOM_LAYOUT'; json: string; fallbackName?: string }
   | { type: 'SYNC_CUSTOM_LAYOUTS'; templates: CustomLayoutTemplate[] }
   | { type: 'SET_APPLIED_LAYOUT'; layoutId: string | null }
-  // ---- v2 layout content + assignment (§3/§4/§8) ----
+  // ---- v3 layout content + assignment (§3/§4/§8) ----
   | { type: 'SET_SECTION_FIELD_VALUES'; sectionId: string; values: Record<string, string> }
-  | { type: 'CLEAR_LAYOUT_CONTENT' }
   /** Assign a file to a block — atomically MOVES it out of any other block
-   * of the applied template (one-file-one-section rule, §3). */
+   * of the applied template (one-file-one-section rule, §5). */
   | { type: 'ASSIGN_FILE_TO_BLOCK'; blockId: string; fileId: string; position?: number }
   | { type: 'UNASSIGN_FILE'; fileId: string; blockId?: string }
   | { type: 'CLEAR_BLOCK_ASSIGNMENTS'; blockId: string }
-  | { type: 'REORDER_ASSIGNED_FILE'; blockId: string; from: number; to: number }
-  // ---- Export groups (§11) ----
+  // ---- Export groups (§11/§22-§29) ----
   | { type: 'ADD_EXPORT_GROUP'; group: ExportGroup }
   | { type: 'UPDATE_EXPORT_GROUP'; group: ExportGroup }
   | { type: 'DELETE_EXPORT_GROUP'; id: string }
+  /** R12 — grow/shrink the group list by a DELTA (the stepper −/+
+   * buttons). Delta (not absolute target) because rapid clicks read a
+   * stale `state` snapshot in the component — BUG-008: four fast +
+   * clicks all computed "Export 1" from the same pre-render length. The
+   * reducer resolves against FRESH state, so sequential dispatches
+   * compose: +,+,+ → Export 1, Export 2, Export 3. Growth appends
+   * empty scaffolds named "Export N"; shrink drops TRAILING groups
+   * (their projects simply become unassigned, §23). */
+  | { type: 'ADJUST_EXPORT_GROUP_COUNT'; delta: number }
+  /** R11 — move a group from one index to another (drag handle or ↑/↓
+   * keys). Order is user-facing: it drives the row list AND the persisted
+   * scaffold order (persistState saves the array as-is). */
+  | { type: 'REORDER_EXPORT_GROUPS'; from: number; to: number }
+  /** R14 — move a project chip from one position to another WITHIN one
+   * export group (drag a chip or use its ↑/↓ buttons). Chip order = the
+   * document assembly order for that group's export (TEST-056), so this
+   * is user-facing order, not cosmetics. Resolved against FRESH state
+   * (BUG-008 lesson): the reducer re-finds the group and silently no-ops
+   * on any inconsistency — a stale drag must never corrupt the order. */
+  | { type: 'MOVE_EXPORT_GROUP_PROJECT'; groupId: string; from: number; to: number }
+  /** R15 — duplicate an export group: a full scaffold copy (project ids,
+   * filename override, layout / first-page / cover configuration) inserted
+   * directly AFTER the source. The copy gets a FRESH id and the name
+   * "name (copy)" — numbered "(copy 2)", "(copy 3)"… when that name is
+   * already taken. Useful for per-client variants that share the same
+   * assignment shape. Resolved against FRESH state; unknown id = no-op. */
+  | {
+      type: 'DUPLICATE_EXPORT_GROUP'; id: string;
+      /** Optional pre-generated id for the copy — the panel generates it so
+       * it can flash the fresh row. The reducer falls back to its own
+       * generator when absent. */
+      newId?: string;
+    }
+  /** R15 — move a project chip from one group to a DIFFERENT group (drag
+   * a chip onto another group's row or one of its chips). Removes the id
+   * from the source and APPENDS it to the target (order = arrival), so the
+   * moved project is the last document section of its new export. Same
+   * BUG-008 discipline as the other group actions: resolved against FRESH
+   * state, silent no-op on any inconsistency (missing group, same group,
+   * id not in source, already in target) so a stale drag can never
+   * corrupt the assignment. */
+  | {
+      type: 'MOVE_PROJECT_BETWEEN_GROUPS';
+      fromGroupId: string;
+      toGroupId: string;
+      projectId: string;
+    }
+  | { type: 'SET_SAME_LAYOUT_FOR_ALL'; value: boolean }
   // ---- Project merge / unmerge (§11) ----
   | { type: 'MERGE_PROJECTS'; sourceIds: string[]; label?: string; mergedId: string }
   | { type: 'UNMERGE_PROJECTS'; mergedId: string };
 
-function reducer(state: AppState, action: Action): AppState {
+/** The app reducer — exported so tests can drive actions directly. */
+export function reducer(state: AppState, action: Action): AppState {
   switch (action.type) {
     case 'ADD_PROJECT':
       return { ...state, projects: [...state.projects, action.project] };
@@ -237,8 +331,6 @@ function reducer(state: AppState, action: Action): AppState {
     }
     case 'REMOVE_PROJECT': {
       const projects = state.projects.filter((p) => p.id !== action.projectId);
-      const selection = { ...state.selection };
-      delete selection[action.projectId];
       const exclusions = { ...state.exclusions };
       delete exclusions[action.projectId];
       const inclusions = { ...state.inclusions };
@@ -249,8 +341,6 @@ function reducer(state: AppState, action: Action): AppState {
       delete projectIncludeRules[action.projectId];
       const fileOrder = { ...state.fileOrder };
       delete fileOrder[action.projectId];
-      const projectFieldValues = { ...state.projectFieldValues };
-      delete projectFieldValues[action.projectId];
       // Merged projects vanish entirely — drop their undo record + scrub
       // them from export groups.
       const mergeSources = { ...state.mergeSources };
@@ -264,13 +354,11 @@ function reducer(state: AppState, action: Action): AppState {
       return {
         ...state,
         projects,
-        selection,
         exclusions,
         inclusions,
         projectExcludeRules,
         projectIncludeRules,
         fileOrder,
-        projectFieldValues,
         mergeSources,
         exportGroups,
       };
@@ -288,14 +376,6 @@ function reducer(state: AppState, action: Action): AppState {
       projects.splice(action.to, 0, moved);
       return { ...state, projects };
     }
-    case 'SET_SELECTION':
-      return {
-        ...state,
-        selection: {
-          ...state.selection,
-          [action.projectId]: action.selection,
-        },
-      };
     case 'TOGGLE_FILE': {
       const current = state.exclusions[action.projectId] ?? new Set();
       const included = state.inclusions[action.projectId] ?? new Set();
@@ -393,6 +473,15 @@ function reducer(state: AppState, action: Action): AppState {
       return { ...state, metadata: { ...state.metadata, ...action.metadata } };
     case 'SET_FILTER':
       return { ...state, filter: { ...state.filter, ...action.filter } };
+    case 'SAVE_DEFAULT_SELECTION_PREFS':
+      // §46 — persist the prefs AND re-derive the discovery filter so the
+      // NEXT upload uses them. Already-loaded projects are never re-scanned
+      // (changing defaults does not destructively affect them).
+      saveDefaultSelectionPrefs(action.prefs);
+      return {
+        ...state,
+        filter: applyPrefsToFilterConfig(action.prefs),
+      };
     case 'SET_PROJECT_RULES': {
       const rules = { ...state.projectExcludeRules };
       if (action.rules.length > 0) rules[action.projectId] = action.rules;
@@ -419,16 +508,17 @@ function reducer(state: AppState, action: Action): AppState {
       return {
         ...state,
         projects: [],
-        selection: {},
         exclusions: {},
         inclusions: {},
         projectExcludeRules: {},
         projectIncludeRules: {},
         fileOrder: {},
-        projectFieldValues: {},
         fileDetails: {},
         fileFieldValues: {},
+        documentFieldValues: {},
         fileImages: {},
+        layoutAssignments: {},
+        sectionFieldValues: {},
       };
     case 'SET_FILE_DETAILS':
       return {
@@ -488,23 +578,46 @@ function reducer(state: AppState, action: Action): AppState {
           [action.fileId]: action.values,
         },
       };
-    case 'SET_PROJECT_FIELD_VALUES':
-      return {
-        ...state,
-        projectFieldValues: {
-          ...state.projectFieldValues,
-          [action.projectId]: action.values,
-        },
-      };
     case 'SET_DOCUMENT_FIELD_VALUES':
       return { ...state, documentFieldValues: action.values };
+    case 'ADD_COVER_PAGE':
+      return { ...state, coverPages: [...state.coverPages, action.cover] };
+    case 'REMOVE_COVER_PAGE':
+      return { ...state, coverPages: state.coverPages.filter((c) => c.id !== action.id) };
+    case 'RENAME_COVER_PAGE':
+      return {
+        ...state,
+        coverPages: state.coverPages.map((c) =>
+          c.id === action.id ? { ...c, name: action.name } : c,
+        ),
+      };
+    case 'RESTORE_COVER_PAGES':
+      // WS-8a — replace only an EMPTY list: an in-session import that
+      // raced the async IndexedDB load always wins.
+      if (state.coverPages.length > 0 || action.covers.length === 0) return state;
+      return { ...state, coverPages: action.covers };
+    case 'RESTORE_IMAGE_ASSETS':
+      // WS-9a — same semantics as covers: replace only an EMPTY list.
+      if (state.imageAssets.length > 0 || action.assets.length === 0) return state;
+      return { ...state, imageAssets: action.assets };
     case 'SAVE_CUSTOM_LAYOUT': {
-      const customLayouts = storeCustomLayout(action.template);
-      return { ...state, customLayouts, appliedLayoutId: action.template.id };
+      // §10/§20 — normalize on write + prune assignments of deleted blocks.
+      const template = normalizeTemplate(action.template);
+      const customLayouts = storeCustomLayout(template);
+      const layoutAssignments = pruneAssignments(template, state.layoutAssignments);
+      return {
+        ...state,
+        customLayouts,
+        appliedLayoutId: template.id,
+        layoutAssignments,
+      };
     }
     case 'UPDATE_CUSTOM_LAYOUT': {
-      const customLayouts = persistUpdateCustomLayout(action.template);
-      return { ...state, customLayouts };
+      // §10/§20 — normalize on write + prune assignments of deleted blocks.
+      const template = normalizeTemplate(action.template);
+      const customLayouts = persistUpdateCustomLayout(template);
+      const layoutAssignments = pruneAssignments(template, state.layoutAssignments);
+      return { ...state, customLayouts, layoutAssignments };
     }
     case 'DELETE_CUSTOM_LAYOUT': {
       const customLayouts = persistDeleteCustomLayout(action.id);
@@ -527,8 +640,15 @@ function reducer(state: AppState, action: Action): AppState {
       importLayoutJson(action.json, action.fallbackName);
       return { ...state, customLayouts: loadCustomLayouts() };
     }
-    case 'SYNC_CUSTOM_LAYOUTS':
-      return { ...state, customLayouts: action.templates };
+    case 'SYNC_CUSTOM_LAYOUTS': {
+      // §10/§20 — normalize + prune on sync too (PanelOverrides etc.).
+      const templates = action.templates.map(normalizeTemplate);
+      const applied = templates.find((t) => t.id === state.appliedLayoutId);
+      const layoutAssignments = applied
+        ? pruneAssignments(applied, state.layoutAssignments)
+        : state.layoutAssignments;
+      return { ...state, customLayouts: templates, layoutAssignments };
+    }
     case 'SET_APPLIED_LAYOUT':
       return { ...state, appliedLayoutId: action.layoutId };
     case 'SET_SECTION_FIELD_VALUES':
@@ -539,8 +659,6 @@ function reducer(state: AppState, action: Action): AppState {
           [action.sectionId]: action.values,
         },
       };
-    case 'CLEAR_LAYOUT_CONTENT':
-      return { ...state, sectionFieldValues: {}, fileFieldValues: {} };
     case 'ASSIGN_FILE_TO_BLOCK': {
       // One-file-one-section (§3): assigning a file to a block atomically
       // removes it from every other block of the assignment map.
@@ -570,17 +688,6 @@ function reducer(state: AppState, action: Action): AppState {
       delete next[action.blockId];
       return { ...state, layoutAssignments: next };
     }
-    case 'REORDER_ASSIGNED_FILE': {
-      const ids = [...(state.layoutAssignments[action.blockId] ?? [])];
-      const to = Math.max(0, Math.min(action.to, ids.length - 1));
-      if (action.from < 0 || action.from >= ids.length) return state;
-      const [moved] = ids.splice(action.from, 1);
-      ids.splice(to, 0, moved);
-      return {
-        ...state,
-        layoutAssignments: { ...state.layoutAssignments, [action.blockId]: ids },
-      };
-    }
     case 'ADD_EXPORT_GROUP':
       return { ...state, exportGroups: [...state.exportGroups, action.group] };
     case 'UPDATE_EXPORT_GROUP':
@@ -595,10 +702,139 @@ function reducer(state: AppState, action: Action): AppState {
         ...state,
         exportGroups: state.exportGroups.filter((g) => g.id !== action.id),
       };
+    case 'ADJUST_EXPORT_GROUP_COUNT': {
+      // §23 grow/shrink, resolved against CURRENT (fresh) state — see the
+      // action's doc comment for why this must live in the reducer (BUG-008).
+      const current = state.exportGroups.length;
+      const next = Math.max(0, current + action.delta);
+      if (next === current) return state;
+      if (next < current) {
+        return { ...state, exportGroups: state.exportGroups.slice(0, next) };
+      }
+      const appended: ExportGroup[] = [];
+      for (let i = current; i < next; i++) {
+        appended.push({
+          id: `grp-${Math.random().toString(36).slice(2, 10)}${Date.now().toString(36).slice(-4)}`,
+          name: `Export ${i + 1}`,
+          projectIds: [],
+        });
+      }
+      return { ...state, exportGroups: [...state.exportGroups, ...appended] };
+    }
+    case 'REORDER_EXPORT_GROUPS': {
+      // Same splice semantics as REORDER_PROJECTS: `to` is the target
+      // index in the PRE-move array AFTER the `from < to → to -= 1`
+      // adjustment the caller applies (drop-below hint). Out-of-range
+      // indices are a silent no-op — a stale drag must never corrupt
+      // the list.
+      const { from, to } = action;
+      if (
+        from === to ||
+        from < 0 ||
+        from >= state.exportGroups.length ||
+        to < 0 ||
+        to >= state.exportGroups.length
+      ) {
+        return state;
+      }
+      const exportGroups = [...state.exportGroups];
+      const [moved] = exportGroups.splice(from, 1);
+      exportGroups.splice(to, 0, moved);
+      return { ...state, exportGroups };
+    }
+    case 'MOVE_EXPORT_GROUP_PROJECT': {
+      // R14 — chip reorder INSIDE one group, resolved against FRESH state
+      // (the BUG-008 discipline): re-find the group by id, splice its
+      // projectIds, and silently no-op on ANY inconsistency (missing
+      // group, out-of-range indices, same index) so a stale drag can
+      // never corrupt the assembly order.
+      const { groupId, from, to } = action;
+      const group = state.exportGroups.find((g) => g.id === groupId);
+      if (!group) return state;
+      if (
+        from === to ||
+        from < 0 ||
+        to < 0 ||
+        from >= group.projectIds.length ||
+        to >= group.projectIds.length
+      ) {
+        return state;
+      }
+      const projectIds = [...group.projectIds];
+      const [movedProject] = projectIds.splice(from, 1);
+      projectIds.splice(to, 0, movedProject);
+      return {
+        ...state,
+        exportGroups: state.exportGroups.map((g) =>
+          g.id === groupId ? { ...g, projectIds } : g,
+        ),
+      };
+    }
+    case 'DUPLICATE_EXPORT_GROUP': {
+      // R15 — full scaffold copy inserted right after the source. Fresh id
+      // (same generator as the stepper growth, BUG-008 discipline: resolved
+      // against FRESH state) so drag / persistence identity stays unique.
+      const at = state.exportGroups.findIndex((g) => g.id === action.id);
+      if (at === -1) return state;
+      const source = state.exportGroups[at];
+      // "name (copy)" — number onward when taken ("A (copy)" exists →
+      // "A (copy 2)"); case-insensitive so "a (copy)" blocks "A (copy)".
+      const taken = new Set(
+        state.exportGroups.map((g) => g.name.trim().toLowerCase()),
+      );
+      let name = `${source.name} (copy)`;
+      let n = 2;
+      while (taken.has(name.toLowerCase())) {
+        name = `${source.name} (copy ${n})`;
+        n += 1;
+      }
+      const copy: ExportGroup = {
+        ...source,
+        id: action.newId ?? `grp-${Math.random().toString(36).slice(2, 10)}${Date.now().toString(36).slice(-4)}`,
+        name,
+        projectIds: [...source.projectIds],
+      };
+      const exportGroups = [...state.exportGroups];
+      exportGroups.splice(at + 1, 0, copy);
+      return { ...state, exportGroups };
+    }
+    case 'MOVE_PROJECT_BETWEEN_GROUPS': {
+      // R15 — cross-group chip move. Guards: same group is a no-op (the
+      // within-group reorder owns that gesture), both groups must exist,
+      // the id must be in the source and must not already be in the target
+      // (a project may belong to any number of groups, but not twice in
+      // one group). The move APPENDS to the target (order = arrival).
+      const { fromGroupId, toGroupId, projectId } = action;
+      if (fromGroupId === toGroupId) return state;
+      const from = state.exportGroups.find((g) => g.id === fromGroupId);
+      const to = state.exportGroups.find((g) => g.id === toGroupId);
+      if (!from || !to) return state;
+      if (!from.projectIds.includes(projectId)) return state;
+      if (to.projectIds.includes(projectId)) return state;
+      return {
+        ...state,
+        exportGroups: state.exportGroups.map((g) => {
+          if (g.id === fromGroupId) {
+            return {
+              ...g,
+              projectIds: g.projectIds.filter((id) => id !== projectId),
+            };
+          }
+          if (g.id === toGroupId) {
+            return { ...g, projectIds: [...g.projectIds, projectId] };
+          }
+          return g;
+        }),
+      };
+    }
+    case 'SET_SAME_LAYOUT_FOR_ALL':
+      return { ...state, sameLayoutForAllExports: action.value };
     case 'MERGE_PROJECTS': {
-      // §11 — merge N projects into one unified project. File ids, relative
-      // paths and handles are PRESERVED (duplicates from different sources
-      // stay independently addressable). Fully undoable via mergeSources.
+      // §11/§31 — merge N projects into one unified project. File ids,
+      // relative paths and handles are PRESERVED (duplicate paths from
+      // different sources stay independently addressable). Per-project
+      // state (file order, explicit exclusions/inclusions) MIGRATES to the
+      // merged id; the originals are captured for exact undo.
       const sources = state.projects.filter((p) => action.sourceIds.includes(p.id));
       if (sources.length < 2) return state;
       const files = sources.flatMap((p) => p.files);
@@ -633,21 +869,89 @@ function reducer(state: AppState, action: Action): AppState {
         }
         return { ...g, projectIds: ids };
       });
+      // §31 — migrate per-project state keyed by projectId to the merged id.
+      const fileIdSet = new Set(files.map((f) => f.id));
+      const sourceOrders: Record<string, string[]> = {};
+      const sourceExclusions: Record<string, Set<string>> = {};
+      const sourceInclusions: Record<string, Set<string>> = {};
+      const mergedOrder: string[] = [];
+      const mergedExclusions = new Set<string>();
+      const mergedInclusions = new Set<string>();
+      for (const source of sources) {
+        // Capture the originals for undo.
+        sourceOrders[source.id] = [...(state.fileOrder[source.id] ?? [])];
+        sourceExclusions[source.id] = new Set(state.exclusions[source.id] ?? []);
+        sourceInclusions[source.id] = new Set(state.inclusions[source.id] ?? []);
+        // Concatenate into the merged view (source order preserved).
+        for (const id of state.fileOrder[source.id] ?? []) {
+          if (fileIdSet.has(id)) mergedOrder.push(id);
+        }
+        for (const id of state.exclusions[source.id] ?? []) mergedExclusions.add(id);
+        for (const id of state.inclusions[source.id] ?? []) mergedInclusions.add(id);
+      }
+      const fileOrder = { ...state.fileOrder };
+      for (const source of sources) delete fileOrder[source.id];
+      if (mergedOrder.length > 0) fileOrder[action.mergedId] = mergedOrder;
+      const exclusions = { ...state.exclusions };
+      const inclusions = { ...state.inclusions };
+      for (const source of sources) {
+        delete exclusions[source.id];
+        delete inclusions[source.id];
+      }
+      if (mergedExclusions.size > 0) exclusions[action.mergedId] = mergedExclusions;
+      if (mergedInclusions.size > 0) inclusions[action.mergedId] = mergedInclusions;
+      // §35 — migrate per-project SELECTION RULES to the merged id
+      // (deduped concatenation; source entries removed so no orphan rule
+      // state lingers) and capture the originals for exact undo.
+      const sourceExcludeRules: Record<string, string[]> = {};
+      const sourceIncludeRules: Record<string, string[]> = {};
+      const mergedExcludeRules: string[] = [];
+      const mergedIncludeRules: string[] = [];
+      for (const source of sources) {
+        const ex = state.projectExcludeRules[source.id] ?? [];
+        const inc = state.projectIncludeRules[source.id] ?? [];
+        if (ex.length > 0) sourceExcludeRules[source.id] = [...ex];
+        if (inc.length > 0) sourceIncludeRules[source.id] = [...inc];
+        for (const rule of ex) if (!mergedExcludeRules.includes(rule)) mergedExcludeRules.push(rule);
+        for (const rule of inc) if (!mergedIncludeRules.includes(rule)) mergedIncludeRules.push(rule);
+      }
+      const projectExcludeRules = { ...state.projectExcludeRules };
+      const projectIncludeRules = { ...state.projectIncludeRules };
+      for (const source of sources) {
+        delete projectExcludeRules[source.id];
+        delete projectIncludeRules[source.id];
+      }
+      if (mergedExcludeRules.length > 0) projectExcludeRules[action.mergedId] = mergedExcludeRules;
+      if (mergedIncludeRules.length > 0) projectIncludeRules[action.mergedId] = mergedIncludeRules;
       return {
         ...state,
         projects,
+        fileOrder,
+        exclusions,
+        inclusions,
+        projectExcludeRules,
+        projectIncludeRules,
         mergeSources: {
           ...state.mergeSources,
-          [action.mergedId]: { sources, mergedAt: Date.now() },
+          [action.mergedId]: {
+            sources,
+            mergedAt: Date.now(),
+            fileOrder: sourceOrders,
+            exclusions: sourceExclusions,
+            inclusions: sourceInclusions,
+            excludeRules: sourceExcludeRules,
+            includeRules: sourceIncludeRules,
+          },
         },
         exportGroups,
       };
     }
     case 'UNMERGE_PROJECTS': {
-      // §11 — split a previously merged project back into its sources:
-      // original names, files, handles and (via file ids) section/block
-      // assignments are restored. Export groups referencing the merged id
-      // get the source ids back (best effort, order preserved).
+      // §11/§31 — split a previously merged project back into its sources:
+      // original names, files, handles, file order and explicit selections
+      // are restored exactly (via file ids, section/block assignments never
+      // broke). Export groups referencing the merged id get the source ids
+      // back (best effort, order preserved).
       const record = state.mergeSources[action.mergedId];
       if (!record) return state;
       const mergedIndex = state.projects.findIndex((p) => p.id === action.mergedId);
@@ -662,7 +966,45 @@ function reducer(state: AppState, action: Action): AppState {
         ids.splice(idx, 1, ...record.sources.map((s) => s.id));
         return { ...g, projectIds: ids };
       });
-      return { ...state, projects, mergeSources, exportGroups };
+      // §31 — restore per-project state captured at merge time.
+      const fileOrder = { ...state.fileOrder };
+      const exclusions = { ...state.exclusions };
+      const inclusions = { ...state.inclusions };
+      const projectExcludeRules = { ...state.projectExcludeRules };
+      const projectIncludeRules = { ...state.projectIncludeRules };
+      delete fileOrder[action.mergedId];
+      delete exclusions[action.mergedId];
+      delete inclusions[action.mergedId];
+      delete projectExcludeRules[action.mergedId];
+      delete projectIncludeRules[action.mergedId];
+      for (const source of record.sources) {
+        if (record.fileOrder[source.id]?.length) {
+          fileOrder[source.id] = [...record.fileOrder[source.id]];
+        }
+        if (record.exclusions[source.id]?.size) {
+          exclusions[source.id] = new Set(record.exclusions[source.id]);
+        }
+        if (record.inclusions[source.id]?.size) {
+          inclusions[source.id] = new Set(record.inclusions[source.id]);
+        }
+        if (record.excludeRules[source.id]?.length) {
+          projectExcludeRules[source.id] = [...record.excludeRules[source.id]];
+        }
+        if (record.includeRules[source.id]?.length) {
+          projectIncludeRules[source.id] = [...record.includeRules[source.id]];
+        }
+      }
+      return {
+        ...state,
+        projects,
+        mergeSources,
+        exportGroups,
+        fileOrder,
+        exclusions,
+        inclusions,
+        projectExcludeRules,
+        projectIncludeRules,
+      };
     }
     case 'LOAD_STATE':
       return { ...state, ...action.state };
@@ -676,7 +1018,6 @@ function buildInitialState(): AppState {
     getBuiltInPreset(DEFAULT_DOCUMENT_PRESET_ID) ?? BUILT_IN_DOCUMENT_PRESETS[0];
   return {
     projects: [],
-    selection: {},
     exclusions: {},
     inclusions: {},
     projectExcludeRules: {},
@@ -691,23 +1032,24 @@ function buildInitialState(): AppState {
       description: '',
       version: '',
     },
-    filter: defaultFilterConfig(),
+    filter: applyPrefsToFilterConfig(loadDefaultSelectionPrefs()),
     uiTheme: getInitialUITheme(),
     outputFormat: 'docx',
     outputMode: 'combined',
     outputFilename: 'Codice_Output',
     fileDetails: {},
     fileFieldValues: {},
-    projectFieldValues: {},
     documentFieldValues: {},
     imageAssets: [],
     fileImages: {},
+    coverPages: [],
     fileOrder: {},
     customLayouts: loadCustomLayouts(),
     appliedLayoutId: null,
     sectionFieldValues: {},
     layoutAssignments: {},
     exportGroups: [],
+    sameLayoutForAllExports: true,
     mergeSources: {},
   };
 }
@@ -748,6 +1090,9 @@ function loadPersistedState(): Partial<AppState> | null {
     if (typeof parsed.appliedLayoutId === 'string' || parsed.appliedLayoutId === null) {
       result.appliedLayoutId = parsed.appliedLayoutId;
     }
+    if (typeof parsed.sameLayoutForAllExports === 'boolean') {
+      result.sameLayoutForAllExports = parsed.sameLayoutForAllExports;
+    }
     // Rehydrate Sets.
     const exclusions: Record<string, Set<string>> = {};
     for (const [k, v] of Object.entries(parsed.exclusions ?? {})) {
@@ -779,19 +1124,57 @@ function loadPersistedState(): Partial<AppState> | null {
       }
       if (Object.keys(rules).length) result.projectIncludeRules = rules;
     }
-    // Export groups persist (structure only — project ids are pruned of
-    // stale references when projects rehydrate; a group left empty is
-    // dropped entirely).
+    // Export groups persist (WS-9c): the SCAFFOLD (name + per-export
+    // layout/first-page/cover choices) survives reloads even when the
+    // referenced projects are gone — project ids are random per upload,
+    // so references can never reconnect; names are real user work.
+    // Stale project ids are pruned to live projects, but the group itself
+    // is kept (layoutId/coverId CAN reconnect: layouts and covers persist).
     if (Array.isArray(parsed.exportGroups)) {
-      const groups = (parsed.exportGroups as Array<{ id?: unknown; name?: unknown; projectIds?: unknown }>)
+      const groups = (
+        parsed.exportGroups as Array<{
+          id?: unknown;
+          name?: unknown;
+          projectIds?: unknown;
+          layoutId?: unknown;
+          firstPage?: unknown;
+          coverId?: unknown;
+          filename?: unknown;
+        }>
+      )
         .filter(
-          (g): g is { id: string; name: string; projectIds: string[] } =>
+          (
+            g,
+          ): g is {
+            id: string;
+            name: string;
+            projectIds: string[];
+            layoutId?: unknown;
+            firstPage?: unknown;
+            coverId?: unknown;
+            filename?: unknown;
+          } =>
             typeof g.id === 'string' &&
             typeof g.name === 'string' &&
             Array.isArray(g.projectIds) &&
             g.projectIds.every((x) => typeof x === 'string'),
         )
-        .map((g) => ({ id: g.id, name: g.name, projectIds: [...new Set(g.projectIds)] }));
+        .map((g) => ({
+          id: g.id,
+          name: g.name,
+          projectIds: [...new Set(g.projectIds)],
+          // Per-export configuration (§27 layout / §43 first page) — kept
+          // only when well-formed so junk cannot leak into the reducer.
+          ...(typeof g.layoutId === 'string' || g.layoutId === null
+            ? { layoutId: g.layoutId as string | null }
+            : {}),
+          ...(g.firstPage === 'preset' || g.firstPage === 'title' || g.firstPage === 'cover'
+            ? { firstPage: g.firstPage as 'preset' | 'title' | 'cover' }
+            : {}),
+          ...(typeof g.coverId === 'string' ? { coverId: g.coverId } : {}),
+          // R12 — per-group filename override pattern (string only).
+          ...(typeof g.filename === 'string' ? { filename: g.filename } : {}),
+        }));
       if (groups.length) result.exportGroups = groups;
     }
     return result;
@@ -811,6 +1194,7 @@ function persistState(state: AppState) {
       uiTheme: state.uiTheme,
       presetId: state.preset.id,
       appliedLayoutId: state.appliedLayoutId,
+      sameLayoutForAllExports: state.sameLayoutForAllExports,
       exclusions: Object.fromEntries(
         Object.entries(state.exclusions).map(([k, v]) => [k, Array.from(v)]),
       ),
@@ -822,15 +1206,27 @@ function persistState(state: AppState) {
       exportGroups: state.exportGroups.map((g) => ({
         id: g.id,
         name: g.name,
-        // Only persist ids of projects that still exist; drop empty groups.
+        // Only persist ids of projects that still exist. The group
+        // scaffold itself is kept (WS-9c) — project references cannot
+        // survive a reload (random ids), but names and per-export
+        // layout/first-page/cover choices are durable user work.
         projectIds: g.projectIds.filter((id) =>
           state.projects.some((p) => p.id === id),
         ),
-      })).filter((g) => g.projectIds.length > 0),
+        ...(g.layoutId !== undefined ? { layoutId: g.layoutId } : {}),
+        ...(g.firstPage !== undefined ? { firstPage: g.firstPage } : {}),
+        ...(g.coverId !== undefined ? { coverId: g.coverId } : {}),
+        ...(g.filename !== undefined ? { filename: g.filename } : {}),
+      })),
     };
     localStorage.setItem(STORAGE_KEY, JSON.stringify(serializable));
   } catch {
     // ignore quota errors
+  } finally {
+    // R14 — the header save indicator listens for this. 'saved' fires in
+    // `finally` so a quota failure cannot leave the indicator on
+    // "Saving…" forever (the write itself is best-effort by design).
+    emitPersistSignal('saved');
   }
 }
 
@@ -846,15 +1242,140 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
     applyUITheme(state.uiTheme);
   }, [state.uiTheme]);
 
+  // WS-8a — restore cover-page assets from IndexedDB on mount (binary
+  // media does not fit localStorage, so covers persist separately — see
+  // lib/coverStorage). RESTORE_COVER_PAGES only fills an EMPTY list, so
+  // a user importing a cover before this async load settles keeps theirs.
+  const coverRestoreSettled = useRef(false);
+  useEffect(() => {
+    let cancelled = false;
+    loadCoverAssets()
+      .then((covers) => {
+        coverRestoreSettled.current = true;
+        if (!cancelled && covers.length > 0) {
+          dispatch({ type: 'RESTORE_COVER_PAGES', covers });
+        }
+      })
+      .catch(() => {
+        // Cover persistence is best-effort; nothing to restore.
+        coverRestoreSettled.current = true;
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // WS-9a — restore the image library from IndexedDB on mount (same
+  // semantics as covers: only fills an EMPTY list — see lib/imageStorage).
+  const imageRestoreSettled = useRef(false);
+  useEffect(() => {
+    let cancelled = false;
+    loadImageAssets()
+      .then((assets) => {
+        imageRestoreSettled.current = true;
+        if (!cancelled && assets.length > 0) {
+          dispatch({ type: 'RESTORE_IMAGE_ASSETS', assets });
+        }
+      })
+      .catch(() => {
+        // Image persistence is best-effort; nothing to restore.
+        imageRestoreSettled.current = true;
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // WS-9b — warn (once per asset per session) when a storage save drops
+  // the OLDEST assets because of the persistence caps. Toasting is
+  // optional: tests render AppStateProvider without the ToastProvider.
+  const toast = useToastOptional();
+  const warnedDroppedIds = useRef<Set<string>>(new Set());
+  const maybeWarnDropped = useCallback(
+    (dropped: Array<Pick<CoverPageAsset | ImageAsset, 'id' | 'name'>>, kind: 'covers' | 'images') => {
+      if (!toast || dropped.length === 0) return;
+      const fresh = dropped.filter((d) => !warnedDroppedIds.current.has(d.id));
+      if (fresh.length === 0) return;
+      for (const d of fresh) warnedDroppedIds.current.add(d.id);
+      const isCovers = kind === 'covers';
+      const names = fresh.map((d) => d.name).join(', ');
+      toast.push({
+        kind: 'warning',
+        title: isCovers ? 'Cover storage limit reached' : 'Image storage limit reached',
+        message:
+          `Only the ${isCovers ? '20 most recent cover pages (up to ~50 MB)' : '40 most recent images (up to ~60 MB)'} ` +
+          `persist across sessions. Oldest removed from storage: ${names}. ` +
+          'They keep working during this session.',
+        durationMs: 9000,
+      });
+    },
+    [toast],
+  );
+
   // Persist on changes (debounced).
   const persistTimer = useRef<number | null>(null);
+  const firstPersistRun = useRef(true);
   useEffect(() => {
+    // R14 — the initial mount always writes the restored state back; that
+    // is bookkeeping, not a user edit, so the save indicator stays idle
+    // for it. Every REAL change announces 'dirty' (the debounced write is
+    // pending) — persistState itself announces 'saved' when it finishes.
+    if (firstPersistRun.current) {
+      firstPersistRun.current = false;
+    } else {
+      emitPersistSignal('dirty');
+    }
     if (persistTimer.current) clearTimeout(persistTimer.current);
     persistTimer.current = window.setTimeout(() => persistState(state), 500);
     return () => {
       if (persistTimer.current) clearTimeout(persistTimer.current);
     };
   }, [state]);
+
+  // WS-8a — persist cover pages to IndexedDB (debounced like the
+  // localStorage persist above). The whole list is re-written, so
+  // REMOVE_COVER_PAGE / renames propagate automatically. The initial
+  // empty-list save is skipped until the mount restore settled — never
+  // wipe storage while a restore is still in flight. WS-9b: caps-dropped
+  // assets are surfaced as a (deduplicated) warning toast.
+  const coverPersistTimer = useRef<number | null>(null);
+  useEffect(() => {
+    if (state.coverPages.length === 0 && !coverRestoreSettled.current) return;
+    if (coverPersistTimer.current) clearTimeout(coverPersistTimer.current);
+    coverPersistTimer.current = window.setTimeout(() => {
+      void saveCoverAssets(state.coverPages)
+        .then(({ dropped }) => {
+          maybeWarnDropped(dropped, 'covers');
+        })
+        .catch(() => {
+          /* best-effort persistence */
+        });
+    }, 500);
+    return () => {
+      if (coverPersistTimer.current) clearTimeout(coverPersistTimer.current);
+    };
+  }, [state.coverPages, maybeWarnDropped]);
+
+  // WS-9a — persist image assets to IndexedDB, mirroring the cover-page
+  // effect above (debounced whole-list rewrite; skip the initial save
+  // until the mount restore settled). WS-9b: caps-dropped assets warn.
+  const imagePersistTimer = useRef<number | null>(null);
+  useEffect(() => {
+    if (state.imageAssets.length === 0 && !imageRestoreSettled.current) return;
+    if (imagePersistTimer.current) clearTimeout(imagePersistTimer.current);
+    imagePersistTimer.current = window.setTimeout(() => {
+      void saveImageAssets(state.imageAssets)
+        .then(({ dropped }) => {
+          maybeWarnDropped(dropped, 'images');
+        })
+        .catch(() => {
+          /* best-effort persistence */
+        });
+    }, 500);
+    return () => {
+      if (imagePersistTimer.current) clearTimeout(imagePersistTimer.current);
+    };
+  }, [state.imageAssets, maybeWarnDropped]);
 
   const getSelectedFiles = useCallback(
     (projectId: string): Set<string> => {

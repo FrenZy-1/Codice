@@ -8,6 +8,14 @@
  * uses the same ids for scroll-to navigation and scroll-spy highlighting.
  */
 
+/**
+ * Outline-worthy kinds — the consistent rule (§39): every RESOLVED element
+ * that is a navigable document landmark gets an entry:
+ *   title / toc / project / structure / files / file / heading / panel /
+ *   columns (as a panel-family landmark) / image / divider.
+ * Pure spacing elements (spacer, pageBreak) are NOT navigable landmarks —
+ * they are excluded by rule, not by omission.
+ */
 export type OutlineKind =
   | 'title'
   | 'toc'
@@ -15,7 +23,10 @@ export type OutlineKind =
   | 'structure'
   | 'files'
   | 'file'
-  | 'heading';
+  | 'heading'
+  | 'panel'
+  | 'image'
+  | 'divider';
 
 export interface OutlineEntry {
   /** Stable anchor id, also used as `data-outline-id` in the preview. */
@@ -178,6 +189,12 @@ export function outlineGlyph(kind: OutlineKind): string {
       return '·';
     case 'heading':
       return '§';
+    case 'panel':
+      return '▭';
+    case 'image':
+      return '⊡';
+    case 'divider':
+      return '—';
   }
 }
 
@@ -192,10 +209,14 @@ export function outlineKindTone(
       return 'warning';
     case 'project':
       return 'success';
+    case 'panel':
+      return 'accent';
     case 'structure':
     case 'files':
     case 'file':
     case 'heading':
+    case 'image':
+    case 'divider':
       return 'muted';
   }
 }

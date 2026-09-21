@@ -17,6 +17,7 @@ import { resolveCustomLayout } from '@/lib/customLayouts/resolver';
 import {
   createBlockDef,
   createSection,
+  templateSections,
   type CustomLayoutTemplate,
 } from '@/lib/customLayouts/model';
 import { buildDocumentModel } from '@/lib/documentBuilder';
@@ -25,7 +26,6 @@ import { DEFAULT_PRESET_ID, getPreset } from '@/lib/presets/presets';
 import { migratePreset } from '@/lib/presets/presetMigration';
 import { presetToOptions } from '@/lib/presets/presetToOptions';
 import type { DocumentModel, DocumentProject, ImageAsset, ProjectEntry } from '@/types';
-import { makeHighlightedFile } from './helpers/exportModels';
 
 /**
  * A 4x4 PNG with a WELL-FORMED zlib stream — jsPDF must decode PNGs (unlike
@@ -82,30 +82,37 @@ function goldenTemplate(): CustomLayoutTemplate {
   const s1 = createSection('task', 'Task 01');
   s1.fields = [out, shot];
   s1.children = [
-    { kind: 'node', id: 'c1-h', node: { id: 'n1-h', type: 'heading', text: '{fileName}', style: { level: 2 } } },
-    { kind: 'block', id: 'c1-b', block: createBlockDef('Code block', [{ type: 'file' }]) },
-    { kind: 'node', id: 'c1-o', node: { id: 'n1-o', type: 'text', fieldId: out.id, style: { label: true } } },
-    { kind: 'node', id: 'c1-i', node: { id: 'n1-i', type: 'image', fieldId: shot.id } },
+    { kind: 'node', node: { id: 'n1-h', type: 'heading', text: '{fileName}', style: { level: 2 } } },
+    { kind: 'block', block: createBlockDef('Code block', [{ type: 'file' }]) },
+    { kind: 'node', node: { id: 'n1-o', type: 'text', fieldId: out.id, style: { label: true } } },
+    { kind: 'node', node: { id: 'n1-i', type: 'image', fieldId: shot.id } },
   ];
 
   const s2 = createSection('task', 'Task 02');
   s2.pageBreakBefore = true;
+  // Only a block — fields derive from content (none here).
+  s2.fields = [];
   s2.children = [
-    { kind: 'block', id: 'c2-b', block: createBlockDef('Code block 2', [{ type: 'file' }]) },
+    { kind: 'block', block: createBlockDef('Code block 2', [{ type: 'file' }]) },
   ];
 
   const s3 = createSection('descriptionAnswer', 'Task 03 — Answers');
   s3.pageBreakBefore = true;
   s3.fields = [answer];
-  s3.children = [{ kind: 'node', id: 'c3-a', node: { id: 'n3-a', type: 'text', fieldId: answer.id } }];
+  s3.children = [{ kind: 'node', node: { id: 'n3-a', type: 'text', fieldId: answer.id } }];
 
   return {
     id: 'golden-tpl',
     name: 'Golden path',
-    version: 2,
+    version: 3,
     createdAt: 0,
     updatedAt: 0,
-    sections: [s1, s2, s3],
+    rootChildren: [
+      { kind: 'section', section: s1 },
+      { kind: 'section', section: s2 },
+      { kind: 'section', section: s3 },
+    ],
+    fields: [],
   };
 }
 
@@ -141,11 +148,12 @@ async function buildModel(projects: ProjectEntry[]): Promise<DocumentModel> {
     },
   );
   const tpl = goldenTemplate();
-  const sectionId1 = tpl.sections[0].id;
-  const sectionId2 = tpl.sections[1].id;
-  const sectionId3 = tpl.sections[2].id;
-  const blockId1 = (tpl.sections[0].children.find((c) => c.kind === 'block') as { block: { id: string } }).block.id;
-  const blockId2 = (tpl.sections[1].children.find((c) => c.kind === 'block') as { block: { id: string } }).block.id;
+  const sections = templateSections(tpl);
+  const sectionId1 = sections[0].id;
+  const sectionId2 = sections[1].id;
+  const sectionId3 = sections[2].id;
+  const blockId1 = (sections[0].children.find((c) => c.kind === 'block') as { block: { id: string } }).block.id;
+  const blockId2 = (sections[1].children.find((c) => c.kind === 'block') as { block: { id: string } }).block.id;
   const values: Record<string, Record<string, string>> = {
     [sectionId1]: {
       'fld-out': 'Program output: it works.',
@@ -161,6 +169,7 @@ async function buildModel(projects: ProjectEntry[]): Promise<DocumentModel> {
     fileDetails: {},
     fileFieldValues: {},
     sectionFieldValues: values,
+    documentFieldValues: {},
     fileOrder: {},
     assignments: {
       [blockId1]: ['fa1', 'fa2'],

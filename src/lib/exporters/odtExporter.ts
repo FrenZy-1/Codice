@@ -24,6 +24,12 @@
  *     multiplier is emitted as "150%", never a bare "1.5".
  *   - Every code line stays its own <text:p style="CodeLine"> with zero
  *     margins (adjacent identical borders merge into one visual block).
+ *
+ * Cover pages (§42): an imported cover (CoverPageAsset) is flow-rendered
+ * into ODF by coverOdt.ts — text + basic formatting + images + tables,
+ * best effort — and prepended to <office:text> with a hard page break
+ * after it (same contract as the PDF exporter; failures degrade to an
+ * export without the cover and are signalled via coverSkipped).
  */
 
 import JSZip from 'jszip';
@@ -42,7 +48,7 @@ import type {
   ResolvedTextProps,
 } from '@/types';
 import type { DocumentExporter } from './types';
-import { parseHex } from './colors';
+import { parseHex, withPanelTextDefault } from './colors';
 import { getThemeColors } from '@/lib/highlight/highlighter';
 import { formatBytes } from '@/lib/fileDiscovery';
 import { splitRuns, GLYPH_FALLBACK_FONT } from './unicodeFallback';
@@ -58,6 +64,7 @@ import {
   expandTokens,
   type TokenContext,
 } from '@/lib/tokens';
+import { renderCoverToOdt, type OdtCoverRender } from '@/lib/coverOdt';
 
 /** XML escape — escapes the 5 special characters. */
 function xmlEscape(s: string): string {
@@ -1095,7 +1102,10 @@ function languageLabel(id: string | null): string {
 }
 
 /** Build the content.xml for the document (plus decoded pictures for the ZIP). */
-async function buildContentXml(model: DocumentModel): Promise<{ xml: string; pictures: OdtPicture[] }> {
+async function buildContentXml(
+  model: DocumentModel,
+  coverRender?: OdtCoverRender | null,
+): Promise<{ xml: string; pictures: OdtPicture[] }> {
   const opts = model.options;
   // Fresh automatic-style registries per build (module-level Maps).
   resetSpanStyles();
@@ -1150,6 +1160,28 @@ async function buildContentXml(model: DocumentModel): Promise<{ xml: string; pic
 
   body.push(`<office:body>`);
   body.push(`<office:text>`);
+
+  if (coverRender) {
+    // §42 — imported cover page: the flow-rendered cover body is the FIRST
+    // content (it replaces the generated title page — the export rail sets
+    // includeFrontMatter:false for firstPage:'cover'). A tiny hard
+    // page-break carrier paragraph (same mechanism as the pageBreak layout
+    // block) starts the document content on a fresh page. The cover's own
+    // automatic styles and images ride along with the fragment.
+    if (coverRender.usesTables) flags.tables = true;
+    body.push(coverRender.bodyXml);
+    body.push(
+      `<text:p text:style-name="${layoutParaStyleName({
+        parent: 'TextBody',
+        breakBefore: true,
+        fontSizePt: 1,
+        lineHeightCm: 0.15,
+        marginTopCm: 0,
+        marginBottomCm: 0,
+      })}"/>`,
+    );
+    pictures.push(...coverRender.images);
+  }
 
   if (model.customLayout) {
     // Custom layout stream (spec §35): the resolved blocks replace the
@@ -1310,6 +1342,8 @@ async function buildContentXml(model: DocumentModel): Promise<{ xml: string; pic
     model.customLayout && model.customLayout.blocks.some((b) => b.kind === 'toc')
   );
   const autoStyles = [
+    // §42 — the cover's own automatic styles (CovT/CovP/CovFrame) first.
+    coverRender ? coverRender.stylesXml : '',
     opts.includeFrontMatter && !model.customLayout
       ? buildTitlePageAutoStyles(titleAlign, titleSpacerCm)
       : '',
@@ -1573,8 +1607,11 @@ function renderOdtLayoutBlock(
         paddingPt: block.paddingPt ?? 8,
         widthCm: ctx.contentWCm,
       });
+      // §12 — panel text color: node style → preset panelTextColor; it is
+      // the default color for children that resolved no own color.
+      const panelTextColor = block.textColor ?? ctx.options.panelTextColor ?? undefined;
       const start = ctx.body.length;
-      renderOdtLayoutBlocks(model, block.children, ctx);
+      renderOdtLayoutBlocks(model, withPanelTextDefault(block.children, panelTextColor), ctx);
       const children = ctx.body.splice(start);
       ctx.body.push(
         `<table:table table:style-name="${names.table}">` +
@@ -1699,7 +1736,20 @@ export const odtExporter: DocumentExporter = {
   ): Promise<ExportResult> {
     const start = performance.now();
 
-    const { xml, pictures } = await buildContentXml(model);
+    // §42 — render the imported cover page into ODF (best effort; a failed
+    // render degrades to an export without it and is signalled via
+    // coverSkipped — same contract as the PDF exporter).
+    const coverAsset = options.cover;
+    let coverRender: OdtCoverRender | null = null;
+    if (coverAsset && coverAsset.bodyXml.trim() !== '') {
+      try {
+        coverRender = renderCoverToOdt(coverAsset);
+      } catch {
+        coverRender = null; // skip the cover silently — the UI warns
+      }
+    }
+
+    const { xml, pictures } = await buildContentXml(model, coverRender);
 
     const zip = new JSZip();
     // mimetype must be the first entry, stored uncompressed.
@@ -1730,6 +1780,7 @@ export const odtExporter: DocumentExporter = {
       filename: `${options.filename || 'codice'}.odt`,
       format: 'odt',
       elapsedMs: elapsed,
+      ...(coverAsset && !coverRender ? { coverSkipped: true } : {}),
     };
   },
 };

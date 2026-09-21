@@ -56,7 +56,8 @@ import {
   fitImageBox,
 } from '@/lib/imageAssets';
 import type { DocumentExporter } from './types';
-import { parseHex } from './colors';
+import { parseHex, withPanelTextDefault } from './colors';
+import { applyCoverToDocx } from '@/lib/coverPages';
 import { getThemeColors } from '@/lib/highlight/highlighter';
 import { formatBytes } from '@/lib/fileDiscovery';
 import { splitRuns, GLYPH_FALLBACK_FONT } from './unicodeFallback';
@@ -1212,6 +1213,9 @@ function renderDocxLayoutBlock(
       // §25 — panels without their own style use the preset's panel colors.
       const effectiveBorderColor = block.borderColor ?? ctx.options.panelBorderColor ?? undefined;
       const effectiveFillColor = block.fillColor ?? ctx.options.panelFillColor ?? undefined;
+      // §12 — panel text color: node style → preset panelTextColor; it is the
+      // default color for children that resolved no own color.
+      const effectivePanelTextColor = block.textColor ?? ctx.options.panelTextColor ?? undefined;
       const border = effectiveBorderColor
         ? {
             style: BorderStyle.SINGLE,
@@ -1219,7 +1223,11 @@ function renderDocxLayoutBlock(
             color: hexNoHash(effectiveBorderColor),
           }
         : DOCX_NO_BORDER;
-      const children = renderDocxBlocks(model, block.children, ctx);
+      const children = renderDocxBlocks(
+        model,
+        withPanelTextDefault(block.children, effectivePanelTextColor),
+        ctx,
+      );
       out.push(
         new Table({
           width: { size: 100, type: WidthType.PERCENTAGE },
@@ -1512,7 +1520,11 @@ export const docxExporter: DocumentExporter = {
   ): Promise<ExportResult> {
     const start = performance.now();
     const doc = await buildDocx(model);
-    const blob = await Packer.toBlob(doc);
+    let blob = await Packer.toBlob(doc);
+    // §42 — prepend the imported cover page, preserved as-is.
+    if (options.cover) {
+      blob = await applyCoverToDocx(blob, options.cover);
+    }
     const elapsed = performance.now() - start;
     return {
       blob,

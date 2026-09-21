@@ -72,6 +72,19 @@ export interface PaginationProject {
 
 export type HeadingLevel = 'h1' | 'h2' | 'h3' | 'h4';
 
+/**
+ * §12/§46 — presentation overrides carried from the canonical resolved
+ * stream (custom-layout text blocks) onto preview elements. Every field is
+ * optional: undefined means "use the preset style for this element".
+ */
+export interface PreviewTextProps {
+  align?: 'left' | 'center' | 'right';
+  fontSizePt?: number;
+  bold?: boolean;
+  italic?: boolean;
+  color?: string;
+}
+
 export type PreviewElement =
   | { type: 'titlePage'; outlineId?: string }
   | { type: 'toc'; outlineId?: string }
@@ -84,8 +97,24 @@ export type PreviewElement =
       numberPrefix: string;
       breakBefore: boolean;
       outlineId?: string;
+      /** Presentation overrides on top of the preset heading style (§46). */
+      align?: 'left' | 'center' | 'right';
+      fontSizePt?: number;
+      bold?: boolean;
+      italic?: boolean;
+      color?: string;
     }
-  | { type: 'paragraph'; text: string; rich?: ParagraphRichRun[] }
+  | {
+      type: 'paragraph';
+      text: string;
+      rich?: ParagraphRichRun[];
+      /** Presentation overrides on top of the preset body style (§46). */
+      align?: 'left' | 'center' | 'right';
+      fontSizePt?: number;
+      bold?: boolean;
+      italic?: boolean;
+      color?: string;
+    }
   | { type: 'statusCard' }
   | { type: 'fileHeader'; projectIdx: number; fileIdx: number; outlineId?: string }
   | {
@@ -95,6 +124,12 @@ export type PreviewElement =
       fileIdx?: number;
       label: string;
       text: string;
+      /** Presentation overrides on top of the preset body style (§46). */
+      align?: 'left' | 'center' | 'right';
+      fontSizePt?: number;
+      bold?: boolean;
+      italic?: boolean;
+      color?: string;
     }
   | {
       /** An attached image (embedded data URL — never a temp URL, §12). */
@@ -104,6 +139,8 @@ export type PreviewElement =
       imageIdx?: number;
       /** Standalone image (custom layout) — takes precedence when set. */
       image?: DocumentImage;
+      /** §39 — outline anchor for standalone layout images. */
+      outlineId?: string;
     }
   | { type: 'pageBreak' }
   | {
@@ -118,6 +155,8 @@ export type PreviewElement =
       heightPt?: number;
       /** §25 — default text color for the panel's content. */
       textColor?: string;
+      /** §39 — outline anchor (panels are navigable landmarks). */
+      outlineId?: string;
       children: PreviewElement[];
     }
   | {
@@ -125,11 +164,15 @@ export type PreviewElement =
       type: 'divider';
       heightPx: number;
       fillColor?: string;
+      /** §39 — outline anchor (dividers are navigable landmarks). */
+      outlineId?: string;
     }
   | {
       /** Side-by-side regions (§25) — HTML preview renders them truly side by side. */
       type: 'columns';
       count: 2 | 3;
+      /** §39 — outline anchor (columns are panel-family landmarks). */
+      outlineId?: string;
       columns: PreviewElement[][];
     }
   | {

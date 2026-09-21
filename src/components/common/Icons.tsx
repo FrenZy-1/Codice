@@ -288,6 +288,14 @@ export const MoreVertical = makeIcon(
   </>,
 );
 
+export const Image = makeIcon(
+  <>
+    <rect x="3" y="3" width="18" height="18" rx="2" ry="2" />
+    <circle cx="8.5" cy="8.5" r="1.5" />
+    <polyline points="21 15 16 10 5 21" />
+  </>,
+);
+
 export const ImagePlus = makeIcon(
   <>
     <rect x="3" y="3" width="18" height="18" rx="2" ry="2" />
@@ -490,5 +498,13 @@ export const BookOpen = makeIcon(
   <>
     <path d="M2 4h6a4 4 0 0 1 4 4v12a3 3 0 0 0-3-3H2z" />
     <path d="M22 4h-6a4 4 0 0 0-4 4v12a3 3 0 0 1 3-3h7z" />
+  </>,
+);
+
+/** Pencil glyph — inline caption edit (image library, §32). */
+export const Pencil = makeIcon(
+  <>
+    <path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z" />
+    <path d="m15 5 4 4" />
   </>,
 );

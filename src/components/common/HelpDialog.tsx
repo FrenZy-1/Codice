@@ -1,16 +1,17 @@
 'use client';
 
 /**
- * Help overlay — keyboard shortcuts + the full user guide (§23).
+ * Help overlay — keyboard shortcuts + the full user guide (§41).
  *
- * The guide documents the ACTUAL current implementation: the File →
- * Section → Block → Field hierarchy, what binding means, the editors,
- * images, panels, export modes, and the terminology used across the app.
- * Content is data-driven so tests can assert coverage.
+ * The guide documents the ACTUAL v3 implementation: the File → (standalone
+ * nodes + Sections) → Section → (standalone nodes + Blocks) → Node/Field
+ * model, binding, section types, file assignment, the image library,
+ * export groups, cover pages, and every supporting feature. Content is
+ * data-driven so tests can assert coverage.
  */
 
 import { useEffect, useState } from 'react';
-import { X, Keyboard, Compass, BookOpen } from '@/components/common/Icons';
+import { X, Keyboard, Compass } from '@/components/common/Icons';
 
 export interface ShortcutDef {
   keys: string[];
@@ -32,7 +33,12 @@ export function getShortcuts(isMac: boolean): ShortcutDef[] {
     {
       keys: [mod, 'T'],
       label: 'Toggle template editor',
-      note: 'Open or close the template customizer',
+      note: 'Open or close the Template editor (styling)',
+    },
+    {
+      keys: [mod, 'L'],
+      label: 'Toggle layout editor',
+      note: 'Open or close the Layout studio (document structure)',
     },
     {
       keys: [mod, 'D'],
@@ -61,7 +67,7 @@ export function getShortcuts(isMac: boolean): ShortcutDef[] {
 }
 
 /* ------------------------------------------------------------------ */
-/* The guide (§23) — plain-language documentation of the real app      */
+/* The guide (§41) — plain-language documentation of the real app      */
 /* ------------------------------------------------------------------ */
 
 export interface GuideSection {
@@ -76,147 +82,247 @@ export interface GuideSection {
 export function getGuideSections(): GuideSection[] {
   return [
     {
-      id: 'hierarchy',
-      title: 'The document hierarchy: File → Section → Block → Field',
+      id: 'model',
+      title: 'How a Codice document is built',
       paragraphs: [
-        'A Codice document is built from four nested concepts. Understanding them is the key to everything else.',
+        'Every export file follows one layout. The layout is an ordered stack that starts with the File — the whole export document — and works inward. You compose it top to bottom in the Layout editor (the Layouts button in the top bar):',
+        'A File can mix standalone nodes and Sections freely in one order. For example: a title heading, then Section 1, a spacer, Section 2, and a closing note AFTER the sections — anything, in any order.',
+        'Inside a Section the same freedom applies: standalone nodes (a heading, an image, some text) plus Blocks, in one order.',
       ],
       terms: [
         {
           term: 'File',
-          text: 'A source-code file you uploaded (or the whole uploaded set). The File Layout is the document skeleton: file-level content, then ordered Sections.',
+          text: 'One export document — one generated .docx/.pdf/.odt. Its layout is the ordered list of standalone nodes and Sections you see in the Layout editor.',
         },
         {
           term: 'Section',
-          text: 'A semantic grouping in the document — for example “Task 01”, “Task 02”, “Task 03”. Sections render once, top to bottom, in every document. A section holds its own content and one or more Blocks.',
+          text: 'A subsection of the document, e.g. “Task 01” or “Core classes”. A Section renders once and contains standalone nodes plus its Blocks.',
         },
         {
           term: 'Block',
-          text: 'A repeated PATTERN applied once to each file assigned to it. A Block is not a container for arbitrary content — it is the layout pattern used to render ONE assigned file. Example block: Heading “{fileName}”, Description, Code, Note. If three files are assigned, the pattern renders three times — once per file.',
+          text: 'A per-file pattern. Whatever you put in a Block (a “{fileName}” heading, a description, the code, a note…) is repeated ONCE for each file assigned to it. Assign 3 files → the pattern renders 3 times, once per file.',
         },
         {
-          term: 'Field',
-          text: 'A named content slot you fill with data. Section fields hold section-level content (Task Title, Output, Answer…) filled once per section. Block fields hold per-file content (a screenshot per file) filled in File properties.',
+          term: 'Node / Field',
+          text: 'The content primitives you build everything from: Text, Heading, Image, Code, Panel, Columns, Divider, Spacer, TOC (table of contents) and Page break. A Field is a named content slot you fill in later (see Binding).',
         },
       ],
     },
     {
       id: 'binding',
-      title: 'What is binding?',
+      title: 'Binding: where a node gets its content',
       paragraphs: [
-        'Binding is how data gets into the layout. A layout node can be bound to a field: at render time the node displays the field’s value instead of static text. Static text never changes; a bound value comes from your content or your files.',
-        'Example: a Heading node with the literal text “{fileName}” is bound to each file’s name — when the block renders for Main.java the heading reads “Main.java”. A Text node bound to the section field “Task Title” shows whatever you typed into that field in the Content dialog. An Image node bound to an image-kind field renders the actual image you picked.',
-        'Tokens like {fileName}, {filePath}, {projectName}, {title}, {date} and {files} expand dynamically inside any literal text.',
-      ],
-    },
-    {
-      id: 'editors',
-      title: 'The three editors',
-      paragraphs: [],
-      terms: [
-        {
-          term: 'File Layout editor',
-          text: 'The top level: rename the template, add/reorder/delete Sections, add file-level standalone content (a document title heading, a closing summary…) and see the tray of files not yet assigned to any block.',
-        },
-        {
-          term: 'Section editor',
-          text: 'One section: rename it, append a starter structure (Section Type), edit its ordered content — standalone nodes, field nodes and file Blocks, top to bottom. The Section fields list is DERIVED from the content order: move a node and its field moves; delete a node and its field disappears.',
-        },
-        {
-          term: 'Block editor',
-          text: 'The per-file pattern: a node tree (heading, code, description, images, panels…) plus block fields filled per file. Assign files to the block here — each file renders the pattern exactly once.',
-        },
-      ],
-    },
-    {
-      id: 'rules',
-      title: 'The one-file-one-section rule',
-      paragraphs: [
-        'Every file belongs to exactly ONE section and renders in exactly ONE block instance. Files are moved automatically if you assign them elsewhere. A file assigned to a block disappears from every other assignment dropdown; unassign it to free it again. This is enforced in the model, not just the UI.',
+        'Binding tells a node where to get its content. A node can hold static text you type once, or it can be bound to a field whose value arrives at render time.',
+        'Static: a Heading node with the text “Task 01” always reads “Task 01”. Bound: a Heading bound to the current file’s name reads “Main.java” for Main.java, “App.kt” for App.kt — the same node, different content per file. A Code node bound to the code field renders the actual source of the current file with syntax highlighting.',
+        'The context matters. Inside a Block, “current file” means the file whose instance is being rendered — that is why one pattern can serve every file. Section fields are filled once per section (Task title, Output, Answer…); document fields are filled once per file/export at the top level. A required field with no value blocks the export and tells you exactly which field is missing where.',
+        'Tokens like {fileName}, {filePath}, {projectName}, {title}, {date}, {time}, {files}, {page} and {pages} expand inside any literal text.',
       ],
     },
     {
       id: 'section-types',
-      title: 'Section types',
+      title: 'Section types are starting templates',
       paragraphs: [
-        'A Section Type (Task, Code + Output, Description + Answer, Summary…) is a STARTING structure, not a rigid schema. Append one with “Append structure” — each click adds the intended fields and content exactly once. Afterwards every section is fully customizable: add, remove, reorder, add more blocks, images, panels or standalone text. Different sections can look completely different.',
+        'When you add a Section you pick a Section Type — Task, Code + Output, Description + Answer, Summary and friends. That choice only pre-fills a sensible structure; it is not a rigid schema.',
+        'Afterwards the section is fully yours: add or remove nodes, reorder them, append another starter structure, add more Blocks, images, panels or standalone text. Two sections of the same type can end up looking completely different.',
+      ],
+    },
+    {
+      id: 'file-assignment',
+      title: 'Assigning files to sections and blocks',
+      paragraphs: [
+        'One file appears in exactly one section and one block instance — never twice. Assigning a file to a block automatically removes it from every other selector, so you cannot double-book it by accident.',
+        'Files you have not assigned anywhere are collected in the “unassigned” tray at the bottom of the Layout editor, and the Layouts button in the top bar shows an attention dot while any selected file is unassigned (the same dot appears when required fields are missing). Unassigned files simply do not appear in that layout’s export — nothing is silently lost.',
       ],
     },
     {
       id: 'images',
-      title: 'Images',
+      title: 'Images and the image library',
       paragraphs: [
-        'Upload images with the Images chip in the upload area (or drop them). They land in the image library — visible in the sidebar’s “Image library” panel. Attach images per file in File properties (they render where the File images node sits), or bind them to an image-kind section/block field via the Content dialog or a layout Image node.',
+        'There is exactly ONE Image primitive in the layout, and it picks its pixels from one of three sources:',
+        'Captions are optional text rendered under the image. Set them once in the sidebar library (the pencil icon) or per attachment in File properties — they render in the preview and every export format.',
+      ],
+      terms: [
+        {
+          term: 'Library image',
+          text: 'A fixed image chosen from the library — the same picture every time. Good for logos and diagrams.',
+        },
+        {
+          term: 'Bound image field',
+          text: 'An image-kind field: the picture is chosen per section or per file when you fill the field, so each instance can show a different screenshot.',
+        },
+        {
+          term: 'Images attached to the current file',
+          text: 'Inside a Block, the Image node can render the images you attached to that specific file in File properties — one node, every file’s own pictures.',
+        },
+        {
+          term: 'The library',
+          text: 'Upload images with the Images pill in the upload area (or just drop them). They appear in the sidebar’s “Image library” panel with thumbnails, names and captions — one storage shared by the preview and all exporters. Remove an image there and it is gone everywhere. The library stays in your browser across sessions (up to 40 images); when that limit is exceeded the oldest are dropped from storage first and a warning names them.',
+        },
+      ],
+    },
+    {
+      id: 'exports',
+      title: 'Multiple exports: modes, groups, tabs',
+      paragraphs: [
+        'You are not limited to one output document. The export mode decides how many files you get:',
+        'Export groups can also be given their own layout and their own first page. With “same layout for all exports” enabled, every export follows the globally applied layout; turn it off to assign a different layout per export. The preview shows one export at a time in browser-style tabs, so you can flip through what each document will contain.',
+      ],
+      terms: [
+        {
+          term: 'Combined',
+          text: 'All selected projects flow into ONE document. Each section of the layout appears once, in order.',
+        },
+        {
+          term: 'Separate (one per project)',
+          text: 'One document per project, packaged as a ZIP. Each per-project document keeps the full section structure — only the files inside the blocks differ.',
+        },
+        {
+          term: 'Export groups',
+          text: 'Named, ordered project sets (Group A = Project A + C, Group B = B + A). A project may belong to any number of groups; each group exports exactly its own document. Groups persist across sessions: names, per-export layout/first-page/filename choices survive a reload, and projects simply get re-assigned after you upload them again. Each row shows a live summary — how many projects, files and bytes the export would contain right now.',
+        },
+        {
+          term: 'Managing groups (duplicate, rename, reorder, assign)',
+          text: 'Duplicate a group with the copy button — a full scaffold copy (projects, layout, first page, filename override) is inserted right under the source as “name (copy)”. Rename a group with the pencil button (or double-click its name). Reorder groups by dragging the row handle — or focus it and press ↑/↓. Assign projects three ways: click "+ Add projects" in the row, or drag a project from the sidebar straight onto the group row (click order = document order). Inside a group, drag a project chip or use its ↑/↓ buttons to fine-tune the document assembly order. Each group can also override its output file name (tokens: {title}, {group}, {date}) — leave it empty for the default “filename_group”. A chip dragged onto ANOTHER group’s row moves the project there (the row says “move here” so you can tell a move from an add) — or press the ▸ button on a chip for a “Move to…” list of the other groups, no drag needed.',
+        },
+        {
+          term: 'Generate all (one click per scaffold)',
+          text: 'The “Generate all” button in the groups header runs every group that has projects with selected files, one after another in scaffold order. Empty groups are skipped and counted in the summary toast instead of stopping the run; each document still gets its own per-group filename and success toast.',
+        },
+        {
+          term: 'Recent exports (re-download)',
+          text: 'The last few generated documents stay listed under “Recent exports” — click one to download it again without re-running the export. History persists in your browser across reloads (up to 5); “Clear history” frees both the memory and the saved copies.',
+        },
+        {
+          term: 'Export tabs',
+          text: 'The tabs above the preview switch between the documents you are about to export — one tab per export.',
+        },
+      ],
+    },
+    {
+      id: 'workflows',
+      title: 'Common workflows, step by step',
+      paragraphs: [
+        'Recipes for the things people build with Codice most often. Everything below happens in the Layout editor (structure) unless the recipe says otherwise.',
+      ],
+      terms: [
+        {
+          term: 'A document over MANY files',
+          text: 'Add a Block to a section, put a “{fileName}” Heading, some text and a Code node inside it, then assign files to the block (one file per instance — assign several, the pattern repeats per file). This is the repeat-per-file pattern: one layout, every file rendered the same way with its own content.',
+        },
+        {
+          term: 'Content OUTSIDE any section',
+          text: 'At File level, add standalone nodes before, between or after Sections — an intro Heading, a Spacer, a closing Panel. They render exactly where they sit in the order; sections and standalone nodes interleave freely.',
+        },
+        {
+          term: 'Repeating a section per file',
+          text: 'Sections themselves are not per-file patterns — use a Section with one Block inside it. The section renders once; the block inside repeats for every assigned file.',
+        },
+        {
+          term: 'Several DIFFERENT exports (e.g. report + answer sheet)',
+          text: 'Switch the export mode to “Export groups”, create two groups, and assign different projects (or the same projects in a different order) to each. Generate each group with its own button — or run the whole scaffold at once with “Generate all”. Each group is exactly its own document, no content leaks between exports.',
+        },
+        {
+          term: 'A different layout PER export',
+          text: 'Turn “Use the same layout for all exports” off; each group row gains a Layout select. Leave it on and every export follows the one applied layout (shared layout mode).',
+        },
+        {
+          term: 'Appearance-only changes',
+          text: 'Restyle in the Template editor (fonts, colors, density, Shiki theme) — the layout structure is untouched, so you can flip presets without rebuilding the document.',
+        },
+        {
+          term: 'A custom cover page',
+          text: 'Import a one-page .docx in the Cover pages panel, then set the group\u2019s (or the export\u2019s) First page to “Cover page”. DOCX keeps it exactly as authored; PDF and ODT re-create it from its text, formatting and images (best effort).',
+        },
+        {
+          term: 'Filling content later (fields)',
+          text: 'Bind nodes to fields instead of static text. Required fields with no value block the export with a precise message and a “Fill content” affordance — nothing exports half-empty by surprise.',
+        },
+      ],
+    },
+    {
+      id: 'covers',
+      title: 'Cover pages',
+      paragraphs: [
+        'Codice does not design cover pages for you — you import one. Provide a one-page .docx (a cover you made in Word, Google Docs or exported from a design tool) and Codice uses its FIRST PAGE ONLY, kept as raw document data — never redesigned by Codice.',
+        'Each export then chooses its own first page: the generated title page, or the imported cover instead of it. If the uploaded document has several pages, everything after page one is ignored.',
+        'Imported cover pages stay in your browser across sessions (up to 20) — reload Codice and your cover library is still there.',
+        'Cover pages apply to DOCX, PDF and ODT exports. DOCX preserves the cover exactly as authored; PDF and ODT re-create it from its text, formatting and images (best effort — exotic shapes may simplify).',
+      ],
+    },
+    {
+      id: 'selection-rules',
+      title: 'Selection rules & default file selection',
+      paragraphs: [
+        'Uploading a folder grabs everything — but you rarely want everything. Two mechanisms keep the selection useful:',
+        'Selection RULES (per project, in the sidebar) are gitignore-like glob patterns. Exclude rules deselect matching files (build/**, node_modules/**, *.log); include rules rescue files that would be excluded (**/*.kt, src/**). Rules apply live — the tree, statistics and exports update instantly — and you can still include or exclude any individual file afterwards: a manual override always wins over the rules. Save rule sets as presets and re-apply or share them as JSON.',
+        'Default file-selection preferences (the “Defaults” button in the upload area) define what happens the moment a project is uploaded: default excluded extensions, force-included extensions, exclude/include patterns and excluded directories. The precedence is fixed and displayed in the dialog: default rules first, then per-project rules, then manual overrides. Changing the defaults never rewrites projects that are already loaded — the rules apply to the next upload.',
+      ],
+      terms: [
+        {
+          term: 'Pattern syntax',
+          text: '* matches within one path segment, ** crosses directories, and a pattern without a slash (like *.java) matches the file name anywhere. Patterns are matched against the path relative to the project root.',
+        },
+        {
+          term: 'Where the rules live',
+          text: 'Exclude and include tabs live in the sidebar for the selected project. The upload-area “Defaults” button opens the global default selection preferences dialog.',
+        },
       ],
     },
     {
       id: 'panels',
-      title: 'Panels, columns, dividers and shapes',
+      title: 'Panels: structure vs. styling',
       paragraphs: [
-        'Panels are bordered/filled containers that stack other nodes; columns render side-by-side stacks; dividers are horizontal rules; spacers add vertical space. Panels are identified by a stable internal node id — so two panels with identical text can be styled independently in Template editor → Theme Settings → Document Colors → Panels. Panels without their own colors use the preset’s panel fill/border/text defaults.',
+        'A Panel is a visual container — fill, border, rounded corners, padding — with content stacked inside it. Columns place two or three stacks side by side.',
+        'The split of responsibilities: the LAYOUT editor decides that a panel exists, where it sits, its padding, height and border width. The TEMPLATE editor (Theme → Panels) owns the colors: the preset-wide panel fill/border/text defaults plus a per-panel override list that lets you style each individual panel of the applied layout by its stable id — two panels both labelled “Output” can have completely different colors.',
+        'The panel text color really colors the text inside the panel: children without their own color inherit it, in the preview and in DOCX, PDF and ODT exports alike.',
       ],
     },
     {
-      id: 'styling-vs-layout',
-      title: 'Styling vs. layout templates',
+      id: 'projects',
+      title: 'Projects: merge, unmerge, order, outline, statistics',
       paragraphs: [
-        'Two separate systems: the STYLE PRESET (Template editor) controls how things look — page size, margins, fonts, colors, headers/footers, Shiki theme, panel colors. The LAYOUT TEMPLATE (Layout studio) controls what the document contains and in what order — sections, fields, blocks. Neither hardcodes the other’s job.',
+        'Projects can be merged into one (the merge button on a project row) and split back apart with Unmerge — undoable, with every file keeping its identity even when two projects contain the exact same path.',
+        'The Document order panel in the sidebar sets the canonical file order used by the preview, the Outline and all exporters. Projects with many files collapse like accordions (click a project header to fold or unfold it); drag or use ↑/↓ inside a project — files never cross project boundaries.',
+        'The Outline pill above the preview lists the real document structure — headings, title page, TOC, sections and files (file names only; hover for the full path; duplicate names show enough path to tell them apart). The Statistics pill shows files, languages, sizes and more. Both popovers close on outside click and Escape.',
       ],
     },
     {
-      id: 'export',
-      title: 'Exporting: combined, separate, groups',
-      paragraphs: [],
+      id: 'pages',
+      title: 'Pages, headers, footers, TOC',
+      paragraphs: [
+        'Page settings (size, margins, headers and footers) live in the Layout editor — they are structure. Document Density (how tight the spacing is) stays in the Template editor — it is styling.',
+        'Headers and footers have left/center/right slots with tokens: {title}, {author}, {date}, {time} (e.g. {time:HH:mm} for a formatted clock), {page}, {pages}, {files}, {projectName}, {fileName} and {lines}, plus offsets and spacing.',
+        'Page breaks are real page boundaries — insert them as layout nodes, or configure them per file/project/heading. The table of contents is a node too: drop a TOC node where you want it, or toggle it with the title page in the Template editor.',
+      ],
+    },
+    {
+      id: 'styling',
+      title: 'Layout templates vs. style presets',
+      paragraphs: [
+        'Two systems, two questions. The LAYOUT TEMPLATE (Layouts button) answers “what does the document contain, in what order”. The STYLE PRESET (Template button) answers “how does it look”.',
+        'Because they are separate, you can restyle any document without touching its structure — and reuse one layout across completely different presets.',
+      ],
       terms: [
         {
-          term: 'Combined',
-          text: 'All selected projects flow into ONE document. Every section of the layout appears once, in order.',
+          term: 'Style Preset',
+          text: 'Fonts, colors, Shiki syntax theme, panel styling, Document Density. Save the current look as a preset, import/export presets from the Template editor.',
         },
         {
-          term: 'Separate',
-          text: 'One document per project, packaged as a ZIP. Every per-project document keeps the FULL section structure of the layout — sections are never divided between projects; only the files inside blocks differ per project.',
+          term: 'Layout Template',
+          text: 'Sections, blocks, nodes, fields. Create, duplicate, rename and delete layouts in the Layout editor; import/export them as JSON to share or back them up. The applied layout drives the preview and every export.',
         },
         {
-          term: 'Export groups',
-          text: 'Named, ordered project sets (e.g. Group A = Project A + C, Group B = B + A). A project may belong to any number of groups. Each group generates exactly its own combined document.',
-        },
-        {
-          term: 'Merge / Unmerge',
-          text: 'Explicitly merge projects into one and split them back — undoable, preserving file identity even when two projects contain the exact same path.',
+          term: 'Shiki theme',
+          text: 'The syntax-highlighting color scheme for code blocks — picked in the Template editor, applied consistently in the preview and all export formats.',
         },
       ],
     },
     {
-      id: 'order-outline',
-      title: 'Document order, Outline and Statistics',
+      id: 'formats',
+      title: 'Export formats',
       paragraphs: [
-        'The Document order panel in the sidebar (and the Outline panel’s ↑/↓) control the canonical file order used by the preview, Outline and all three exporters. The Output pill lists the document structure from the resolved document — headings, title page, TOC, projects and files (filename only; hover for the full path; duplicate filenames show paths to disambiguate). Statistics shows files, languages, sizes and more. Both popovers close on outside click and Escape.',
-      ],
-    },
-    {
-      id: 'page-setup',
-      title: 'Pages, breaks, headers and footers',
-      paragraphs: [
-        'Page breaks are real page boundaries. Configure them per file/project/H1 or per layout section (“page break” checkbox). Headers and footers support left/center/right slots with tokens: {time}, {date}, {fileName}, {projectName}, page numbers, page count and lines-on-page, with offsets and spacing. TOC and title page are toggled in the Template editor.',
-      ],
-    },
-    {
-      id: 'presets',
-      title: 'Presets and layout templates',
-      paragraphs: [],
-      terms: [
-        {
-          term: 'Save Preset',
-          text: 'Store the current style (fonts, colors, page setup) as a reusable preset; import/export via the Template editor.',
-        },
-        {
-          term: 'Layout templates',
-          text: 'Layouts live in the Layout studio: create, duplicate, rename, delete, import/export as JSON. The applied layout drives the preview and exports; “Unapply” returns to the standard document flow.',
-        },
-        {
-          term: 'Required fields',
-          text: 'A required field without a value BLOCKS the export with a precise message (which section/block/file is missing what). Fill it in the Content dialog or File properties.',
-        },
+        'The same document exports to DOCX (Word), PDF and ODT (LibreOffice) from the export rail. Everything you configured — layout, styling, images, headers, cover pages where supported — carries into each format. Press Ctrl+E to start the export, or use the Generate button.',
+        'Everything runs locally in your browser; your source code is never uploaded anywhere.',
       ],
     },
   ];
@@ -235,6 +341,16 @@ function HelpDialogInner({ onClose }: { onClose: () => void }) {
   const shortcuts = getShortcuts(isMac);
   const guide = getGuideSections();
   const [tab, setTab] = useState<'shortcuts' | 'guide'>('shortcuts');
+
+  /** R12 — jump-to-section from the guide's chip navigation. */
+  const jumpToSection = (id: string) => {
+    setTab('guide');
+    requestAnimationFrame(() => {
+      document
+        .getElementById(`help-sec-${id}`)
+        ?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    });
+  };
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -320,21 +436,53 @@ function HelpDialogInner({ onClose }: { onClose: () => void }) {
             </ul>
           ) : (
             <div className="space-y-4">
-              {guide.map((section) => (
-                <section key={section.id} aria-label={section.title}>
+              {/* R12 — chip navigation: the guide is 12 sections deep now;
+                  this row jumps straight to a topic without scrolling. */}
+              <nav
+                aria-label="Guide topics"
+                className="flex flex-wrap gap-1 rounded-md border border-app bg-app/60 p-1.5"
+              >
+                {guide.map((section, i) => (
+                  <button
+                    key={section.id}
+                    type="button"
+                    className="rounded-full border border-transparent px-2 py-0.5 text-[10px] text-secondary transition-all hover:border-[var(--color-accent)] hover:text-primary focus-visible:outline focus-visible:outline-[var(--color-accent)]"
+                    title={section.title}
+                    onClick={() => jumpToSection(section.id)}
+                  >
+                    <span className="mr-0.5 text-muted tabular-nums">{i + 1}</span>
+                    {section.title.length > 26 ? `${section.title.slice(0, 24)}…` : section.title}
+                  </button>
+                ))}
+              </nav>
+              {guide.map((section, i) => (
+                <section
+                  key={section.id}
+                  id={`help-sec-${section.id}`}
+                  aria-label={section.title}
+                  className="scroll-mt-2"
+                >
                   <h3 className="mb-1 flex items-center gap-1.5 text-sm font-semibold text-primary">
-                    <BookOpen size={13} className="text-secondary" />
+                    <span
+                      className="flex h-4 w-4 flex-shrink-0 items-center justify-center rounded bg-[color-mix(in_srgb,var(--color-accent)_16%,transparent)] text-[9px] font-bold text-[var(--color-accent)]"
+                      aria-hidden="true"
+                    >
+                      {i + 1}
+                    </span>
                     {section.title}
                   </h3>
-                  {section.paragraphs.map((p, i) => (
-                    <p key={i} className="mb-1.5 text-xs leading-relaxed text-secondary">
+                  {section.paragraphs.map((p, j) => (
+                    <p key={j} className="mb-1.5 text-xs leading-relaxed text-secondary">
                       {p}
                     </p>
                   ))}
                   {section.terms && (
                     <dl className="space-y-1.5">
                       {section.terms.map((t) => (
-                        <div key={t.term} className="rounded-md border border-app px-2 py-1.5">
+                        <div
+                          key={t.term}
+                          className="rounded-md border border-app border-l-2 border-l-[var(--color-accent)] px-2 py-1.5 transition-colors hover:bg-app/40"
+                        >
                           <dt className="text-xs font-semibold text-primary">{t.term}</dt>
                           <dd className="mt-0.5 text-xs leading-relaxed text-secondary">{t.text}</dd>
                         </div>

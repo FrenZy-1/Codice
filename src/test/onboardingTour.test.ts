@@ -29,10 +29,22 @@ describe('tour step catalogue', () => {
       'files',
       'rules',
       'stats',
+      'layouts',
       'template',
+      'images',
       'preview',
       'export',
     ]);
+    // R12 — the structure/styling split must be stated correctly: the
+    // Template step must NOT claim page layout/headers/footers (they live
+    // in the Layout editor since WS-2), and the export step mentions the
+    // groups mode. Pinned so the copy cannot drift back.
+    const template = steps.find((s) => s.target === 'template')!;
+    expect(template.body).toMatch(/Document Density/);
+    expect(template.body).toMatch(/Layout editor instead/);
+    expect(template.body.toLowerCase()).not.toMatch(/page layout/);
+    const exportStep = steps.find((s) => s.target === 'export')!;
+    expect(exportStep.body).toMatch(/Export groups/);
   });
 
   it('every step has a title, body and valid placement', () => {

@@ -21,6 +21,9 @@ import {
   cloneTemplate,
   genLayoutId,
   migrateTemplateV1,
+  normalizeTemplate,
+  templateSections,
+  templateRootNodes,
   SECTION_TYPE_PRESETS,
   type CustomLayoutTemplate,
   type CustomLayoutTemplateV1,
@@ -123,6 +126,13 @@ function makeImage(id: string, over: Partial<ImageAsset> = {}): ImageAsset {
   };
 }
 
+/** v3 helper — the template's first (starter) section. */
+function firstSection(t: CustomLayoutTemplate): TemplateSection {
+  const sections = templateSections(t);
+  if (sections.length === 0) throw new Error('template has no section');
+  return sections[0];
+}
+
 const BASE_FILTER = {
   excludedDirs: [] as string[],
   excludedExtensions: [] as string[],
@@ -175,13 +185,16 @@ describe('document ordering (§13-§15/§36)', () => {
 /* §16-§24 — custom layout model                                       */
 /* ------------------------------------------------------------------ */
 
-describe('custom layout model v2 (§1-§4/§16-§24)', () => {
+describe('custom layout model v3 (§1-§4/§16-§24)', () => {
   it('creates a starter template with one Task section (§1)', () => {
     const t = createEmptyTemplate('Coursework');
     expect(t.name).toBe('Coursework');
-    expect(t.version).toBe(2);
-    expect(t.sections).toHaveLength(1);
-    const s = t.sections[0];
+    expect(t.version).toBe(3);
+    // v3 §2 — ONE ordered root container holding just the starter section.
+    expect(t.rootChildren.map((c) => c.kind)).toEqual(['section']);
+    const sections = templateSections(t);
+    expect(sections).toHaveLength(1);
+    const s = sections[0];
     expect(s.type).toBe('task');
     expect(s.fields.map((f) => f.label)).toEqual(['Task Title', 'Description']);
     expect(s.children.every((c) => c.kind === 'node')).toBe(true);
@@ -190,10 +203,10 @@ describe('custom layout model v2 (§1-§4/§16-§24)', () => {
   it('clones deeply — no shared references between copies (§8/§24)', () => {
     const t = createEmptyTemplate('A');
     const copy = cloneTemplate(t);
-    copy.sections[0].name = 'mutated';
-    copy.sections[0].fields.push({ id: 'x', label: 'x', kind: 'text', required: true });
-    expect(t.sections[0].name).not.toBe('mutated');
-    expect(t.sections[0].fields).toHaveLength(2);
+    firstSection(copy).name = 'mutated';
+    firstSection(copy).fields.push({ id: 'x', label: 'x', kind: 'text', required: true });
+    expect(firstSection(t).name).not.toBe('mutated');
+    expect(firstSection(t).fields).toHaveLength(2);
   });
 
   it('generates unique ids', () => {
@@ -220,8 +233,17 @@ describe('custom layout model v2 (§1-§4/§16-§24)', () => {
 
   it('example template mirrors the acceptance example (§29/§0)', () => {
     const t = createExampleTemplate();
-    expect(t.sections.map((s) => s.type)).toEqual(['task', 'descriptionAnswer']);
-    const taskSection = t.sections[0];
+    // §2 — ONE ordered root container: a title node BEFORE the sections,
+    // a spacer + closing panel AFTER them (the interleave v2 could not
+    // represent).
+    expect(t.rootChildren.map((c) => c.kind)).toEqual([
+      'node', 'section', 'section', 'node', 'node',
+    ]);
+    expect(templateRootNodes(t).map((n) => n.type)).toEqual(['heading', 'spacer', 'panel']);
+    expect(templateRootNodes(t)[0]).toMatchObject({ type: 'heading', text: 'Tasks & Answers' });
+    const sections = templateSections(t);
+    expect(sections.map((s) => s.type)).toEqual(['task', 'descriptionAnswer']);
+    const taskSection = sections[0];
     const blockChild = taskSection.children.find(
       (c): c is Extract<SectionChild, { kind: 'block' }> => c.kind === 'block',
     );
@@ -231,11 +253,18 @@ describe('custom layout model v2 (§1-§4/§16-§24)', () => {
       'description',
       'file',
       'note',
-      'fileImages',
+      'image',
     ]);
+    // §8 — the per-file screenshot slot is the unified Image primitive
+    // sourcing the file's attached images (legacy `fileImages` is gone).
+    expect(blockChild!.block.nodes[4]).toMatchObject({
+      type: 'image',
+      style: { imageSource: 'fileAttachments' },
+    });
     // required section fields exist for validation
-    expect(taskSection.fields.filter((f) => f.required).map((f) => f.label)).toContain('Task Title');
-    expect(taskSection.fields.filter((f) => f.required).map((f) => f.label)).toContain('Output Screenshot');
+    const requiredLabels = taskSection.fields.filter((f) => f.required).map((f) => f.label);
+    expect(requiredLabels).toContain('Task Title');
+    expect(requiredLabels).toContain('Screenshot');
   });
 
   it('migrates legacy v1 templates into the hierarchy (§9)', () => {
@@ -252,17 +281,18 @@ describe('custom layout model v2 (§1-§4/§16-§24)', () => {
         { id: 'b2', type: 'code' },
       ],
     };
-    const v2 = migrateTemplateV1(v1);
-    expect(v2.version).toBe(2);
-    expect(v2.sections).toHaveLength(1);
+    const v3 = migrateTemplateV1(v1);
+    expect(v3.version).toBe(3);
+    const sections = templateSections(v3);
+    expect(sections).toHaveLength(1);
     // File-bound v1 nodes fold into a block definition…
-    const blockChild = v2.sections[0].children.find(
+    const blockChild = sections[0].children.find(
       (c): c is Extract<SectionChild, { kind: 'block' }> => c.kind === 'block',
     );
     expect(blockChild).toBeTruthy();
     expect(blockChild!.block.nodes.map((n) => n.type)).toEqual(['code']);
     // …while standalone nodes (heading) remain section content.
-    const nodeChildren = v2.sections[0].children.filter((c) => c.kind === 'node');
+    const nodeChildren = sections[0].children.filter((c) => c.kind === 'node');
     expect(nodeChildren).toHaveLength(1);
   });
 });
@@ -271,7 +301,7 @@ describe('custom layout model v2 (§1-§4/§16-§24)', () => {
 /* §3/§4/§17 — resolver semantics (sections, blocks, fields)           */
 /* ------------------------------------------------------------------ */
 
-describe('custom layout resolver v2 (§3/§4/§17)', () => {
+describe('custom layout resolver v3 (§3/§4/§17)', () => {
   const projects = [makeDocProject('p1', 'Proj One', ['f1', 'f2'])];
   const inputs = (over: Partial<Parameters<typeof resolveCustomLayout>[1]> = {}) => ({
     projects,
@@ -287,18 +317,24 @@ describe('custom layout resolver v2 (§3/§4/§17)', () => {
   });
 
   function oneSectionTemplate(build: (s: TemplateSection) => void): CustomLayoutTemplate {
-    const t = createEmptyTemplate('T');
-    t.sections = [];
     const s = createSection('custom', 'S');
     build(s);
-    t.sections.push(s);
-    return t;
+    return {
+      id: genLayoutId('clt'),
+      name: 'T',
+      description: '',
+      version: 3,
+      createdAt: 1,
+      updatedAt: 1,
+      rootChildren: [{ kind: 'section', section: s }],
+      fields: [],
+    };
   }
 
   it('renders sections once, in order; block instances repeat per assigned file (§3)', () => {
     const t = createEmptyTemplate('T');
     const block = createBlockDef('Code', [{ type: 'heading', text: '{fileName}', style: { level: 2 } }]);
-    t.sections[0].children.push({ kind: 'block', id: genLayoutId('ch'), block });
+    firstSection(t).children.push({ kind: 'block', block });
     const resolved = resolveCustomLayout(t, inputs({
       assignments: { [block.id]: ['f1', 'f2'] },
     }));
@@ -310,13 +346,13 @@ describe('custom layout resolver v2 (§3/§4/§17)', () => {
   it('a file with NO block assignment renders no file content, but the section keeps its structural place (§3 fallback)', () => {
     const t = createEmptyTemplate('T');
     const block = createBlockDef('Code', [{ type: 'file' }]);
-    t.sections[0].children.push({ kind: 'block', id: genLayoutId('ch'), block });
+    firstSection(t).children.push({ kind: 'block', block });
     const resolved = resolveCustomLayout(t, inputs());
     // §3 — an empty section must not silently vanish: the fallback heading
     // carries the section's own name so every document shows the full
     // Section structure of the layout.
     expect(resolved.blocks).toHaveLength(1);
-    expect(resolved.blocks[0]).toMatchObject({ kind: 'heading', text: t.sections[0].name });
+    expect(resolved.blocks[0]).toMatchObject({ kind: 'heading', text: firstSection(t).name });
   });
 
   it('the block pattern repeats exactly ONCE per file — never duplicates (§3/§27)', () => {
@@ -325,7 +361,7 @@ describe('custom layout resolver v2 (§3/§4/§17)', () => {
       { type: 'heading', text: '{fileName}', style: { level: 2 } },
       { type: 'code' },
     ]);
-    t.sections[0].children.push({ kind: 'block', id: genLayoutId('ch'), block });
+    firstSection(t).children.push({ kind: 'block', block });
     const resolved = resolveCustomLayout(t, inputs({
       assignments: { [block.id]: ['f1', 'f2'] },
     }));
@@ -339,7 +375,7 @@ describe('custom layout resolver v2 (§3/§4/§17)', () => {
   it('assigned files render in the CANONICAL document order, not assignment order (§10)', () => {
     const t = createEmptyTemplate('T');
     const block = createBlockDef('Code', [{ type: 'heading', text: '{fileName}', style: { level: 1 } }]);
-    t.sections[0].children.push({ kind: 'block', id: genLayoutId('ch'), block });
+    firstSection(t).children.push({ kind: 'block', block });
     const resolved = resolveCustomLayout(t, inputs({
       assignments: { [block.id]: ['f2', 'f1'] },      // deliberately reversed
       fileOrder: { p1: ['f1', 'f2'] },                 // canonical order
@@ -349,16 +385,17 @@ describe('custom layout resolver v2 (§3/§4/§17)', () => {
 
   it('section fields resolve once per section — NOT once per file (§4/§27)', () => {
     const t = createEmptyTemplate('T');
+    const s = firstSection(t);
     const block = createBlockDef('Code', [{ type: 'code' }]);
     const titleField = { id: 'title', label: 'Task Title', kind: 'text' as const, required: false };
-    t.sections[0].fields.push(titleField);
-    t.sections[0].children.push(
-      { kind: 'node', id: genLayoutId('ch'), node: { id: genLayoutId('n'), type: 'text', fieldId: 'title' } },
-      { kind: 'block', id: genLayoutId('ch'), block },
+    s.fields.push(titleField);
+    s.children.push(
+      { kind: 'node', node: { id: genLayoutId('n'), type: 'text', fieldId: 'title' } },
+      { kind: 'block', block },
     );
     const resolved = resolveCustomLayout(t, inputs({
       assignments: { [block.id]: ['f1', 'f2'] },
-      sectionFieldValues: { [t.sections[0].id]: { title: 'Chapter 1' } },
+      sectionFieldValues: { [s.id]: { title: 'Chapter 1' } },
     }));
     const paragraphs = resolved.blocks.filter((b) => b.kind === 'paragraph');
     expect(paragraphs).toHaveLength(1); // once, not once per file
@@ -372,7 +409,7 @@ describe('custom layout resolver v2 (§3/§4/§17)', () => {
     const block = createBlockDef('Code', [
       { type: 'text', fieldId: 'nf' },
     ], [noteField]);
-    t.sections[0].children.push({ kind: 'block', id: genLayoutId('ch'), block });
+    firstSection(t).children.push({ kind: 'block', block });
     const resolved = resolveCustomLayout(t, inputs({
       assignments: { [block.id]: ['f1', 'f2'] },
       fileFieldValues: { f1: { nf: 'first' }, f2: { nf: 'second' } },
@@ -387,7 +424,7 @@ describe('custom layout resolver v2 (§3/§4/§17)', () => {
       { type: 'summary' },
       { type: 'note' },
     ]);
-    t.sections[0].children.push({ kind: 'block', id: genLayoutId('ch'), block });
+    firstSection(t).children.push({ kind: 'block', block });
     const resolved = resolveCustomLayout(t, inputs({
       assignments: { [block.id]: ['f1', 'f2'] },
       fileDetails: {
@@ -401,10 +438,12 @@ describe('custom layout resolver v2 (§3/§4/§17)', () => {
     expect(resolved.blocks[3]).toMatchObject({ kind: 'labeled', label: 'Description', text: 'D2' });
   });
 
-  it('fileImages node expands the file\'s attached images with captions (§7/§16)', () => {
+  it("image node with imageSource 'fileAttachments' expands the file's attached images with captions (§7/§16)", () => {
     const t = createEmptyTemplate('T');
-    const block = createBlockDef('Imgs', [{ type: 'fileImages' }]);
-    t.sections[0].children.push({ kind: 'block', id: genLayoutId('ch'), block });
+    // v3 §8 — ONE Image primitive: the legacy `fileImages` node type became
+    // an image node with style.imageSource = 'fileAttachments'.
+    const block = createBlockDef('Imgs', [{ type: 'image', style: { imageSource: 'fileAttachments' } }]);
+    firstSection(t).children.push({ kind: 'block', block });
     const docProject = makeDocProject('p1', 'Proj One', ['f1', 'f2']);
     docProject.files[0].images = [
       { id: 'img1', name: 'a.png', dataUrl: TINY_PNG, mime: 'image/png', width: 4, height: 4, caption: 'First shot' },
@@ -418,15 +457,16 @@ describe('custom layout resolver v2 (§3/§4/§17)', () => {
 
   it('resolves section-scope image fields from the section value store (§7)', () => {
     const t = createEmptyTemplate('T');
+    const s = firstSection(t);
     const shotField = { id: 'shot', label: 'Screenshot', kind: 'image' as const, required: false };
-    t.sections[0].fields.push(shotField);
-    t.sections[0].children.push(
-      { kind: 'node', id: genLayoutId('ch'), node: { id: genLayoutId('n'), type: 'image', fieldId: 'shot' } },
+    s.fields.push(shotField);
+    s.children.push(
+      { kind: 'node', node: { id: genLayoutId('n'), type: 'image', fieldId: 'shot' } },
     );
     const asset = makeImage('img1');
     const resolved = resolveCustomLayout(t, inputs({
       imageAssets: { img1: asset },
-      sectionFieldValues: { [t.sections[0].id]: { shot: 'img1' } },
+      sectionFieldValues: { [s.id]: { shot: 'img1' } },
     }));
     expect(resolved.blocks).toHaveLength(1);
     expect(resolved.blocks[0]).toMatchObject({ kind: 'image', imageId: 'img1', dataUrl: TINY_PNG });
@@ -436,7 +476,7 @@ describe('custom layout resolver v2 (§3/§4/§17)', () => {
     const t = createEmptyTemplate('T');
     const shotField = { id: 'shot', label: 'Screenshot', kind: 'image' as const, required: false };
     const block = createBlockDef('Imgs', [{ type: 'image', fieldId: 'shot' }], [shotField]);
-    t.sections[0].children.push({ kind: 'block', id: genLayoutId('ch'), block });
+    firstSection(t).children.push({ kind: 'block', block });
     const asset = makeImage('img1');
     const resolved = resolveCustomLayout(t, inputs({
       imageAssets: { img1: asset },
@@ -450,7 +490,7 @@ describe('custom layout resolver v2 (§3/§4/§17)', () => {
   it('expands {filePath} and shared tokens in text nodes', () => {
     const t = createEmptyTemplate('T');
     const block = createBlockDef('Txt', [{ type: 'text', text: '{filePath} ({projectName})' }]);
-    t.sections[0].children.push({ kind: 'block', id: genLayoutId('ch'), block });
+    firstSection(t).children.push({ kind: 'block', block });
     const resolved = resolveCustomLayout(t, inputs({
       assignments: { [block.id]: ['f1'] },
     }));
@@ -469,7 +509,7 @@ describe('custom layout resolver v2 (§3/§4/§17)', () => {
       { type: 'fileSize' },
       { type: 'lineCount' },
     ]);
-    t.sections[0].children.push({ kind: 'block', id: genLayoutId('ch'), block });
+    firstSection(t).children.push({ kind: 'block', block });
     const resolved = resolveCustomLayout(t, inputs({
       assignments: { [block.id]: ['f1'] },
     }));
@@ -479,11 +519,10 @@ describe('custom layout resolver v2 (§3/§4/§17)', () => {
 
   it('resolves panels, columns and dividers with their children (§6)', () => {
     const t = oneSectionTemplate(() => {});
-    const s = t.sections[0];
+    const s = templateSections(t)[0];
     s.children.push(
       {
         kind: 'node',
-        id: genLayoutId('ch'),
         node: {
           id: genLayoutId('n'),
           type: 'columns',
@@ -496,7 +535,6 @@ describe('custom layout resolver v2 (§3/§4/§17)', () => {
       },
       {
         kind: 'node',
-        id: genLayoutId('ch'),
         node: {
           id: genLayoutId('n'),
           type: 'panel',
@@ -504,7 +542,7 @@ describe('custom layout resolver v2 (§3/§4/§17)', () => {
           children: [[{ id: genLayoutId('n'), type: 'text', text: 'inside' }]],
         },
       },
-      { kind: 'node', id: genLayoutId('ch'), node: { id: genLayoutId('n'), type: 'divider', style: { heightPt: 2, fillColor: '#333' } } },
+      { kind: 'node', node: { id: genLayoutId('n'), type: 'divider', style: { heightPt: 2, fillColor: '#333' } } },
     );
     const resolved = resolveCustomLayout(t, inputs());
     expect(resolved.blocks[0]).toMatchObject({ kind: 'columns', count: 2 });
@@ -514,10 +552,10 @@ describe('custom layout resolver v2 (§3/§4/§17)', () => {
 
   it('empty panels with a height become filled boxes; without height they vanish', () => {
     const t = createEmptyTemplate('T');
-    const s = t.sections[0];
+    const s = firstSection(t);
     s.children.push(
-      { kind: 'node', id: genLayoutId('ch'), node: { id: genLayoutId('n'), type: 'panel', style: { heightPt: 12, fillColor: '#ccc' }, children: [[]] } },
-      { kind: 'node', id: genLayoutId('ch'), node: { id: genLayoutId('n'), type: 'panel', style: {}, children: [[]] } },
+      { kind: 'node', node: { id: genLayoutId('n'), type: 'panel', style: { heightPt: 12, fillColor: '#ccc' }, children: [[]] } },
+      { kind: 'node', node: { id: genLayoutId('n'), type: 'panel', style: {}, children: [[]] } },
     );
     const resolved = resolveCustomLayout(t, inputs());
     expect(resolved.blocks).toHaveLength(1);
@@ -526,22 +564,22 @@ describe('custom layout resolver v2 (§3/§4/§17)', () => {
 
   it('pageBreakBefore on a section starts it on a fresh page (§18)', () => {
     const t = createEmptyTemplate('T');
-    t.sections[0].children.push(
-      { kind: 'node', id: genLayoutId('ch'), node: { id: genLayoutId('n'), type: 'text', text: 'one' } },
+    firstSection(t).children.push(
+      { kind: 'node', node: { id: genLayoutId('n'), type: 'text', text: 'one' } },
     );
     const s2 = createSection('custom', 'Two');
     s2.pageBreakBefore = true;
-    s2.children.push({ kind: 'node', id: genLayoutId('ch'), node: { id: genLayoutId('n'), type: 'text', text: 'two' } });
-    t.sections.push(s2);
+    s2.children.push({ kind: 'node', node: { id: genLayoutId('n'), type: 'text', text: 'two' } });
+    t.rootChildren.push({ kind: 'section', section: s2 });
     const resolved = resolveCustomLayout(t, inputs());
     expect(resolved.blocks.map((b) => b.kind)).toEqual(['paragraph', 'pageBreak', 'paragraph']);
   });
 
   it('file-bound nodes without a file context are skipped instead of failing (§35)', () => {
     const t = createEmptyTemplate('T');
-    t.sections[0].children.push(
-      { kind: 'node', id: genLayoutId('ch'), node: { id: genLayoutId('n'), type: 'description' } },
-      { kind: 'node', id: genLayoutId('ch'), node: { id: genLayoutId('n'), type: 'text', text: 'ok' } },
+    firstSection(t).children.push(
+      { kind: 'node', node: { id: genLayoutId('n'), type: 'description' } },
+      { kind: 'node', node: { id: genLayoutId('n'), type: 'text', text: 'ok' } },
     );
     const resolved = resolveCustomLayout(t, inputs());
     expect(resolved.blocks).toHaveLength(1);
@@ -552,27 +590,38 @@ describe('custom layout resolver v2 (§3/§4/§17)', () => {
 /* §5 — required-field validation (through the layout structure)        */
 /* ------------------------------------------------------------------ */
 
-describe('custom layout validation v2 (§5)', () => {
-  function v2Template(): CustomLayoutTemplate {
+describe('custom layout validation v3 (§5)', () => {
+  function v3Template(): CustomLayoutTemplate {
     const t = createEmptyTemplate('T');
-    const s = t.sections[0];
+    const s = firstSection(t);
+    // v3 §20 — fields are DERIVED from content: a labeled text node binds
+    // the required section field, an image node binds the block field.
     s.fields.push({ id: 'out', label: 'Output', kind: 'textarea', required: true });
-    const block = createBlockDef('Code', [{ type: 'code' }], [
+    s.children.push({
+      kind: 'node',
+      node: { id: genLayoutId('n'), type: 'text', fieldId: 'out', style: { label: true } },
+    });
+    const block = createBlockDef('Code', [
+      { type: 'code' },
+      { type: 'image', fieldId: 'shot' },
+    ], [
       { id: 'shot', label: 'Output Screenshot', kind: 'image', required: true },
     ]);
-    s.children.push({ kind: 'block', id: genLayoutId('ch'), block });
-    return t;
+    s.children.push({ kind: 'block', block });
+    // normalizeTemplate rebuilds the derived field lists — the fixture is
+    // exactly what a persisted template would look like.
+    return normalizeTemplate(t);
   }
 
   function blockOf(t: CustomLayoutTemplate): string {
-    for (const child of t.sections[0].children) {
+    for (const child of firstSection(t).children) {
       if (child.kind === 'block') return child.block.id;
     }
     throw new Error('no block child');
   }
 
   it('flags section fields once and block fields per assigned file (§5)', () => {
-    const t = v2Template();
+    const t = v3Template();
     const blockId = blockOf(t);
     const missing = validateCustomLayout({
       template: t,
@@ -595,21 +644,21 @@ describe('custom layout validation v2 (§5)', () => {
   });
 
   it('passes when every required value is filled', () => {
-    const t = v2Template();
+    const t = v3Template();
     const blockId = blockOf(t);
     const missing = validateCustomLayout({
       template: t,
       projects: [makeDocProject('p1', 'P', ['f1'])],
       fileDetails: {},
       fileFieldValues: { f1: { shot: 'img1' } },
-      sectionFieldValues: { [t.sections[0].id]: { out: 'works' } },
+      sectionFieldValues: { [firstSection(t).id]: { out: 'works' } },
       fileAssignments: { [blockId]: ['f1'] },
     });
     expect(missing).toHaveLength(0);
   });
 
   it('identifies the exact section/block/file causing the failure (§5/§27)', () => {
-    const t = v2Template();
+    const t = v3Template();
     const blockId = blockOf(t);
     const missing = validateCustomLayout({
       template: t,
@@ -625,7 +674,7 @@ describe('custom layout validation v2 (§5)', () => {
   });
 
   it('unassigned files are reported as a NON-blocking warning (§3)', () => {
-    const t = v2Template();
+    const t = v3Template();
     const blockId = blockOf(t);
     const unassigned = unassignedFileIds({
       template: t,
@@ -639,7 +688,7 @@ describe('custom layout validation v2 (§5)', () => {
   });
 
   it('does not validate files that are not selected', () => {
-    const t = v2Template();
+    const t = v3Template();
     const blockId = blockOf(t);
     const missing = validateCustomLayout({
       template: t,
@@ -647,7 +696,7 @@ describe('custom layout validation v2 (§5)', () => {
       fileDetails: {},
       fileFieldValues: {},
       // section values are filled so ONLY the (skipped) file issue could flag
-      sectionFieldValues: { [t.sections[0].id]: { out: 'works' } },
+      sectionFieldValues: { [firstSection(t).id]: { out: 'works' } },
       fileAssignments: { [blockId]: ['f1'] },
     });
     expect(missing).toHaveLength(0);
@@ -655,7 +704,7 @@ describe('custom layout validation v2 (§5)', () => {
 });
 
 /* ------------------------------------------------------------------ */
-/* §30 — template persistence (v2 storage + migration)                  */
+/* §30 — template persistence (v3 storage + migration)                  */
 /* ------------------------------------------------------------------ */
 
 describe('custom layout persistence (§30)', () => {
@@ -679,12 +728,15 @@ describe('custom layout persistence (§30)', () => {
 
   it('round-trips through versioned JSON (export/import)', () => {
     const t = createEmptyTemplate('Exportable');
-    t.sections[0].fields.push({ id: 'f1', label: 'Shot', kind: 'image', required: true });
+    const s = firstSection(t);
+    // v3 §20 — the field survives because content binds it (an image node).
+    s.fields.push({ id: 'f1', label: 'Shot', kind: 'image', required: true });
+    s.children.push({ kind: 'node', node: { id: genLayoutId('n'), type: 'image', fieldId: 'f1' } });
     const json = exportLayoutJson(t);
     const imported = importLayoutJson(json);
     expect(imported.name).toBe('Exportable');
-    expect(imported.version).toBe(2);
-    expect(imported.sections[0].fields).toEqual(t.sections[0].fields);
+    expect(imported.version).toBe(3);
+    expect(templateSections(imported)[0].fields).toEqual(firstSection(t).fields);
     expect(imported.id).not.toBe(t.id); // fresh id avoids collisions
     expect(loadCustomLayouts()).toHaveLength(1);
   });
@@ -706,9 +758,10 @@ describe('custom layout persistence (§30)', () => {
     );
     const loaded = loadCustomLayouts();
     expect(loaded).toHaveLength(1);
-    expect(loaded[0].version).toBe(2);
-    expect(loaded[0].sections).toHaveLength(1);
-    const blockChild = loaded[0].sections[0].children.find(
+    expect(loaded[0].version).toBe(3);
+    const sections = templateSections(loaded[0]);
+    expect(sections).toHaveLength(1);
+    const blockChild = sections[0].children.find(
       (c): c is Extract<SectionChild, { kind: 'block' }> => c.kind === 'block',
     );
     expect(blockChild).toBeTruthy();

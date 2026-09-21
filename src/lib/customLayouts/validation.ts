@@ -1,14 +1,18 @@
 /**
- * Required-field validation for custom layouts v2 (§5).
+ * Required-field validation for custom layouts v3 (§5/§20).
  *
  * Runs BEFORE export and works through the ACTUAL resolved layout/data
  * pipeline semantics — never a hardcoded list of known fields:
  *
- *   1. Enumerate every section → its required section fields (checked once
- *      per section, against the section-scope value store).
- *   2. Enumerate every block child → every ASSIGNED file → the block's
- *      required fields (checked per file, against the per-file store).
- *   3. Image fields count as missing when no asset is selected.
+ *   1. Document fields — checked once (document-scope value store).
+ *   2. Every section → its required section fields (checked once per
+ *      section, against the section-scope value store).
+ *   3. Every block child → every ASSIGNED file → the block's required
+ *      fields (checked per file, against the per-file store).
+ *   4. Image fields count as missing when no asset is selected.
+ *
+ * Field lists are read through the DERIVED accessors (content is the
+ * source of truth, §20) — a deleted node's field can never block export.
  *
  * The result identifies the exact section / block / file that failed so
  * the error toast can say precisely what is missing and where (§5: the
@@ -21,6 +25,7 @@ import type {
   CustomLayoutTemplate,
   TemplateFieldDefinition,
 } from './model';
+import { templateSections } from './model';
 
 /** One missing required value. */
 export interface MissingRequirement {
@@ -34,7 +39,7 @@ export interface MissingRequirement {
   fileId?: string;
   /** The project id (when the instance is a file). */
   projectId?: string;
-  /** Missing field labels, e.g. ["Output Screenshot"]. */
+  /** Missing field labels, e.g. ["Screenshot"]. */
   fields: string[];
 }
 
@@ -46,6 +51,8 @@ export interface LayoutValidationInput {
   fileFieldValues: Record<string, Record<string, string>>;
   /** Per-section field values, keyed by sectionId. */
   sectionFieldValues: Record<string, Record<string, string>>;
+  /** Document-level field values (file-level bound nodes). */
+  documentFieldValues?: Record<string, string>;
   /** blockId → assigned file ids (the session assignment map, §3). */
   fileAssignments: Record<string, string[]>;
   /** Canonical file order per project (assigned files render in it). */
@@ -90,7 +97,13 @@ export function validateCustomLayout(input: LayoutValidationInput): MissingRequi
     for (const file of project.files) selectedIds.add(file.highlighted.fileId);
   }
 
-  for (const section of input.template.sections) {
+  // 0. Document fields — one instance (§21).
+  const docMissing = missingLabels(input.template.fields, input.documentFieldValues ?? {});
+  if (docMissing.length > 0) {
+    missing.push({ instance: 'Document', fields: docMissing });
+  }
+
+  for (const section of templateSections(input.template)) {
     // 1. Section fields — one instance per section.
     const sectionMissing = missingLabels(
       section.fields,
@@ -135,11 +148,11 @@ export function validateCustomLayout(input: LayoutValidationInput): MissingRequi
 /**
  * Files (selected, present in the projects) that are assigned to NO block
  * of the template. They will not appear in the export — surfaced as a
- * non-blocking warning (the File Layout editor is the fix).
+ * non-blocking warning (the Layout editor is the fix).
  */
 export function unassignedFileIds(input: LayoutValidationInput): string[] {
   const assigned = new Set<string>();
-  for (const section of input.template.sections) {
+  for (const section of templateSections(input.template)) {
     for (const child of section.children) {
       if (child.kind !== 'block') continue;
       for (const id of input.fileAssignments[child.block.id] ?? []) assigned.add(id);
@@ -153,7 +166,7 @@ export function unassignedFileIds(input: LayoutValidationInput): string[] {
 }
 
 /**
- * §21 — the derived "layout needs attention" condition behind the top-right
+ * §39 — the derived "layout needs attention" condition behind the top-right
  * Layout button's dot. TRUE only when something actionable exists:
  *   - a required field value is missing (validateCustomLayout), or
  *   - a selected file is assigned to no block (unassignedFileIds).
@@ -173,7 +186,7 @@ export function layoutAttentionRequired(
 
 /**
  * Render the missing list as the toast's multi-line message (§5):
- * `Main.kt is missing: • Description • Output Screenshot`
+ * `Main.kt is missing: • Description • Screenshot`
  */
 export function formatMissingRequirements(missing: MissingRequirement[]): string {
   return missing

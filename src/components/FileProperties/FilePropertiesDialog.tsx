@@ -39,6 +39,7 @@ import {
   Check,
 } from '@/components/common/Icons';
 import { formatBytes, STANDALONE_PROJECT_ID } from '@/lib/fileDiscovery';
+import { templateSections } from '@/lib/customLayouts/model';
 import { languageLabel } from '@/lib/languageDetection';
 import { normalizeImageFiles, ACCEPTED_IMAGE_TYPES } from '@/lib/imageAssets';
 import type { FileDetails } from '@/types';
@@ -87,7 +88,7 @@ function FilePropertiesDialogInner({
   );
   const assignment = useMemo(() => {
     if (!appliedLayout) return null;
-    for (const section of appliedLayout.sections) {
+    for (const section of templateSections(appliedLayout)) {
       for (const child of section.children) {
         if (child.kind !== 'block') continue;
         if ((state.layoutAssignments[child.block.id] ?? []).includes(target.fileId)) {

@@ -30,6 +30,7 @@ import { isTourDone, markTourDone, resetTourDone } from '@/lib/onboardingTour';
 import { ProjectsSidebar } from '@/components/ProjectsSidebar';
 import { DocumentPreview } from '@/components/Preview/DocumentPreview';
 import { ExportPanel } from '@/components/ExportPanel';
+import { SaveIndicator } from '@/components/common/SaveIndicator';
 import { TemplateCustomizer } from '@/components/Settings/TemplateCustomizer';
 import { CustomLayoutStudio } from '@/components/CustomLayout/CustomLayoutStudio';
 import {
@@ -248,6 +249,11 @@ function AppInner() {
       } else if (mod && e.key.toLowerCase() === 't') {
         e.preventDefault();
         setCustomizerOpen((v) => !v);
+      } else if (mod && e.key.toLowerCase() === 'l') {
+        // §16 companion shortcut: Ctrl+L opens the Layout editor the same
+        // way Ctrl+T opens the Template editor.
+        e.preventDefault();
+        setStudioOpen((v) => !v);
       } else if (mod && e.key.toLowerCase() === 'd') {
         e.preventDefault();
         toggleThemeRef.current();
@@ -269,7 +275,7 @@ function AppInner() {
   return (
     <div className="flex h-full flex-col">
       {/* Top bar */}
-      <header className="flex flex-wrap items-center gap-x-3 gap-y-1.5 border-b border-app bg-surface px-3 py-2 sm:px-4">
+      <header className="codice-topbar flex flex-wrap items-center gap-x-3 gap-y-1.5 border-b border-app px-3 py-2 sm:px-4">
         <div className="flex items-center gap-2">
           <div className="flex h-7 w-7 items-center justify-center rounded bg-brand-600 text-white">
             <Code size={16} />
@@ -295,6 +301,10 @@ function AppInner() {
             <span>
               {totalFiles} file{totalFiles === 1 ? '' : 's'} selected
             </span>
+            <span className="text-muted">·</span>
+            {/* R14 — quiet autosave affordance: pulses while the debounced
+                write is pending, confirms "Saved", then fades to idle. */}
+            <SaveIndicator />
           </div>
           <button
             onClick={startTour}
@@ -336,19 +346,13 @@ function AppInner() {
           >
             <Printer size={14} />
           </button>
-          <button
-            onClick={() => setCustomizerOpen((v) => !v)}
-            className="btn-secondary"
-            title="Template editor (Ctrl+T)"
-            data-tour="template"
-          >
-            <Palette size={14} />
-            <span className="hidden sm:inline">Template</span>
-          </button>
+          {/* §16 — Layouts BEFORE Template (intentional UX: you configure
+              the layout — what the document contains — before styling it).
+              Same buttons, same shortcuts (Ctrl+T = Template), swapped slots. */}
           <button
             onClick={() => setStudioOpen(true)}
             className="btn-secondary"
-            title="Custom layout studio — compose what the document contains"
+            title="Layout studio — compose what the document contains (Ctrl+L)"
             data-tour="layouts"
           >
             <Layers size={14} />
@@ -364,14 +368,23 @@ function AppInner() {
               />
             )}
           </button>
-          {/* §22 — GitHub repository link. */}
+          <button
+            onClick={() => setCustomizerOpen((v) => !v)}
+            className="btn-secondary"
+            title="Template editor (Ctrl+T)"
+            data-tour="template"
+          >
+            <Palette size={14} />
+            <span className="hidden sm:inline">Template</span>
+          </button>
+          {/* §22/§40 — GitHub repository link. */}
           <a
             href="https://github.com/FrenZy-1/Codice"
             target="_blank"
             rel="noopener noreferrer"
             className="btn-ghost"
-            title="Codice on GitHub (opens in a new tab)"
-            aria-label="Codice on GitHub"
+            title="GitHub — Codice repository (opens in a new tab)"
+            aria-label="GitHub — Codice repository"
           >
             <Github size={14} />
           </a>

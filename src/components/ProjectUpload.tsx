@@ -21,7 +21,8 @@ import {
 } from '@/lib/fileDiscovery';
 import { normalizeImageFiles, isImageFile } from '@/lib/imageAssets';
 import type { ProjectEntry } from '@/types';
-import { FolderPlus, Loader, AlertTriangle, FileArchive, FilePlus, ImagePlus } from '@/components/common/Icons';
+import { FolderPlus, Loader, AlertTriangle, FileArchive, FilePlus, ImagePlus, SlidersHorizontal } from '@/components/common/Icons';
+import { DefaultSelectionPrefsDialog } from '@/components/common/DefaultSelectionPrefsDialog';
 
 interface Props {
   onProjectAdded?: (projectId: string) => void;
@@ -34,6 +35,8 @@ export function ProjectUpload({ onProjectAdded }: Props) {
   const zipInputRef = useRef<HTMLInputElement>(null);
   const filesInputRef = useRef<HTMLInputElement>(null);
   const imageInputRef = useRef<HTMLInputElement>(null);
+  const [prefsOpen, setPrefsOpen] = useState(false);
+
   const [isDragging, setIsDragging] = useState(false);
   const [isProcessing, setIsProcessing] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -377,49 +380,129 @@ export function ProjectUpload({ onProjectAdded }: Props) {
 
   return (
     <div className="space-y-2">
-      <div
-        onDragOver={(e) => {
-          e.preventDefault();
-          setIsDragging(true);
-        }}
-        onDragLeave={() => setIsDragging(false)}
-        onDrop={handleDrop}
-        className={`codice-dropzone ${compact ? 'codice-dropzone-compact' : ''} ${isDragging ? 'codice-dropzone-active' : ''} ${pulse ? 'codice-dropzone-pulse' : ''}`}
-        data-tour="upload"
-        // spec §7 — the collapsed (compact) dropzone is itself a trigger for
-        // the native folder picker; the Folder/ZIP chips remain separate
-        // triggers (they stopPropagation, so no duplicate dialogs).
-        onClick={handleDirPicker}
-        role="button"
-        tabIndex={0}
-        aria-label={compact ? 'Add another project folder or ZIP archive — click to browse' : 'Drop a project folder or ZIP archive here, or click to browse'}
-        onKeyDown={(e) => {
-          if (e.key === 'Enter' || e.key === ' ') {
-            e.preventDefault();
-            handleDirPicker();
+      {compact ? (
+        // §36 — collapsed upload area: JUST the pills. No panel
+        // background, no border, no dropzone chrome behind them — a
+        // lightweight, wrapping row of real buttons plus the small
+        // “Add another project” label. The row itself still accepts
+        // folder/ZIP drops (drag-over highlight only).
+        <div
+          className="flex flex-wrap items-center gap-x-2 gap-y-1 rounded"
+          data-tour="upload"
+          style={
+            isDragging
+              ? {
+                  background:
+                    'color-mix(in srgb, var(--color-accent) 6%, transparent)',
+                }
+              : undefined
           }
-        }}
-      >
-        {compact ? (
-          // Compact single-row dropzone — still a full drop target.
-          <div className="flex items-center justify-between gap-2">
-            <div className="flex min-w-0 items-center gap-2">
-              <div className={`flex-shrink-0 text-secondary transition-transform duration-200 ${isDragging ? 'scale-110' : ''}`}>
-                {isProcessing ? (
-                  <Loader className="animate-spin" size={16} />
-                ) : (
-                  <FolderPlus size={16} />
-                )}
-              </div>
-              <div className="min-w-0 truncate text-xs font-medium text-secondary">
-                {isProcessing ? progress ?? 'Processing…' : 'Add another project — drop a folder or ZIP'}
-              </div>
-            </div>
-            <div className="flex flex-shrink-0 items-center gap-1.5">
+          onDragOver={(e) => {
+            e.preventDefault();
+            setIsDragging(true);
+          }}
+          onDragLeave={() => setIsDragging(false)}
+          onDrop={handleDrop}
+        >
+          <span
+            className="min-w-0 flex-shrink-0 text-[11px] font-medium text-secondary"
+            title="Drop a folder or ZIP anywhere on this row, or use the buttons"
+          >
+            {isProcessing ? progress ?? 'Processing…' : 'Add another project:'}
+          </span>
+          <div className="flex flex-wrap items-center gap-1.5">
+            <button
+              type="button"
+              className="codice-input-chip cursor-pointer"
+              title="Upload a folder"
+              aria-label="Upload a folder"
+              onClick={() => handleDirPicker()}
+            >
+              <FolderPlus size={10} /> Folder
+            </button>
+            <button
+              type="button"
+              className="codice-input-chip cursor-pointer"
+              title="Add standalone files — merged into the Standalone files project"
+              onClick={() => filesInputRef.current?.click()}
+            >
+              <FilePlus size={10} /> Files
+            </button>
+            <button
+              type="button"
+              className="codice-input-chip cursor-pointer"
+              title="Add images to the image library — attach them in File properties or layout image fields"
+              onClick={() => imageInputRef.current?.click()}
+            >
+              <ImagePlus size={10} /> Images
+            </button>
+            <button
+              type="button"
+              className="codice-input-chip cursor-pointer"
+              title="Upload a .zip archive — unpacked in your browser"
+              onClick={() => zipInputRef.current?.click()}
+            >
+              <FileArchive size={10} /> ZIP
+            </button>
+            {/* §46 — default file-selection preferences (global). */}
+            <button
+              type="button"
+              className="codice-input-chip cursor-pointer"
+              title="Default file selection — which file types are selected on upload"
+              aria-label="Default file selection preferences"
+              onClick={() => setPrefsOpen(true)}
+            >
+              <SlidersHorizontal size={10} /> Defaults
+            </button>
+          </div>
+        </div>
+      ) : (
+        <div
+          onDragOver={(e) => {
+            e.preventDefault();
+            setIsDragging(true);
+          }}
+          onDragLeave={() => setIsDragging(false)}
+          onDrop={handleDrop}
+          className={`codice-dropzone ${isDragging ? 'codice-dropzone-active' : ''} ${pulse ? 'codice-dropzone-pulse' : ''}`}
+          data-tour="upload"
+          // spec §7 — the empty-state dropzone is itself a trigger for the
+          // native folder picker; the Folder/ZIP chips remain separate
+          // triggers (they stopPropagation, so no duplicate dialogs).
+          onClick={handleDirPicker}
+          role="button"
+          tabIndex={0}
+          aria-label="Drop a project folder or ZIP archive here, or click to browse"
+          onKeyDown={(e) => {
+            if (e.key === 'Enter' || e.key === ' ') {
+              e.preventDefault();
+              handleDirPicker();
+            }
+          }}
+        >
+        <div className="flex flex-col items-center gap-2">
+          <div className={`text-secondary transition-transform duration-200 ${isDragging ? 'scale-110' : ''}`}>
+            {isProcessing ? (
+              <Loader className="animate-spin" size={28} />
+            ) : (
+              <FolderPlus size={28} />
+            )}
+          </div>
+          <div className="text-sm font-medium text-primary">
+            {isProcessing
+              ? progress ?? 'Processing…'
+              : 'Drop a project folder or ZIP here'}
+          </div>
+          <div className="text-xs text-muted">
+            or click to browse — your files stay in your browser
+          </div>
+          {!isProcessing && (
+            <div className="mt-1 flex flex-wrap items-center justify-center gap-1.5">
               <button
                 type="button"
-                className="codice-input-chip"
+                className="codice-input-chip cursor-pointer"
                 title="Upload a folder"
+                aria-label="Upload a folder"
                 onClick={(e) => {
                   e.stopPropagation();
                   handleDirPicker();
@@ -460,62 +543,18 @@ export function ProjectUpload({ onProjectAdded }: Props) {
               >
                 <FileArchive size={10} /> ZIP
               </button>
-            </div>
-          </div>
-        ) : (
-        <div className="flex flex-col items-center gap-2">
-          <div className={`text-secondary transition-transform duration-200 ${isDragging ? 'scale-110' : ''}`}>
-            {isProcessing ? (
-              <Loader className="animate-spin" size={28} />
-            ) : (
-              <FolderPlus size={28} />
-            )}
-          </div>
-          <div className="text-sm font-medium text-primary">
-            {isProcessing
-              ? progress ?? 'Processing…'
-              : 'Drop a project folder or ZIP here'}
-          </div>
-          <div className="text-xs text-muted">
-            or click to browse — your files stay in your browser
-          </div>
-          {!isProcessing && (
-            <div className="mt-1 flex flex-wrap items-center justify-center gap-1.5">
-              <span className="codice-input-chip" title="Upload a folder">
-                <FolderPlus size={10} /> Folder
-              </span>
+              {/* §46 — default file-selection preferences (global). */}
               <button
                 type="button"
                 className="codice-input-chip cursor-pointer"
-                title="Add standalone files — merged into the Standalone files project"
+                title="Default file selection — which file types are selected on upload"
+                aria-label="Default file selection preferences"
                 onClick={(e) => {
                   e.stopPropagation();
-                  filesInputRef.current?.click();
+                  setPrefsOpen(true);
                 }}
               >
-                <FilePlus size={10} /> Files
-              </button>
-              <button
-                type="button"
-                className="codice-input-chip cursor-pointer"
-                title="Add images to the image library — attach them in File properties or layout image fields"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  imageInputRef.current?.click();
-                }}
-              >
-                <ImagePlus size={10} /> Images
-              </button>
-              <button
-                type="button"
-                className="codice-input-chip cursor-pointer"
-                title="Upload a .zip archive — unpacked in your browser"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  zipInputRef.current?.click();
-                }}
-              >
-                <FileArchive size={10} /> ZIP
+                <SlidersHorizontal size={10} /> Defaults
               </button>
               <label
                 className="flex cursor-pointer items-center gap-1 text-[10px] text-secondary"
@@ -536,8 +575,8 @@ export function ProjectUpload({ onProjectAdded }: Props) {
             </div>
           )}
         </div>
-        )}
-      </div>
+        </div>
+      )}
 
       <input
         ref={inputRef}
@@ -612,9 +651,16 @@ export function ProjectUpload({ onProjectAdded }: Props) {
       {!error && progress && !isProcessing && (
         <div className="text-xs text-secondary">{progress}</div>
       )}
+
+      {/* §46 — default file-selection preferences dialog. */}
+      <DefaultSelectionPrefsDialog
+        open={prefsOpen}
+        onClose={() => setPrefsOpen(false)}
+      />
     </div>
   );
 }
+
 
 function collectFilesFromEntry(entry: FileSystemEntry): Promise<File[]> {
   return new Promise((resolve) => {

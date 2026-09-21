@@ -1,22 +1,26 @@
 /**
- * Custom layout resolver v2 (§3/§4/§17).
+ * Custom layout resolver v3 (§46 — one canonical pipeline).
  *
- * Expands a v2 `CustomLayoutTemplate` into the flat `ResolvedLayoutBlock[]`
+ * Expands a v3 `CustomLayoutTemplate` into the flat `ResolvedLayoutBlock[]`
  * content stream consumed by the preview and all three exporters:
  *
  *   Template + Data → resolveCustomLayout() → ResolvedLayoutBlock[]
  *
  * Semantics:
- *   - Sections render once, in order (the File layout IS the document
- *     skeleton). `pageBreakBefore` starts a section on a fresh page.
+ *   - The FILE level is ONE ordered container (§2/§6): standalone nodes and
+ *     sections resolve in `rootChildren` order — nodes may appear before,
+ *     between and after sections.
+ *   - Sections render once, in order. `pageBreakBefore` starts a section on
+ *     a fresh page.
  *   - Section children render in order: standalone nodes use the section's
  *     field values; block children expand ONCE PER ASSIGNED FILE (in the
  *     canonical document order, §10) — the non-negotiable one-file-one-
- *     section-one-instance rule (§3).
+ *     section-one-instance rule (§5). A file that (through corrupted
+ *     state) appears in two blocks renders ONCE (defensive dedupe).
  *   - Block instances see their per-file field values merged OVER the
- *     owning section's field values.
+ *     owning section's field values, over the document-level values.
  *   - Files that are assigned to NO block do not render in this layout
- *     (the File Layout editor surfaces them; export shows a warning).
+ *     (the Layout editor surfaces them; export shows a warning).
  */
 
 import type {
@@ -30,12 +34,10 @@ import type {
   CustomLayoutTemplate,
   ResolutionContext,
   ResolvedLayoutBlock,
-  TemplateNode,
-  TemplateBlockType,
   TemplateFieldType,
+  TemplateNode,
   TemplateSection,
 } from './model';
-import { FILE_CONTEXT_NODES } from './model';
 import { expandTokens } from '@/lib/tokens';
 
 /** Data inputs for resolution — mirrors the relevant slice of app state. */
@@ -47,6 +49,8 @@ export interface ResolutionInputs {
   fileFieldValues: Record<string, Record<string, string>>;
   /** Per-SECTION field values, keyed by sectionId → fieldId → value. */
   sectionFieldValues: Record<string, Record<string, string>>;
+  /** DOCUMENT-level field values (file-level bound nodes), fieldId → value. */
+  documentFieldValues?: Record<string, string>;
   /** Canonical presentation order of file ids within each project (§10). */
   fileOrder: Record<string, string[]>;
   /** File assignment: blockId → ordered file ids (session state, §3). */
@@ -57,6 +61,11 @@ export interface ResolutionInputs {
   metadata: { title?: string; author?: string; date?: string };
   /** Number of files in the document (for the {files} token). */
   fileCount: number;
+  /**
+   * Style-preset panel text color (§12/§14) — the DEFAULT color for panel
+   * text when a panel node does not override it.
+   */
+  panelText?: string;
 }
 
 /** One file lookup entry (project + file). */
@@ -80,6 +89,7 @@ function buildFileIndex(projects: DocumentProject[]): Map<string, FileEntry> {
  * Ordered assigned files for one block: the block's assignment list
  * filtered to files that exist, then sorted into the CANONICAL document
  * order of their projects (§10 — one shared ordering everywhere).
+ * Duplicate ids in a corrupted list collapse to one entry (§5 defensive).
  */
 function orderedAssignedFiles(
   blockId: string,
@@ -88,7 +98,10 @@ function orderedAssignedFiles(
 ): FileEntry[] {
   const ids = inputs.assignments[blockId] ?? [];
   const entries: FileEntry[] = [];
+  const seen = new Set<string>();
   for (const id of ids) {
+    if (seen.has(id)) continue;
+    seen.add(id);
     const entry = index.get(id);
     if (entry) entries.push(entry);
   }
@@ -184,10 +197,19 @@ function formatFileSize(bytes: number): string {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
-/** Field-value lookup with section-scope fallback (block → section). */
+/**
+ * Field-value lookup with scope fallback (block → section → document).
+ * Binding is simply "put a value from the document/file/section data
+ * here" (§9).
+ */
 function fieldValue(ctx: ResolutionContext, fieldId: string | undefined): string {
   if (!fieldId) return '';
-  return ctx.fieldValues[fieldId] ?? ctx.sectionValues?.[fieldId] ?? '';
+  return (
+    ctx.fieldValues[fieldId] ??
+    ctx.sectionValues?.[fieldId] ??
+    ctx.documentValues?.[fieldId] ??
+    ''
+  );
 }
 
 /** §4 — the kind of the field a node is bound to (when known). Image-kind
@@ -195,15 +217,15 @@ function fieldValue(ctx: ResolutionContext, fieldId: string | undefined): string
  * render the raw id as text (the stray "OUTPUT img-…" sequence). The
  * dedicated image node renders the actual image instead.
  */
-function boundFieldKind(ctx: ResolutionContext, fieldId: string | undefined): TemplateFieldType | undefined {
+function boundFieldKind(ctx: ResolutionContext, fieldId: string | undefined): string | undefined {
   if (!fieldId) return undefined;
   return ctx.fieldKinds?.[fieldId];
 }
 
 /**
- * §25 — a panel's `textColor` is the DEFAULT color for the text inside it:
+ * §12 — a panel's `textColor` is the DEFAULT color for the text inside it:
  * children that declare their own color keep it, the rest inherit the
- * panel's. Pure — returns a new list, never mutates the input.
+ * panel's (or the preset's panel text color). Pure — never mutates input.
  */
 function applyPanelTextColor(
   textColor: string | undefined,
@@ -264,7 +286,7 @@ function resolveNode(
         level: style.level ?? 2,
         text,
         nodeId: node.id,
-        // §17 — block headings repeat per file: the anchor is unique per
+        // §34 — block headings repeat per file: the anchor is unique per
         // instance; standalone headings anchor by node id alone.
         anchorId: entry ? `${node.id}-f-${entry.file.highlighted.fileId}` : node.id,
         ...textProps(node),
@@ -335,27 +357,34 @@ function resolveNode(
         },
       ];
     }
-    case 'fileImages': {
-      if (!entry) return [];
-      const out: ResolvedLayoutBlock[] = [];
-      for (const img of entry.file.images ?? []) {
-        out.push({
-          kind: 'image',
-          imageId: img.id,
-          name: img.name,
-          dataUrl: img.dataUrl,
-          mime: img.mime,
-          width: img.width,
-          height: img.height,
-          caption: img.caption,
-          align: style.align,
-          captionVisible: style.caption !== false,
-        });
-      }
-      return out;
-    }
+    case 'fileImages':
+    // §8 — legacy type; normalizeTemplate migrates these away. Kept only
+    // so hand-edited templates still resolve.
+    // falls through to the image case with the fileAttachments source.
     case 'image': {
-      if (node.fieldId) {
+      // §7/§8 — ONE Image primitive with three content sources.
+      const source = style.imageSource ??
+        (node.type === 'fileImages' ? 'fileAttachments' : node.fieldId ? 'field' : 'library');
+      if (source === 'fileAttachments') {
+        if (!entry) return [];
+        const out: ResolvedLayoutBlock[] = [];
+        for (const img of entry.file.images ?? []) {
+          out.push({
+            kind: 'image',
+            imageId: img.id,
+            name: img.name,
+            dataUrl: img.dataUrl,
+            mime: img.mime,
+            width: img.width,
+            height: img.height,
+            caption: img.caption,
+            align: style.align,
+            captionVisible: style.caption !== false,
+          });
+        }
+        return out;
+      }
+      if (source === 'field' && node.fieldId) {
         const img = resolveImageRef(
           fieldValue(ctx, node.fieldId),
           style.caption !== false,
@@ -364,7 +393,7 @@ function resolveNode(
         );
         return img ? [img] : [];
       }
-      // Literal library image: asset id carried in text.
+      // Library image: asset id carried in text.
       const img = resolveImageRef(node.text || undefined, style.caption !== false, style.align, inputs);
       return img ? [img] : [];
     }
@@ -406,6 +435,9 @@ function resolveNode(
           },
         ];
       }
+      // §12/§14 — node-level textColor wins; the preset's panel text color
+      // is the default; both propagate to children without their own color.
+      const textColor = style.textColor ?? inputs.panelText ?? undefined;
       return [
         {
           kind: 'panel',
@@ -415,8 +447,8 @@ function resolveNode(
           borderWidthPt: style.borderWidthPt,
           radiusPt: style.radiusPt,
           paddingPt: style.paddingPt,
-          textColor: style.textColor ?? undefined,
-          children: applyPanelTextColor(style.textColor, children),
+          textColor,
+          children: applyPanelTextColor(textColor, children),
         },
       ];
     }
@@ -443,7 +475,8 @@ function labelFor(ctx: ResolutionContext, fieldId: string): string {
 
 /**
  * Resolve one block definition instance for one assigned file.
- * Block field values merge OVER the owning section's values (§4).
+ * Block field values merge OVER the owning section's values (§4), which in
+ * turn merge over the document-level values (§21).
  */
 function resolveBlockInstance(
   blockNodes: TemplateNode[],
@@ -453,28 +486,106 @@ function resolveBlockInstance(
 ): ResolvedLayoutBlock[] {
   const fileCtx: ResolutionContext = {
     fieldValues: {
+      ...(ctx.documentValues ?? {}),
       ...(ctx.sectionValues ?? {}),
       ...(inputs.fileFieldValues[entry.file.highlighted.fileId] ?? {}),
     },
     sectionValues: ctx.sectionValues,
+    documentValues: ctx.documentValues,
     fieldLabels: ctx.fieldLabels,
+    fieldKinds: ctx.fieldKinds,
     file: { projectId: entry.project.id, fileId: entry.file.highlighted.fileId },
   };
   return blockNodes.flatMap((n) => resolveNode(n, inputs, fileCtx, entry));
 }
 
+/** Resolve one section (v3 helper — sections live inside rootChildren). */
+function resolveSection(
+  section: TemplateSection,
+  inputs: ResolutionInputs,
+  index: Map<string, FileEntry>,
+  emittedFiles: Set<string>,
+): ResolvedLayoutBlock[] {
+  const documentValues = inputs.documentFieldValues ?? {};
+  const sectionValues = inputs.sectionFieldValues[section.id] ?? {};
+  // §3 — resolve the section into its own slice first so the page-break
+  // marker never masquerades as "content" (an empty section must still
+  // keep its structural place instead of emitting a bare empty page).
+  const sectionBlocks: ResolvedLayoutBlock[] = [];
+
+  for (const child of section.children) {
+    if (child.kind === 'node') {
+      // Standalone section content — no file context.
+      const ctx: ResolutionContext = {
+        fieldValues: { ...documentValues, ...sectionValues },
+        sectionValues,
+        documentValues,
+        fieldLabels: fieldLabelMap(section),
+        fieldKinds: fieldKindMap(section.fields),
+      };
+      sectionBlocks.push(...resolveNode(child.node, inputs, ctx, undefined));
+    } else {
+      // Block pattern — exactly one instance per assigned file (§5). A file
+      // already emitted by an earlier block is skipped (defensive dedupe —
+      // the reducer guarantees uniqueness; corrupted state must not render
+      // a file twice).
+      const labelMap = {
+        ...fieldLabelMap(section),
+        ...fieldLabelMapOfList(child.block.fields),
+      };
+      const kindMap = fieldKindMapOfList(section, child.block.fields);
+      for (const entry of orderedAssignedFiles(child.block.id, inputs, index)) {
+        const fileId = entry.file.highlighted.fileId;
+        if (emittedFiles.has(fileId)) continue;
+        emittedFiles.add(fileId);
+        const ctx: ResolutionContext = {
+          fieldValues: sectionValues,
+          sectionValues,
+          documentValues,
+          fieldLabels: labelMap,
+          fieldKinds: kindMap,
+        };
+        sectionBlocks.push(...resolveBlockInstance(child.block.nodes, inputs, ctx, entry));
+      }
+    }
+  }
+
+  // §3 — a Section that produced ZERO content for this document (no
+  // filled fields, no assigned files in this document's scope) still
+  // keeps its place in the document skeleton. The fallback heading is
+  // the section's own name from the layout — never invented data. The
+  // nodeId is derived from the section id, so the outline anchor is
+  // stable across resolutions.
+  if (sectionBlocks.length === 0 && section.children.length > 0) {
+    sectionBlocks.push({
+      kind: 'heading',
+      level: 2,
+      text: expandBlockText(section.name, inputs, {
+        fieldValues: sectionValues,
+        sectionValues,
+        documentValues,
+      }),
+      nodeId: `sec-${section.id}`,
+    });
+  }
+
+  return sectionBlocks;
+}
+
 /**
  * Resolve the whole template into the final content stream.
- * Pure — no React, no DOM, no exporter specifics (§17).
+ * Pure — no React, no DOM, no exporter specifics (§46).
  *
- * Guarantees (§3/§7):
- *   - FILE-LEVEL standalone content resolves first (a document title
- *     heading, a closing summary… — content that belongs to no Section).
+ * Guarantees (§2/§6):
+ *   - The FILE level is ONE ordered container: standalone nodes and
+ *     sections resolve in `rootChildren` order, interleaved exactly as
+ *     authored (nodes may precede, sit between, or follow sections).
  *   - Every Section of the layout appears in every resolved document, in
  *     layout order — Sections are the document skeleton and are NEVER
- *     divided between projects/exports. A Section whose content resolves
- *     to nothing for the current data still keeps its structural presence
- *     via a fallback heading carrying the section's name.
+ *     divided between projects/exports (§30). A Section whose content
+ *     resolves to nothing for the current data still keeps its structural
+ *     presence via a fallback heading carrying the section's name.
+ *   - One file renders at most once (§5).
  */
 export function resolveCustomLayout(
   template: CustomLayoutTemplate,
@@ -482,111 +593,70 @@ export function resolveCustomLayout(
 ): ResolvedCustomLayout {
   const index = buildFileIndex(inputs.projects);
   const blocks: ResolvedLayoutBlock[] = [];
+  const emittedFiles = new Set<string>();
+  const documentValues = inputs.documentFieldValues ?? {};
 
-  for (const section of template.sections) {
-    const sectionValues = inputs.sectionFieldValues[section.id] ?? {};
-    // §3 — resolve the section into its own slice first so the page-break
-    // marker never masquerades as "content" (an empty section must still
-    // keep its structural place instead of emitting a bare empty page).
-    const sectionBlocks: ResolvedLayoutBlock[] = [];
-
-    for (const child of section.children) {
-      if (child.kind === 'node') {
-        // Standalone section content — no file context.
-        const ctx: ResolutionContext = {
-          fieldValues: sectionValues,
-          sectionValues,
-          fieldLabels: fieldLabelMap(section),
-          fieldKinds: fieldKindMap(section),
-        };
-        sectionBlocks.push(...resolveNode(child.node, inputs, ctx, undefined));
-      } else {
-        // Block pattern — exactly one instance per assigned file (§3).
-        const labelMap = {
-          ...fieldLabelMap(section),
-          ...fieldLabelMapOfBlock(child.block),
-        };
-        const kindMap = fieldKindMapOfBlock(section, child.block);
-        for (const entry of orderedAssignedFiles(child.block.id, inputs, index)) {
-          const ctx: ResolutionContext = {
-            fieldValues: sectionValues,
-            sectionValues,
-            fieldLabels: labelMap,
-            fieldKinds: kindMap,
-          };
-          sectionBlocks.push(...resolveBlockInstance(child.block.nodes, inputs, ctx, entry));
-        }
-      }
-    }
-
-    // §3 — a Section that produced ZERO content for this document (no
-    // filled fields, no assigned files in this document's scope) still
-    // keeps its place in the document skeleton. The fallback heading is
-    // the section's own name from the layout — never invented data. The
-    // nodeId is derived from the section id, so the outline anchor is
-    // stable across resolutions.
-    if (sectionBlocks.length === 0 && section.children.length > 0) {
-      sectionBlocks.push({
-        kind: 'heading',
-        level: 2,
-        text: expandBlockText(section.name, inputs, {
-          fieldValues: sectionValues,
-          sectionValues,
-        }),
-        nodeId: `sec-${section.id}`,
-      });
-    }
-
-    if (section.pageBreakBefore && blocks.length > 0) {
-      blocks.push({ kind: 'pageBreak' });
-    }
-    blocks.push(...sectionBlocks);
+  // Document-level fields label/kind maps (for file-level bound nodes).
+  const docLabels: Record<string, string> = {};
+  const docKinds: Record<string, TemplateFieldType> = {};
+  for (const f of template.fields) {
+    docLabels[f.id] = f.label;
+    docKinds[f.id] = f.kind;
   }
 
-  // §7 — FILE-LEVEL standalone content resolves BEFORE the sections
-  // (it models content above the whole section flow, e.g. a title).
-  const fileChildren = template.children ?? [];
-  const fileLevel: ResolvedLayoutBlock[] = [];
-  if (fileChildren.length > 0) {
-    const ctx: ResolutionContext = { fieldValues: {}, fieldLabels: {}, fieldKinds: {} };
-    for (const child of fileChildren) {
-      if (child.kind === 'node') {
-        fileLevel.push(...resolveNode(child.node, inputs, ctx, undefined));
+  // §2/§6 — ONE canonical order: iterate rootChildren exactly.
+  for (const child of template.rootChildren) {
+    if (child.kind === 'node') {
+      const ctx: ResolutionContext = {
+        fieldValues: documentValues,
+        sectionValues: {},
+        documentValues,
+        fieldLabels: docLabels,
+        fieldKinds: docKinds,
+      };
+      blocks.push(...resolveNode(child.node, inputs, ctx, undefined));
+    } else {
+      const section = child.section;
+      const sectionBlocks = resolveSection(section, inputs, index, emittedFiles);
+      if (section.pageBreakBefore && blocks.length > 0) {
+        blocks.push({ kind: 'pageBreak' });
       }
+      blocks.push(...sectionBlocks);
     }
   }
 
   return {
     templateId: template.id,
     templateName: template.name,
-    blocks: [...fileLevel, ...blocks],
+    blocks,
   };
 }
 
-/** fieldId → label map for a section's own fields (for labeled rendering). */
+/** fieldId → label map for a field list (for labeled rendering). */
 function fieldLabelMap(section: { fields: Array<{ id: string; label: string }> }): Record<string, string> {
   const map: Record<string, string> = {};
   for (const f of section.fields) map[f.id] = f.label;
   return map;
 }
 
-function fieldLabelMapOfBlock(block: { fields: Array<{ id: string; label: string }> }): Record<string, string> {
+function fieldLabelMapOfList(fields: Array<{ id: string; label: string }>): Record<string, string> {
   const map: Record<string, string> = {};
-  for (const f of block.fields) map[f.id] = f.label;
+  for (const f of fields) map[f.id] = f.label;
   return map;
 }
 
-/** fieldId → kind map for a section's fields (§4 image-field guard). */
-function fieldKindMap(section: TemplateSection): Record<string, TemplateFieldType> {
-  const map: Record<string, TemplateFieldType> = {};
-  for (const f of section.fields) map[f.id] = f.kind;
-  return map;
-}
-
-/** Combined section + block field kinds for block instances (§4). */
-function fieldKindMapOfBlock(
-  section: TemplateSection,
-  block: { fields: Array<{ id: string; kind: TemplateFieldType }> },
+/** fieldId → kind map for a field list (§4 image-field guard). */
+function fieldKindMap(
+  fields: Array<{ id: string; kind: TemplateFieldType }>,
 ): Record<string, TemplateFieldType> {
-  return { ...fieldKindMap(section), ...Object.fromEntries(block.fields.map((f) => [f.id, f.kind])) };
+  const map: Record<string, TemplateFieldType> = {};
+  for (const f of fields) map[f.id] = f.kind;
+  return map;
+}
+/** Combined section + block field kinds for block instances (§4). */
+function fieldKindMapOfList(
+  section: TemplateSection,
+  fields: Array<{ id: string; kind: TemplateFieldType }>,
+): Record<string, TemplateFieldType> {
+  return { ...fieldKindMap(section.fields), ...fieldKindMap(fields) };
 }

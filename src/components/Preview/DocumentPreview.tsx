@@ -79,9 +79,12 @@ function glyphCapableStack(stack: string): string {
 /** Preview file limit — the exported document contains ALL selected files. */
 const PREVIEW_LIMIT = 25;
 
-/** §18 — surfaces that count as "inside" each popover for dismissal. */
-const OUTLINE_INSIDE = ['.codice-outline-panel'] as const;
-const STATS_INSIDE = ['[data-stats-popover]'] as const;
+/** §18 — surfaces that count as "inside" each popover for dismissal. The
+ * popover's OWN pill also counts as inside so it TOGGLES (§35) instead of
+ * dismiss-then-reopen; the competing pill stays outside so opening one
+ * popover closes the other. */
+const OUTLINE_INSIDE = ['.codice-outline-panel', '[data-outline-pill]'] as const;
+const STATS_INSIDE = ['[data-stats-popover]', '[data-stats-pill]'] as const;
 
 export function DocumentPreview() {
   const { state, getSelectedFiles } = useAppState();
@@ -273,19 +276,36 @@ export function DocumentPreview() {
   }, []);
 
   // Ctrl+O (dispatched from the global shortcut handler) toggles the panel.
+  // §35 — mutually exclusive: opening the outline closes the statistics
+  // popover (and vice versa) so they can never stack over each other.
   useEffect(() => {
-    const onToggle = () => setOutlineOpen((v) => !v);
+    const onToggle = () => {
+      setOutlineOpen((v) => !v);
+      setStatsOpen(false);
+    };
     window.addEventListener('codice:toggle-outline', onToggle);
     return () => {
       window.removeEventListener('codice:toggle-outline', onToggle);
     };
   }, []);
 
-  // §18 — popover dismissal: clicking OUTSIDE an open Outline/Statistics
+  // §35 — pill toggles. Both popovers are mutually exclusive; each pill
+  // toggles its own popover (aria-expanded reflects the state) and closes
+  // the competing one.
+  const toggleOutline = useCallback(() => {
+    setOutlineOpen((v) => !v);
+    setStatsOpen(false);
+  }, []);
+  const toggleStats = useCallback(() => {
+    setStatsOpen((v) => !v);
+    setOutlineOpen(false);
+  }, []);
+
+  // §18/§35 — popover dismissal: clicking OUTSIDE an open Outline/Statistics
   // panel closes it (normal popover behavior), Escape closes it, clicking
   // inside never closes, and the explicit close buttons keep working. The
-  // other popover's surface counts as outside, so the previous popover
-  // closes when the user moves to the competing one.
+  // other popover's surface (and pill) counts as outside, so the previous
+  // popover closes when the user moves to the competing one.
   usePopoverDismiss(outlineOpen, () => setOutlineOpen(false), OUTLINE_INSIDE);
   usePopoverDismiss(statsOpen, () => setStatsOpen(false), STATS_INSIDE);
 
@@ -438,11 +458,15 @@ export function DocumentPreview() {
       fileDetails: state.fileDetails,
       fileFieldValues: state.fileFieldValues,
       sectionFieldValues: state.sectionFieldValues,
+      documentFieldValues: state.documentFieldValues,
       fileOrder: state.fileOrder,
       assignments: state.layoutAssignments,
       imageAssets: Object.fromEntries(state.imageAssets.map((a) => [a.id, a])),
       metadata: state.metadata,
       fileCount: layoutProjects.reduce((acc, p) => acc + p.files.length, 0),
+      // §12/§14 — the preset's panel text color is the resolver-level
+      // default for panels without their own textColor.
+      panelText: preset.colors.panelText,
     };
     return resolveCustomLayout(appliedLayout, inputs);
   }, [
@@ -451,10 +475,12 @@ export function DocumentPreview() {
     state.fileDetails,
     state.fileFieldValues,
     state.sectionFieldValues,
+    state.documentFieldValues,
     state.fileOrder,
     state.layoutAssignments,
     state.imageAssets,
     state.metadata,
+    preset.colors.panelText,
   ]);
 
   const elements = useMemo(
@@ -736,10 +762,21 @@ export function DocumentPreview() {
             key={key}
             data-codice-region="body"
             style={{
-              // Primary text is the CANONICAL body color (spec §5).
-              color: preset.colors.primaryText,
-              fontSize: preset.typography.bodyFontSizePt * PT_TO_PX,
-              fontWeight: WEIGHTS[preset.typography.bodyWeight],
+              // §5/§46 — the preset body style is the default; the canonical
+              // resolved stream may override per-element presentation. The
+              // color falls back to INHERIT so panels (§12) tint their child
+              // text via the panel container color while the page surface
+              // still supplies the canonical primary text outside panels.
+              color: el.color ?? 'inherit',
+              fontSize: (el.fontSizePt ?? preset.typography.bodyFontSizePt) * PT_TO_PX,
+              fontWeight:
+                el.bold === true
+                  ? WEIGHTS.bold
+                  : el.bold === false
+                    ? WEIGHTS.normal
+                    : WEIGHTS[preset.typography.bodyWeight],
+              fontStyle: el.italic === true ? 'italic' : el.italic === false ? 'normal' : undefined,
+              textAlign: el.align,
               lineHeight: preset.typography.lineSpacing,
               margin: `0 0 ${preset.typography.paragraphSpacingPt}pt 0`,
               fontFamily: fontStack(preset.typography.bodyFont),
@@ -763,6 +800,7 @@ export function DocumentPreview() {
           <div
             key={key}
             data-codice-region="divider"
+            data-outline-id={el.outlineId}
             style={{
               height: Math.max(1, el.heightPx),
               background: el.fillColor ?? preset.colors.mutedText,
@@ -787,6 +825,7 @@ export function DocumentPreview() {
       <div
         key={key}
         data-codice-region="panel"
+        data-outline-id={el.outlineId}
         style={{
           // §25 — panels fall back to the preset's panel colors when the
           // layout node declares none of its own.
@@ -800,12 +839,17 @@ export function DocumentPreview() {
           height:
             !hasChildren && el.heightPt ? Math.max(1, el.heightPt * PT_TO_PX) : undefined,
           margin: `${preset.typography.paragraphSpacingPt}px 0`,
-          // §25 — panel text color (the resolver already propagated it to
-          // children that don't declare their own).
-          color: el.textColor ?? undefined,
+          // §12 — the panel's text color (node style → preset panelText) is
+          // the DEFAULT for its content: children that resolved their own
+          // color keep it, the rest inherit through the CSS cascade.
+          color: el.textColor ?? preset.colors.panelText,
         }}
       >
-        {el.children.map((child, i) => renderElement(child, `${key}-${i}`))}
+        {/* Key includes the child KIND: a pure index key lets one element
+            kind replace another on the same DOM node when the stream shifts
+            (e.g. a fileHeader reusing a panel's node), which React flags as
+            conflicting shorthand/longhand style removals on rerender. */}
+        {el.children.map((child, i) => renderElement(child, `${key}-${i}-${child.type}`))}
       </div>
     );
   }
@@ -816,6 +860,7 @@ export function DocumentPreview() {
       <div
         key={key}
         data-codice-region="columns"
+        data-outline-id={el.outlineId}
         style={{
           display: 'flex',
           gap: 12,
@@ -825,7 +870,7 @@ export function DocumentPreview() {
       >
         {el.columns.map((col, i) => (
           <div key={i} style={{ flex: 1, minWidth: 0 }}>
-            {col.map((child, j) => renderElement(child, `${key}-${i}-${j}`))}
+            {col.map((child, j) => renderElement(child, `${key}-${i}-${j}-${child.type}`))}
           </div>
         ))}
       </div>
@@ -1125,11 +1170,19 @@ export function DocumentPreview() {
         data-codice-region={regionId}
         style={{
           fontFamily: fontStack(h.font),
-          fontSize: h.sizePt * PT_TO_PX,
-          fontWeight: WEIGHTS[h.weight],
-          fontStyle: h.italic ? 'italic' : 'normal',
-          color: h.color,
-          textAlign: h.alignment,
+          // §46 — presentation overrides land on top of the preset heading
+          // style (same semantics as the exporters' layout headings).
+          fontSize: (el.fontSizePt ?? h.sizePt) * PT_TO_PX,
+          fontWeight:
+            el.bold === true
+              ? WEIGHTS.bold
+              : el.bold === false
+                ? WEIGHTS.normal
+                : WEIGHTS[h.weight],
+          fontStyle:
+            el.italic === true ? 'italic' : el.italic === false ? 'normal' : h.italic ? 'italic' : 'normal',
+          color: el.color ?? h.color,
+          textAlign: el.align ?? h.alignment,
           marginTop: h.spaceBeforePt,
           marginBottom: h.spaceAfterPt,
           lineHeight: h.lineHeight,
@@ -1194,11 +1247,11 @@ export function DocumentPreview() {
       <div
         key={key}
         data-codice-region="file-detail"
-        style={{ marginBottom: preset.typography.paragraphSpacingPt }}
+        style={{ marginBottom: preset.typography.paragraphSpacingPt, textAlign: el.align }}
       >
         <div
           style={{
-            fontSize: Math.max(9, preset.typography.bodyFontSizePt * PT_TO_PX - 2),
+            fontSize: Math.max(9, (el.fontSizePt ?? preset.typography.bodyFontSizePt) * PT_TO_PX - 2),
             fontWeight: 600,
             letterSpacing: 0.4,
             textTransform: 'uppercase',
@@ -1210,9 +1263,17 @@ export function DocumentPreview() {
         </div>
         <p
           style={{
-            color: preset.colors.primaryText,
-            fontSize: preset.typography.bodyFontSizePt * PT_TO_PX,
-            fontWeight: WEIGHTS[preset.typography.bodyWeight],
+            // §12/§46 — resolved color wins; otherwise INHERIT so a panel's
+            // text color reaches detail text that resolved no own color.
+            color: el.color ?? 'inherit',
+            fontSize: (el.fontSizePt ?? preset.typography.bodyFontSizePt) * PT_TO_PX,
+            fontWeight:
+              el.bold === true
+                ? WEIGHTS.bold
+                : el.bold === false
+                  ? WEIGHTS.normal
+                  : WEIGHTS[preset.typography.bodyWeight],
+            fontStyle: el.italic === true ? 'italic' : el.italic === false ? 'normal' : undefined,
             lineHeight: preset.typography.lineSpacing,
             margin: 0,
             fontFamily: fontStack(preset.typography.bodyFont),
@@ -1238,6 +1299,7 @@ export function DocumentPreview() {
       <figure
         key={key}
         data-codice-region="image"
+        data-outline-id={el.outlineId}
         style={{
           margin: `${preset.typography.paragraphSpacingPt}pt 0`,
           textAlign: 'center',
@@ -1511,7 +1573,12 @@ export function DocumentPreview() {
 
               {/* Content */}
               <div style={{ flex: '0 0 auto' }}>
-                {page.elements.map((el, i) => renderElement(el, `${idx}-${i}`))}
+                {/* Key includes the element KIND (§63): when pagination shifts
+                    content between renders, a pure index key would reuse one
+                    element's DOM node for a different kind (panel → fileHeader
+                    → …), and React's style diffing then reports shorthand
+                    removals conflicting with the new kind's longhands. */}
+                {page.elements.map((el, i) => renderElement(el, `${idx}-${i}-${el.type}`))}
               </div>
 
               {/* Footer — at the very bottom */}
@@ -1546,56 +1613,66 @@ export function DocumentPreview() {
         )}
       </div>
 
-      {/* Floating outline + statistics pills (hidden from print output).
-          Anchored INSIDE the §3 control region (which starts below the
-          tabs + toolbar rows) — top-3 keeps them just under the toolbar
-          edge without ever covering it. §13 — the Outline pill is visible
+      {/* §3/§35 — ONE right-side control column, anchored INSIDE the §3
+          control region (which starts below the tabs + toolbar rows): the
+          pills are ALWAYS visible (each toggles its own popover —
+          aria-expanded reflects the state — and closes the competing one,
+          §35), and the open popover renders IN FLOW below them so nothing
+          can ever cover the controls. §13 — the Outline pill is visible
           whenever the preview has content pages; it must never disappear
           just because the current outline has no entries (e.g. layouts
           that render code-only blocks). */}
-      <div className="absolute right-4 top-3 z-10 flex flex-col items-end gap-1 codice-print-hidden">
-        {!outlineOpen && pages.length > 0 && (
+      <div className="absolute right-4 top-3 z-20 flex flex-col items-end gap-1 codice-print-hidden">
+        <div className="flex flex-col items-end gap-1">
+          {pages.length > 0 && (
+            <button
+              type="button"
+              className="codice-outline-toggle"
+              data-outline-pill
+              onClick={toggleOutline}
+              title="Document outline (Ctrl+O)"
+              aria-label="Document outline"
+              aria-expanded={outlineOpen}
+              aria-haspopup="dialog"
+            >
+              <ListTree size={14} />
+              <span className="hidden sm:inline">Outline</span>
+              <span className="codice-outline-count">{outline.length}</span>
+            </button>
+          )}
           <button
             type="button"
             className="codice-outline-toggle"
-            onClick={() => setOutlineOpen(true)}
-            title="Document outline (Ctrl+O)"
-            aria-label="Open document outline"
-          >
-            <ListTree size={14} />
-            <span className="hidden sm:inline">Outline</span>
-            <span className="codice-outline-count">{outline.length}</span>
-          </button>
-        )}
-        {!statsOpen && (
-          <button
-            type="button"
-            className="codice-outline-toggle"
-            onClick={() => setStatsOpen(true)}
-            title="Document statistics"
-            aria-label="Open document statistics"
+            data-stats-pill
             data-tour="stats"
+            onClick={toggleStats}
+            title="Document statistics"
+            aria-label="Document statistics"
+            aria-expanded={statsOpen}
+            aria-haspopup="dialog"
           >
             <BarChart size={14} />
             <span className="hidden sm:inline">Statistics</span>
           </button>
+        </div>
+        {outlineOpen && (
+          <OutlinePanel
+            entries={outline}
+            activeId={activeOutlineId}
+            onNavigate={navigateToOutline}
+            onClose={() => setOutlineOpen(false)}
+            // In-flow below the pills (§35) — the CSS default is absolutely
+            // positioned at the same corner, which would cover the pills.
+            style={{ position: 'static', zIndex: 'auto' }}
+          />
         )}
-      </div>
-      {outlineOpen && (
-        <OutlinePanel
-          entries={outline}
-          activeId={activeOutlineId}
-          onNavigate={navigateToOutline}
-          onClose={() => setOutlineOpen(false)}
-        />
-      )}
-      {statsOpen && (
-        <div className="absolute inset-0 z-10 flex items-start justify-end p-4 codice-print-hidden">
+        {statsOpen && (
           <div
-            className="codice-fade-in w-80 max-h-full overflow-y-auto rounded-lg border border-app bg-surface-elevated shadow-2xl"
+            className="codice-fade-in w-80 overflow-y-auto rounded-lg border border-app bg-surface-elevated shadow-2xl"
             role="dialog"
             aria-label="Document statistics"
             data-stats-popover
+            style={{ maxHeight: 'min(28rem, 70vh)' }}
           >
             <div className="flex items-center justify-between border-b border-app px-3 py-2">
               <div className="flex items-center gap-1.5 text-xs font-semibold text-secondary">
@@ -1614,8 +1691,8 @@ export function DocumentPreview() {
             </div>
             <StatsPanel embedded />
           </div>
-        </div>
-      )}
+        )}
+      </div>
       </div>
     </div>
   );

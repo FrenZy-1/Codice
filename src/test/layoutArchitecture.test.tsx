@@ -19,10 +19,9 @@ import { MergeProjectsDialog } from '@/components/Merge/MergeProjectsDialog';
 import {
   createEmptyTemplate,
   createBlockDef,
-  createSection,
-  genLayoutId,
-  cloneTemplate,
+  templateSections,
   type CustomLayoutTemplate,
+  type SectionChild,
 } from '@/lib/customLayouts/model';
 import { isLayoutTourDone, markLayoutTourDone, resetLayoutTourDone } from '@/components/CustomLayout/LayoutOnboarding';
 import { isImageFile } from '@/lib/imageAssets';
@@ -78,12 +77,14 @@ function withProviders(ui: React.ReactNode) {
   );
 }
 
+/** v3 template: one Task section (Task Title + Description fields) plus a
+ * Code block carrying a required image field (block fields are per-file). */
 function makeTemplate(): CustomLayoutTemplate {
   const t = createEmptyTemplate('T');
   const block = createBlockDef('Code', [{ type: 'code' }], [
     { id: 'shotField', label: 'Screenshot', kind: 'image', required: true },
   ]);
-  t.sections[0].children.push({ kind: 'block', id: genLayoutId('ch'), block });
+  templateSections(t)[0].children.push({ kind: 'block', block });
   return t;
 }
 
@@ -116,7 +117,10 @@ describe('layout assignment reducer (§3 — one file, one section, one block)',
     act(() => { api().dispatch({ type: 'ASSIGN_FILE_TO_BLOCK', blockId: 'bA', fileId: 'f2' }); });
     act(() => { api().dispatch({ type: 'ASSIGN_FILE_TO_BLOCK', blockId: 'bA', fileId: 'f3', position: 0 }); });
     expect(api().state.layoutAssignments['bA']).toEqual(['f3', 'f1', 'f2']);
-    act(() => { api().dispatch({ type: 'REORDER_ASSIGNED_FILE', blockId: 'bA', from: 0, to: 2 }); });
+    // WS-1 folded the old REORDER_ASSIGNED_FILE action into the positioned
+    // insert: re-assigning an already-assigned file to the SAME block at a
+    // given position MOVES it there (one API for inserts and reordering).
+    act(() => { api().dispatch({ type: 'ASSIGN_FILE_TO_BLOCK', blockId: 'bA', fileId: 'f3', position: 2 }); });
     expect(api().state.layoutAssignments['bA']).toEqual(['f1', 'f2', 'f3']);
   });
 
@@ -242,22 +246,41 @@ describe('dynamic content entry (§8) — generated from the layout', () => {
 
   it('SectionContentDialog renders image fields with a real picker and saves values', async () => {
     const t = makeTemplate();
-    const s = t.sections[0];
+    const s = templateSections(t)[0];
+    // The dialog's form is GENERATED from the field definitions — mix the
+    // section fields (text/textarea) with the block's image field.
+    const shot = (s.children.find(
+      (c): c is Extract<SectionChild, { kind: 'block' }> => c.kind === 'block',
+    )!).block.fields[0];
+    const titleFieldId = s.fields[0].id;
+    const apiRef: { current: ReturnType<typeof useApi> | null } = { current: null };
     render(
       withProviders(
-        <SectionContentDialog
-          sectionId={s.id}
-          sectionName={s.name}
-          fields={s.fields}
-          onClose={() => {}}
-        />,
+        <>
+          <Probe apiRef={apiRef} />
+          <SectionContentDialog
+            sectionId={s.id}
+            sectionName={s.name}
+            fields={[...s.fields, shot]}
+            onClose={() => {}}
+          />
+        </>,
       ),
     );
     // Task Title (text) + Description (textarea) from the task preset.
     const title = screen.getByLabelText(/Task Title/i) as HTMLInputElement;
     fireEvent.change(title, { target: { value: 'Chapter 1' } });
     expect(title.value).toBe('Chapter 1');
+    // Image field → a real picker (button + empty state), never a text input.
+    expect(screen.getByText('No image selected')).toBeTruthy();
+    expect(screen.getByRole('button', { name: /Add image/ })).toBeTruthy();
     expect(screen.getByText('Save')).toBeTruthy();
+    // Saving writes the section-scope value store the resolver reads.
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    expect(await screen.findByText('Section content saved')).toBeTruthy();
+    await waitFor(() =>
+      expect(apiRef.current!.state.sectionFieldValues[s.id]?.[titleFieldId]).toBe('Chapter 1'),
+    );
   });
 
   it('MergeProjectsDialog merges exactly the picked projects (§11)', async () => {

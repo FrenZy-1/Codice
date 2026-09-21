@@ -4,11 +4,22 @@
  * Node tree editor + property inspector (Block Editor level, §3/§9).
  *
  * The recursive editor from the original Layout Studio, re-homed into the
- * new hierarchy: it edits the NODE list of a Block definition (or a section
+ * hierarchy: it edits the NODE list of a Block definition (or a section
  * standalone list), preserving every capability — panels/columns, move /
  * duplicate / remove, collapse, property inspector with style overrides and
- * field binding. The inspector's "Bind to field" lists BOTH the owning
- * block's fields AND the owning section's fields (scope-ordered, §4).
+ * field binding.
+ *
+ * §9 — binding is explained in PLAIN LANGUAGE in the inspector: a "Content"
+ * select offering "Fixed text" vs "Field value: <label>", grouped by scope
+ * (this block's fields / section fields), with a "＋ New field…" option that
+ * creates and binds a field in one step. The option list is derived from the
+ * LIVE field lists passed in (§10/§11 — deleted fields vanish immediately).
+ *
+ * §7/§8 — ONE Image primitive: the inspector exposes a "Content source"
+ * select (library / bound field / images attached to the current file)
+ * instead of separate image node types. The legacy `fileImages` palette
+ * entry is gone; `fileAttachments` needs file context so it is only offered
+ * in BLOCK scope.
  */
 
 import { useState } from 'react';
@@ -26,16 +37,20 @@ import {
   NODE_TYPE_LABELS,
   nodeTypeDescription,
   genLayoutId,
+  type ImageSource,
   type TemplateNode,
   type TemplateBlockType,
   type TemplateFieldDefinition,
+  type TemplateFieldType,
 } from '@/lib/customLayouts/model';
+import { effectiveImageSource } from '@/lib/customLayouts/uiHelpers';
 
-/** Palette groups for the node palette (§6/§18). */
+/** Palette groups for the node palette (§6/§18). §8: "File images" is
+ * gone — the single Image primitive covers it via its content source. */
 export const NODE_PALETTE: Array<{ group: string; types: TemplateBlockType[] }> = [
   { group: 'Content', types: ['heading', 'text', 'description', 'summary', 'note'] },
   { group: 'Code', types: ['file', 'code', 'fileName', 'filePath', 'language', 'fileSize', 'lineCount'] },
-  { group: 'Media', types: ['image', 'fileImages'] },
+  { group: 'Media', types: ['image'] },
   { group: 'Layout', types: ['panel', 'columns', 'divider', 'spacer', 'pageBreak'] },
   { group: 'Document', types: ['toc', 'metadata', 'project'] },
 ];
@@ -104,11 +119,12 @@ export function NodeTreeEditor({
   onAdd,
   onPatch,
   onPatchStyle,
+  onCreateField,
 }: {
   nodes: TemplateNode[];
-  /** Owning block's fields (per-file scope). */
+  /** Owning block's LIVE derived fields (per-file scope). */
   fields: TemplateFieldDefinition[];
-  /** Owning section's fields (section scope) — bind targets too. */
+  /** Owning section's LIVE derived fields (section scope) — bind targets too. */
   sectionFields: TemplateFieldDefinition[];
   selectedId: string | null;
   collapsed: Set<string>;
@@ -120,6 +136,8 @@ export function NodeTreeEditor({
   onAdd: (type: TemplateBlockType, containerId?: string | null, columnIdx?: number) => void;
   onPatch: (id: string, patch: Partial<TemplateNode>) => void;
   onPatchStyle: (id: string, patch: Partial<NonNullable<TemplateNode['style']>>) => void;
+  /** §9 — "＋ New field…" support (creates + binds in one mutation). */
+  onCreateField?: (scope: InspectorScope, label: string, kind: TemplateFieldType) => void;
 }) {
   const selected = selectedId
     ? (findNodeList(nodes, selectedId)?.list[findNodeList(nodes, selectedId)!.index] ?? null)
@@ -191,8 +209,11 @@ export function NodeTreeEditor({
       {selected && (
         <NodeInspector
           node={selected}
+          scope="block"
           fields={fields}
           sectionFields={sectionFields}
+          allowFileAttachments
+          onCreateField={onCreateField}
           onPatch={(patch) => onPatch(selected.id, patch)}
           onPatchStyle={(patch) => onPatchStyle(selected.id, patch)}
         />
@@ -387,7 +408,7 @@ function ContainerZone({
         ))}
       </ol>
       <div className="mt-1 flex flex-wrap gap-1">
-        {(['text', 'heading', 'image', 'fileImages', 'divider'] as TemplateBlockType[]).map((t) => (
+        {(['text', 'heading', 'image', 'divider'] as TemplateBlockType[]).map((t) => (
           <button
             key={t}
             type="button"
@@ -407,26 +428,122 @@ function ContainerZone({
 /* Property inspector (compact, §39)                                   */
 /* ------------------------------------------------------------------ */
 
+/** Which container's inspector is shown — decides the bind-target groups. */
+export type InspectorScope = 'block' | 'section' | 'document';
+
+/** Select value marker for the "＋ New field…" options (§9). */
+const NEW_FIELD_PREFIX = '__newfield__:';
+
+/** §9 — the plain-language binding explanation shown under "Content". */
+const BINDING_HINT =
+  'Binding = "put a value from your data here". Static text like "Task 01" always shows as written; bound text like "{fileName}" shows the current file\u2019s name.';
+
+interface BindGroup {
+  scope: InspectorScope;
+  groupLabel: string;
+  suffix: string;
+  fields: TemplateFieldDefinition[];
+}
+
+/* §23 — the former per-node ColorField UI was removed with the panel color
+ * controls: panel styling is owned by Template Settings (per-panel overrides
+ * keyed by the same stable node ids). */
+
 export function NodeInspector({
   node,
-  fields,
-  sectionFields,
+  fields = [],
+  sectionFields = [],
+  documentFields = [],
+  scope = 'block',
+  allowFileAttachments = false,
+  onCreateField,
   onPatch,
   onPatchStyle,
 }: {
   node: TemplateNode;
-  fields: TemplateFieldDefinition[];
-  sectionFields: TemplateFieldDefinition[];
+  /** Owning block's LIVE derived fields (block scope only). */
+  fields?: TemplateFieldDefinition[];
+  /** Owning section's LIVE derived fields. */
+  sectionFields?: TemplateFieldDefinition[];
+  /** Document-level LIVE derived fields (document scope only, §21). */
+  documentFields?: TemplateFieldDefinition[];
+  /** Which bind-target groups the Content select offers (§9). */
+  scope?: InspectorScope;
+  /** Offer imageSource='fileAttachments' — needs file context, so only in
+   * BLOCK scope (§8). */
+  allowFileAttachments?: boolean;
+  /** §9 — "＋ New field…": create the field AND bind this node to it in
+   * ONE draft mutation (implemented by the owning editor). */
+  onCreateField?: (scope: InspectorScope, label: string, kind: TemplateFieldType) => void;
   onPatch: (patch: Partial<TemplateNode>) => void;
   onPatchStyle: (patch: Partial<NonNullable<TemplateNode['style']>>) => void;
 }) {
   const style = node.style ?? {};
   const bindable =
     node.type === 'text' || node.type === 'heading' || node.type === 'image';
-  // §13 — literal image nodes pick from the library (id typed by hand is
-  // no longer the only option).
   const { state } = useAppState();
   const libraryAssets = state.imageAssets;
+
+  // §7/§8 — ONE Image primitive; the source select decides which picker shows.
+  const imageSource = effectiveImageSource(node);
+  const imageBound = node.type === 'image' && imageSource === 'field';
+  const showBindSelect = bindable && (node.type !== 'image' || imageBound);
+  const showLibraryPicker = node.type === 'image' && imageSource === 'library';
+
+  // §9/§11 — bind targets derive from the LIVE field lists passed in, so a
+  // deleted node/field stops being offered immediately (no reopen needed).
+  const bindGroups: BindGroup[] = [];
+  if (scope === 'block') {
+    bindGroups.push({
+      scope: 'block',
+      groupLabel: "This block's fields (per file)",
+      suffix: 'block field',
+      fields,
+    });
+    bindGroups.push({
+      scope: 'section',
+      groupLabel: 'Section fields (shared)',
+      suffix: 'section field',
+      fields: sectionFields,
+    });
+  } else if (scope === 'section') {
+    bindGroups.push({
+      scope: 'section',
+      groupLabel: 'Section fields (shared)',
+      suffix: 'section field',
+      fields: sectionFields,
+    });
+  } else {
+    bindGroups.push({
+      scope: 'document',
+      groupLabel: 'Document fields (whole export)',
+      suffix: 'document field',
+      fields: documentFields,
+    });
+  }
+
+  /** Image nodes only offer image-kind fields (plus the currently bound one
+   * so a legacy binding stays visible instead of silently vanishing). */
+  const optionsFor = (g: BindGroup): TemplateFieldDefinition[] =>
+    node.type === 'image'
+      ? g.fields.filter((f) => f.kind === 'image' || f.id === node.fieldId)
+      : g.fields;
+
+  const handleContentChange = (value: string) => {
+    if (value === '') {
+      onPatch({ fieldId: undefined });
+      return;
+    }
+    if (value.startsWith(NEW_FIELD_PREFIX)) {
+      const targetScope = value.slice(NEW_FIELD_PREFIX.length) as InspectorScope;
+      const kind: TemplateFieldType = node.type === 'image' ? 'image' : 'text';
+      const label = window.prompt('Field label', kind === 'image' ? 'Image field' : 'Notes');
+      if (!label || !label.trim()) return; // cancelled — the select snaps back
+      onCreateField?.(targetScope, label.trim(), kind);
+      return;
+    }
+    onPatch({ fieldId: value });
+  };
 
   return (
     <div className="rounded-md border border-app p-2" aria-label="Node inspector" data-tour="layout-inspector">
@@ -434,6 +551,79 @@ export function NodeInspector({
         {NODE_TYPE_LABELS[node.type]} settings
       </div>
       <div className="grid grid-cols-2 gap-2 text-xs">
+        {/* §7/§8 — the Image primitive's content source. */}
+        {node.type === 'image' && (
+          <div className="col-span-2">
+            <label className="label block mb-1">Content source</label>
+            <select
+              className="select"
+              value={imageSource}
+              aria-label="Image content source"
+              onChange={(e) => {
+                const v = e.target.value as ImageSource;
+                if (v === 'field') {
+                  // Keep any existing binding; just mark the source.
+                  onPatch({ style: { ...(node.style ?? {}), imageSource: 'field' } });
+                } else {
+                  // library / fileAttachments never read a bound field — ONE
+                  // atomic patch so the unbind + source change land together.
+                  onPatch({
+                    fieldId: undefined,
+                    style: { ...(node.style ?? {}), imageSource: v },
+                  });
+                }
+              }}
+            >
+              <option value="library">Image from the library</option>
+              <option value="field">Bound field value</option>
+              {allowFileAttachments && (
+                <option value="fileAttachments">All images attached to the current file</option>
+              )}
+            </select>
+            <p className="mt-1 text-[10px] leading-relaxed text-muted">
+              {imageSource === 'fileAttachments'
+                ? 'Renders every image attached to the current file (File properties → Images), each with its caption.'
+                : imageSource === 'field'
+                  ? 'Shows the image picked for the bound image field — fill it in Section content or File properties.'
+                  : 'A fixed image from your library — the same image wherever this layout is used.'}
+            </p>
+          </div>
+        )}
+
+        {/* §9 — plain-language binding. */}
+        {showBindSelect && (
+          <div className="col-span-2">
+            <label className="label block mb-1">Content</label>
+            <select
+              className="select"
+              value={node.fieldId ?? ''}
+              aria-label="Content — fixed text or a bound field value"
+              onChange={(e) => handleContentChange(e.target.value)}
+            >
+              <option value="">
+                {node.type === 'image' ? '— pick a field —' : 'Fixed text — shows exactly as written'}
+              </option>
+              {bindGroups.map((g) => {
+                const opts = optionsFor(g);
+                if (opts.length === 0 && !onCreateField) return null;
+                return (
+                  <optgroup key={g.scope} label={g.groupLabel}>
+                    {onCreateField && (
+                      <option value={`${NEW_FIELD_PREFIX}${g.scope}`}>＋ New field…</option>
+                    )}
+                    {opts.map((f) => (
+                      <option key={f.id} value={f.id}>
+                        Field value: {f.label} ({g.suffix})
+                      </option>
+                    ))}
+                  </optgroup>
+                );
+              })}
+            </select>
+            <p className="mt-1 text-[10px] leading-relaxed text-muted">{BINDING_HINT}</p>
+          </div>
+        )}
+
         {(node.type === 'text' || node.type === 'heading') && !node.fieldId && (
           <div className="col-span-2">
             <label className="label block mb-1">
@@ -445,41 +635,6 @@ export function NodeInspector({
               value={node.text ?? ''}
               onChange={(e) => onPatch({ text: e.target.value })}
             />
-          </div>
-        )}
-
-        {bindable && (
-          <div className="col-span-2">
-            <label className="label block mb-1">
-              Bind to field (optional) — block fields first, then section fields
-            </label>
-            <select
-              className="select"
-              value={node.fieldId ?? ''}
-              onChange={(e) => onPatch({ fieldId: e.target.value || undefined })}
-            >
-              <option value="">— none —</option>
-              {fields.length > 0 && (
-                <optgroup label="Block fields (per file)">
-                  {fields.map((f) => (
-                    <option key={f.id} value={f.id}>
-                      {f.label} ({f.kind}
-                      {f.required ? ', required' : ''})
-                    </option>
-                  ))}
-                </optgroup>
-              )}
-              {sectionFields.length > 0 && (
-                <optgroup label="Section fields (shared)">
-                  {sectionFields.map((f) => (
-                    <option key={f.id} value={f.id}>
-                      {f.label} ({f.kind}
-                      {f.required ? ', required' : ''})
-                    </option>
-                  ))}
-                </optgroup>
-              )}
-            </select>
           </div>
         )}
 
@@ -510,7 +665,7 @@ export function NodeInspector({
           </div>
         )}
 
-        {node.type === 'image' && !node.fieldId && (
+        {showLibraryPicker && (
           <div className="col-span-2">
             <label className="label block mb-1">Library image</label>
             {libraryAssets.length > 0 ? (
@@ -640,56 +795,44 @@ export function NodeInspector({
           </div>
         )}
 
-        {(node.type === 'panel' || node.type === 'columns' || node.type === 'divider') && (
+        {/* §23 — panel FILL/BORDER/TEXT color controls belong to the style
+            preset (Template Settings → Theme → Panels), NOT the layout
+            studio. Per-panel overrides for the applied layout are edited
+            there by stable node id. Only layout-structural panel properties
+            (border width, padding, height) remain here. */}
+        {(node.type === 'panel' || node.type === 'columns') && (
           <>
-            {node.type !== 'divider' && (
-              <>
-                <div>
-                  <label className="label block mb-1">Fill color</label>
-                  <input
-                    type="color"
-                    className="input h-7 p-0.5"
-                    value={style.fillColor || '#f5f5f5'}
-                    onChange={(e) => onPatchStyle({ fillColor: e.target.value })}
-                  />
-                </div>
-                <div>
-                  <label className="label block mb-1">Border color</label>
-                  <input
-                    type="color"
-                    className="input h-7 p-0.5"
-                    value={style.borderColor || '#dddddd'}
-                    onChange={(e) => onPatchStyle({ borderColor: e.target.value })}
-                  />
-                </div>
-                <div>
-                  <label className="label block mb-1">Border width (pt)</label>
-                  <input
-                    type="number"
-                    className="input"
-                    min={0}
-                    max={6}
-                    step={0.5}
-                    value={style.borderWidthPt ?? 1}
-                    onChange={(e) => onPatchStyle({ borderWidthPt: Number(e.target.value) })}
-                  />
-                </div>
-              </>
-            )}
-            {node.type === 'panel' && (
-              <div>
-                <label className="label block mb-1">Padding (pt)</label>
-                <input
-                  type="number"
-                  className="input"
-                  min={0}
-                  max={48}
-                  value={style.paddingPt ?? 8}
-                  onChange={(e) => onPatchStyle({ paddingPt: Number(e.target.value) })}
-                />
-              </div>
-            )}
+            <p className="rounded border border-dashed border-app px-2 py-1.5 text-[10px] leading-relaxed text-muted">
+              Panel colors (fill / border / text) are styled in the Template editor → Theme →
+              Panels — including per-panel overrides for this layout.
+            </p>
+            <div>
+              <label className="label block mb-1">Border width (pt)</label>
+              <input
+                type="number"
+                className="input"
+                min={0}
+                max={6}
+                step={0.5}
+                value={style.borderWidthPt ?? 1}
+                onChange={(e) => onPatchStyle({ borderWidthPt: Number(e.target.value) })}
+              />
+            </div>
           </>
+        )}
+
+        {node.type === 'panel' && (
+          <div>
+            <label className="label block mb-1">Padding (pt)</label>
+            <input
+              type="number"
+              className="input"
+              min={0}
+              max={48}
+              value={style.paddingPt ?? 8}
+              onChange={(e) => onPatchStyle({ paddingPt: Number(e.target.value) })}
+            />
+          </div>
         )}
 
         {node.type === 'panel' && (

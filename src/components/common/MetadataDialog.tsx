@@ -116,7 +116,8 @@ function MetadataDialogInner({ onClose }: { onClose: () => void }) {
             </div>
           ))}
           <p className="text-[10px] text-muted">
-            Tip: show or hide each field on the title page under Template → Page &amp; Layout → Title Page.
+            Tip: show or hide each field on the title page in the Layout studio —
+            Page &amp; Layout → Title Page (visibility toggles).
           </p>
         </div>
 

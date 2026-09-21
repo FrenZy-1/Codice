@@ -1,8 +1,14 @@
 import type { NextConfig } from "next";
+import path from "path";
 
 const nextConfig: NextConfig = {
   output: "standalone",
-  /* config options here */
+  // Explicit workspace root — prevents Turbopack from inferring a wrong
+  // root when parent directories contain package.json files (sandbox),
+  // which produced "Next.js package not found" panics after reinstalls.
+  turbopack: {
+    root: path.join(__dirname),
+  },
   typescript: {
     ignoreBuildErrors: true,
   },

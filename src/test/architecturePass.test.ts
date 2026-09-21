@@ -27,7 +27,9 @@ import {
   normalizeTemplate,
   sectionFieldIdsInContentOrder,
   sectionFieldsInContentOrder,
+  templateSections,
   type CustomLayoutTemplate,
+  type RootChild,
   type TemplateNode,
   type TemplateSection,
 } from '@/lib/customLayouts/model';
@@ -40,7 +42,7 @@ import { getGuideSections, getShortcuts } from '@/components/common/HelpDialog';
 import type { DiscoveredFile, DocumentProject, ImageAsset } from '@/types';
 
 /* ------------------------------------------------------------------ */
-/* Fixtures                                                            */
+/* Fixtures (v3 model: rootChildren + derived fields, no wrapper ids)  */
 /* ------------------------------------------------------------------ */
 
 function proj(id: string, label: string, files: Array<{ id: string; path: string }>): DocumentProject {
@@ -74,19 +76,30 @@ function twoSectionTemplate(): CustomLayoutTemplate {
   ]);
   const s1 = createSection('custom', 'Section 1');
   s1.children = [
-    { kind: 'node', id: 'c-h1', node: { id: 'n-h1', type: 'heading', text: 'Section 1 H', style: { level: 1 } } },
-    { kind: 'block', id: 'c-b1', block: b1 },
+    { kind: 'node', node: { id: 'n-h1', type: 'heading', text: 'Section 1 H', style: { level: 1 } } },
+    { kind: 'block', block: b1 },
   ];
   // Section 2 has ONLY a block — when its block has no files in the current
   // document, the §3 fallback heading is the section's only presence.
   const s2 = createSection('custom', 'Section 2');
   s2.pageBreakBefore = true;
-  s2.children = [{ kind: 'block', id: 'c-b2', block: b2 }];
-  return { id: 'tpl', name: 'T', version: 2, createdAt: 0, updatedAt: 0, sections: [s1, s2] };
+  s2.children = [{ kind: 'block', block: b2 }];
+  return {
+    id: 'tpl',
+    name: 'T',
+    version: 3,
+    createdAt: 0,
+    updatedAt: 0,
+    rootChildren: [
+      { kind: 'section', section: s1 },
+      { kind: 'section', section: s2 },
+    ],
+    fields: [],
+  };
 }
 
 function blockOf(tpl: CustomLayoutTemplate, sectionIdx: number) {
-  const child = tpl.sections[sectionIdx].children.find((c) => c.kind === 'block');
+  const child = templateSections(tpl)[sectionIdx].children.find((c) => c.kind === 'block');
   if (!child || child.kind !== 'block') throw new Error('no block');
   return child.block;
 }
@@ -97,6 +110,7 @@ function inputsFor(projects: DocumentProject[]): ResolutionInputs {
     fileDetails: {},
     fileFieldValues: {},
     sectionFieldValues: {},
+    documentFieldValues: {},
     fileOrder: { p1: ['f1'], p2: ['f2'] },
     assignments: {},
     imageAssets: {},
@@ -148,7 +162,7 @@ describe('§3 section isolation across export documents', () => {
     const r = resolveCustomLayout(tpl, { ...inputsFor([P1]), assignments: {} });
     const fallback = r.blocks.find((b) => b.kind === 'heading' && b.text === 'Section 2');
     expect(fallback).toBeDefined();
-    expect((fallback as { nodeId?: string }).nodeId).toBe(`sec-${tpl.sections[1].id}`);
+    expect((fallback as { nodeId?: string }).nodeId).toBe(`sec-${templateSections(tpl)[1].id}`);
   });
 
   it('a section with content never gets a fallback heading', () => {
@@ -183,12 +197,12 @@ describe('§4 image-field rendering guard', () => {
 
   function imageFieldTemplate() {
     const tpl = twoSectionTemplate();
-    const s1 = tpl.sections[0];
+    const s1 = templateSections(tpl)[0];
     s1.fields = [{ id: 'f-shot', label: 'Output', kind: 'image', required: false }];
     s1.children = [
-      { kind: 'node', id: 'c-img', node: { id: 'n-img', type: 'image', fieldId: 'f-shot' } },
-      { kind: 'node', id: 'c-txt', node: { id: 'n-txt', type: 'text', fieldId: 'f-shot', style: { label: true } } },
-      { kind: 'node', id: 'c-h', node: { id: 'n-h', type: 'heading', fieldId: 'f-shot', text: '' } },
+      { kind: 'node', node: { id: 'n-img', type: 'image', fieldId: 'f-shot' } },
+      { kind: 'node', node: { id: 'n-txt', type: 'text', fieldId: 'f-shot', style: { label: true } } },
+      { kind: 'node', node: { id: 'n-h', type: 'heading', fieldId: 'f-shot', text: '' } },
     ];
     return tpl;
   }
@@ -197,7 +211,7 @@ describe('§4 image-field rendering guard', () => {
     const tpl = imageFieldTemplate();
     const r = resolveCustomLayout(tpl, {
       ...inputsFor([P1]),
-      sectionFieldValues: { [tpl.sections[0].id]: { 'f-shot': 'img-ix0ct3uphyw' } },
+      sectionFieldValues: { [templateSections(tpl)[0].id]: { 'f-shot': 'img-ix0ct3uphyw' } },
       imageAssets: { 'img-ix0ct3uphyw': asset },
     });
     expect(r.blocks.some((b) => b.kind === 'image')).toBe(true);
@@ -210,7 +224,7 @@ describe('§4 image-field rendering guard', () => {
     const tpl = imageFieldTemplate();
     const r = resolveCustomLayout(tpl, {
       ...inputsFor([P1]),
-      sectionFieldValues: { [tpl.sections[0].id]: { 'f-shot': 'img-missing' } },
+      sectionFieldValues: { [templateSections(tpl)[0].id]: { 'f-shot': 'img-missing' } },
     });
     // No image block, no text-ish block carrying the raw id — the section
     // only keeps its §3 structural fallback heading.
@@ -232,9 +246,9 @@ describe('§5/§6 section field synchronization', () => {
       { id: 'fld-orphan', label: 'Orphan', kind: 'text', required: false },
     ];
     s.children = [
-      { kind: 'node', id: 'c1', node: { id: 'n1', type: 'text', fieldId: 'fld-b' } },
-      { kind: 'node', id: 'c2', node: { id: 'n2', type: 'heading', fieldId: 'fld-a', text: '' } },
-      { kind: 'node', id: 'c3', node: { id: 'n3', type: 'text', text: 'literal' } },
+      { kind: 'node', node: { id: 'n1', type: 'text', fieldId: 'fld-b' } },
+      { kind: 'node', node: { id: 'n2', type: 'heading', fieldId: 'fld-a', text: '' } },
+      { kind: 'node', node: { id: 'n3', type: 'text', text: 'literal' } },
     ];
     return s;
   }
@@ -249,9 +263,11 @@ describe('§5/§6 section field synchronization', () => {
 
   it('normalizeTemplate drops orphan fields and keeps definitions in sync (§5)', () => {
     const tpl = createEmptyTemplate('T');
-    tpl.sections[0] = makeSection();
+    const rootChild = tpl.rootChildren[0];
+    if (rootChild.kind !== 'section') throw new Error('expected a section');
+    rootChild.section = makeSection();
     const normalized = normalizeTemplate(tpl);
-    expect(normalized.sections[0].fields.map((f) => f.id)).toEqual(['fld-b', 'fld-a']);
+    expect(templateSections(normalized)[0].fields.map((f) => f.id)).toEqual(['fld-b', 'fld-a']);
   });
 
   it('deleting a field strips bindings inside containers, top-level bound nodes get filtered (strip helper)', async () => {
@@ -274,7 +290,6 @@ describe('§5/§6 section field synchronization', () => {
     s.children = [
       {
         kind: 'node',
-        id: 'cp',
         node: {
           id: 'np',
           type: 'panel',
@@ -293,10 +308,13 @@ describe('§5/§6 section field synchronization', () => {
 describe('§7 file-level standalone content', () => {
   it('resolves BEFORE the sections and appears in every document', () => {
     const tpl = twoSectionTemplate();
-    tpl.children = [
-      { kind: 'node', id: 'fc1', node: { id: 'fn1', type: 'heading', text: 'Document Title', style: { level: 1 } } },
-      { kind: 'node', id: 'fc2', node: { id: 'fn2', type: 'text', text: 'Closing summary' } },
+    // v3 — file-level standalone nodes are leading entries of the ONE
+    // ordered rootChildren container, so they resolve before the sections.
+    const fileNodes: RootChild[] = [
+      { kind: 'node', node: { id: 'fn1', type: 'heading', text: 'Document Title', style: { level: 1 } } },
+      { kind: 'node', node: { id: 'fn2', type: 'text', text: 'Closing summary' } },
     ];
+    tpl.rootChildren = [...fileNodes, ...tpl.rootChildren];
     for (const projects of [[P1, P2], [P1], [P2]]) {
       const r = resolveCustomLayout(tpl, { ...inputsFor(projects), assignments: {} });
       expect(headingTexts(r.blocks)[0]).toBe('Document Title');
@@ -304,9 +322,13 @@ describe('§7 file-level standalone content', () => {
     }
   });
 
-  it('normalizeTemplate guarantees the children array (migration safety)', () => {
+  it('normalizeTemplate guarantees the rootChildren array (migration safety)', () => {
     const tpl = twoSectionTemplate();
-    expect(normalizeTemplate(tpl).children).toEqual([]);
+    // A hand-edited/corrupted template without the canonical root container.
+    delete (tpl as { rootChildren?: RootChild[] }).rootChildren;
+    const normalized = normalizeTemplate(tpl);
+    expect(normalized.rootChildren).toEqual([]);
+    expect(normalized.fields).toEqual([]);
   });
 });
 
@@ -495,10 +517,9 @@ describe('§16/§17 outline from the resolved document', () => {
 describe('§25 panel styling with stable node identity', () => {
   it('resolved panels carry their node id and propagate textColor to children', () => {
     const tpl = twoSectionTemplate();
-    tpl.sections[0].children = [
+    templateSections(tpl)[0].children = [
       {
         kind: 'node',
-        id: 'c-panel',
         node: {
           id: 'n-panel',
           type: 'panel',
@@ -527,9 +548,9 @@ describe('§25 panel styling with stable node identity', () => {
 
   it('two panels with identical content have DIFFERENT node ids (§25/§26)', () => {
     const tpl = twoSectionTemplate();
-    tpl.sections[0].children = [
-      { kind: 'node', id: 'cpa', node: { id: 'n-pa', type: 'panel', children: [[{ id: 'n-pa-in', type: 'text', text: 'Output' }]] } },
-      { kind: 'node', id: 'cpb', node: { id: 'n-pb', type: 'panel', children: [[{ id: 'n-pb-in', type: 'text', text: 'Output' }]] } },
+    templateSections(tpl)[0].children = [
+      { kind: 'node', node: { id: 'n-pa', type: 'panel', children: [[{ id: 'n-pa-in', type: 'text', text: 'Output' }]] } },
+      { kind: 'node', node: { id: 'n-pb', type: 'panel', children: [[{ id: 'n-pb-in', type: 'text', text: 'Output' }]] } },
     ];
     const r = resolveCustomLayout(tpl, { ...inputsFor([P1]), assignments: {} });
     const panels = r.blocks.filter((b) => b.kind === 'panel') as Array<{ nodeId?: string }>;
@@ -545,10 +566,10 @@ describe('§25 panel styling with stable node identity', () => {
 describe('§26 stable identity', () => {
   it('normalizeTemplate fills missing ids on children AND nodes (incl. containers)', () => {
     const tpl = createEmptyTemplate('T');
-    tpl.sections[0].children = [
+    const section = templateSections(tpl)[0];
+    section.children = [
       {
         kind: 'node',
-        id: '',
         node: {
           id: '',
           type: 'columns',
@@ -556,20 +577,24 @@ describe('§26 stable identity', () => {
           children: [[{ id: '', type: 'text', text: 'x' }], []],
         },
       },
+      // Block children are section children too — their node ids are filled.
+      { kind: 'block', block: { id: 'blk-fix', name: 'B', fields: [], nodes: [{ id: '', type: 'code' }] } },
     ];
     const normalized = normalizeTemplate(tpl);
-    const child = normalized.sections[0].children[0];
-    expect(child.id).toBeTruthy();
-    const node = child.kind === 'node' ? child.node : null;
-    expect(node?.id).toBeTruthy();
-    expect(node?.children?.[0][0].id).toBeTruthy();
+    const children = templateSections(normalized)[0].children;
+    // Identity is the node id (v3 removed wrapper ids) — always filled.
+    const nodeChild = children[0].kind === 'node' ? children[0].node : null;
+    expect(nodeChild?.id).toBeTruthy();
+    expect(nodeChild?.children?.[0][0].id).toBeTruthy();
+    const blockChild = children[1].kind === 'block' ? children[1].block : null;
+    expect(blockChild?.nodes[0].id).toBeTruthy();
   });
 
   it('clones never share references', () => {
     const tpl = createEmptyTemplate('T');
     const copy = cloneTemplate(tpl);
-    copy.sections[0].name = 'changed';
-    expect(tpl.sections[0].name).not.toBe('changed');
+    templateSections(copy)[0].name = 'changed';
+    expect(templateSections(tpl)[0].name).not.toBe('changed');
   });
 });
 
@@ -584,20 +609,23 @@ describe('§23 help guide documents the real system', () => {
     const ids = guide.map((g) => g.id);
     expect(ids).toEqual(
       expect.arrayContaining([
-        'hierarchy',
+        'model',
         'binding',
-        'editors',
-        'rules',
         'section-types',
+        'file-assignment',
         'images',
-        'panels',
-        'styling-vs-layout',
-        'export',
-        'order-outline',
-        'page-setup',
-        'presets',
+        'exports',
+        'covers',
+        'projects',
+        'pages',
+        'styling',
+        'formats',
       ]),
     );
+    // Key terminology — the model section defines the real v3 hierarchy.
+    const model = guide.find((g) => g.id === 'model');
+    const terms = (model?.terms ?? []).map((t) => t.term);
+    expect(terms).toEqual(expect.arrayContaining(['File', 'Section', 'Block', 'Node / Field']));
   });
 
   it('the binding section explains static vs bound values with token examples', () => {
@@ -612,6 +640,30 @@ describe('§23 help guide documents the real system', () => {
     expect(shortcuts.length).toBeGreaterThanOrEqual(7);
     expect(shortcuts.find((s) => s.keys.includes('Esc'))).toBeDefined();
   });
+
+  it('R12 — common workflows section covers the required recipe list', () => {
+    const workflows = guide.find((g) => g.id === 'workflows');
+    expect(workflows).toBeDefined();
+    const terms = (workflows?.terms ?? []).map((t) => t.term).join(' | ');
+    const text = (workflows?.terms ?? []).map((t) => `${t.term} ${t.text}`).join(' ');
+    // The required workflow topics (64A.16), each covering its keyword:
+    expect(text).toMatch(/per file|per-file/i); // repeat-per-file
+    expect(text).toMatch(/OUTSIDE any section/); // outside-section nodes
+    expect(text).toMatch(/Export groups/); // different exports
+    expect(text).toMatch(/layout PER export|per-export/i); // per-export layouts
+    expect(text).toMatch(/shared layout/i); // shared layout
+    expect(text).toMatch(/Appearance-only/); // appearance-only changes
+    expect(text).toMatch(/custom cover page/i); // custom cover
+    expect(text).toMatch(/fields instead of static text/); // binding
+    expect(terms).toContain('Repeating a section per file');
+    // The exports section documents the R11/R12 group interactions.
+    const exportsGuide = guide.find((g) => g.id === 'exports');
+    const exportsText = (exportsGuide?.terms ?? []).map((t) => t.text).join(' ');
+    expect(exportsText).toMatch(/pencil button/); // rename
+    expect(exportsText).toMatch(/dragging the row handle|press ↑\/↓/); // reorder
+    expect(exportsText).toMatch(/drag a project from the sidebar/); // drag-to-assign
+    expect(exportsText).toMatch(/\{title\}, \{group\}, \{date\}/); // filename tokens
+  });
 });
 
 /* ------------------------------------------------------------------ */
@@ -621,12 +673,12 @@ describe('§23 help guide documents the real system', () => {
 describe('§39 duplication keeps identity fresh', () => {
   it('duplicateSection remaps field ids and block-node ids (bindings stay intact)', () => {
     const tpl = twoSectionTemplate();
-    const s1 = tpl.sections[0];
+    const s1 = templateSections(tpl)[0];
     // Bind a field and reference it from a node.
     s1.fields = [{ id: 'fld-x', label: 'X', kind: 'text', required: false }];
     s1.children = [
-      { kind: 'node', id: 'c-x', node: { id: 'n-x', type: 'text', fieldId: 'fld-x' } },
-      { kind: 'block', id: 'c-b', block: createBlockDef('B', [{ type: 'code' }]) },
+      { kind: 'node', node: { id: 'n-x', type: 'text', fieldId: 'fld-x' } },
+      { kind: 'block', block: createBlockDef('B', [{ type: 'code' }]) },
     ];
     const copy = duplicateSection(s1);
     expect(copy.id).not.toBe(s1.id);

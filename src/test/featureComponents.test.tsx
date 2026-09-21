@@ -241,6 +241,54 @@ describe('FileContextMenu (§7/§38)', () => {
     );
     expect(screen.getByRole('menu').textContent).toContain('Include in document');
   });
+
+  it('offers Copy relative path when the path is provided (§41 companion)', async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.assign(navigator, { clipboard: { writeText } });
+    const onClose = vi.fn();
+    render(
+      <ToastProvider>
+        <FileContextMenu
+          state={{
+            fileId: 'f1',
+            fileName: 'A.kt',
+            relativePath: 'src/main/A.kt',
+            selected: true,
+            x: 10,
+            y: 10,
+          }}
+          onOpen={() => {}}
+          onProperties={() => {}}
+          onToggle={() => {}}
+          onClose={onClose}
+        />
+      </ToastProvider>,
+    );
+    const items = screen.getByRole('menu').querySelectorAll('[role=menuitem]');
+    expect(items).toHaveLength(4);
+    const copyItem = Array.from(items).find((el) =>
+      el.textContent?.includes('Copy relative path'),
+    );
+    expect(copyItem).toBeTruthy();
+    fireEvent.click(copyItem as HTMLElement);
+    expect(writeText).toHaveBeenCalledWith('src/main/A.kt');
+    expect(onClose).toHaveBeenCalled();
+  });
+
+  it('hides Copy relative path when no path is available', () => {
+    render(
+      <ToastProvider>
+        <FileContextMenu
+          state={{ fileId: 'f1', fileName: 'A.kt', selected: true, x: 10, y: 10 }}
+          onOpen={() => {}}
+          onProperties={() => {}}
+          onToggle={() => {}}
+          onClose={() => {}}
+        />
+      </ToastProvider>,
+    );
+    expect(screen.getByRole('menu').textContent).not.toContain('Copy relative path');
+  });
 });
 
 /* ------------------------------------------------------------------ */

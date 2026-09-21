@@ -382,6 +382,15 @@ export interface ExportOptions {
   format: 'docx' | 'pdf' | 'odt';
   /** Filename (without extension). */
   filename: string;
+  /**
+   * Imported cover page to prepend as the FIRST page (§42): the DOCX
+   * exporter splices it in as-is via OOXML, the PDF exporter flow-renders
+   * it (text, basic formatting, images — best effort), and the ODT
+   * exporter flow-renders it (same shared parser as the PDF path). When a
+   * cover cannot be rendered the exporter reports `coverSkipped` and the
+   * UI warns.
+   */
+  cover?: CoverPageAsset;
 }
 
 /** Result of an export operation. */
@@ -391,6 +400,12 @@ export interface ExportResult {
   format: 'docx' | 'pdf' | 'odt';
   /** Time taken in milliseconds. */
   elapsedMs: number;
+  /**
+   * True when a cover page was REQUESTED (ExportOptions.cover) but could
+   * not be rendered, so the export fell back to no cover page (§42 PDF
+   * best-effort path). The UI warns the user for that export.
+   */
+  coverSkipped?: boolean;
 }
 
 /** Theme definition (syntax colors + mappings). */
@@ -428,10 +443,105 @@ export interface FileSelection {
  * An explicit export group (§11): a named, ordered set of projects that
  * exports together as ONE document. A project may participate in any
  * number of groups; combined + separate-per-project modes coexist.
+ *
+ * v3 multi-export model (§22-§29): each export document may ALSO carry its
+ * own layout template and its own first-page configuration (title page vs.
+ * imported cover page) — the group is the per-export configuration record.
  */
 export interface ExportGroup {
   id: string;
   name: string;
   /** Ordered project ids — the document contains exactly these projects. */
   projectIds: string[];
+  /**
+   * Per-export layout template id (§27). `undefined`/`null` = use the
+   * globally applied layout. Only meaningful when "same layout for all
+   * exports" is disabled — otherwise the shared layout wins.
+   */
+  layoutId?: string | null;
+  /**
+   * First-page mode for this export (§43):
+   *   - 'preset' — follow the style preset's title-page setting (default)
+   *   - 'title'  — force the generated title page on
+   *   - 'cover'  — prepend the imported cover page (coverId), no title page
+   */
+  firstPage?: 'preset' | 'title' | 'cover';
+  /** Cover page asset id when firstPage === 'cover'. */
+  coverId?: string;
+  /**
+   * Per-export output filename override (R12). When set, the generated
+   * document is named after this pattern (with `{title}` = global export
+   * filename, `{group}` = the group name, `{date}` = today) instead of the
+   * default `{globalFilename}_{groupName}`. Empty/undefined = default.
+   */
+  filename?: string;
+}
+
+/**
+ * An imported cover page (§42): the FIRST PAGE of a user-provided .docx,
+ * preserved as-is (raw OOXML + referenced media) so the DOCX exporter can
+ * splice it in front of the generated document without reconstructing its
+ * layout, fonts, shapes or positioning.
+ *
+ * Cover assets are session-scoped (like image uploads) — the raw bytes are
+ * kept in memory only.
+ */
+export interface CoverPageAsset {
+  id: string;
+  /** Display name (defaults to the uploaded file name). */
+  name: string;
+  /** Original uploaded file name. */
+  fileName: string;
+  addedAt: number;
+  /** True when the source document had multiple pages (only page 1 kept). */
+  truncated: boolean;
+  /**
+   * The cover page's <w:body> inner XML (first page only, already cut at
+   * the first page-break marker) with relationship ids left intact.
+   */
+  bodyXml: string;
+  /** Media parts referenced by the page, keyed by the ORIGINAL rel id. */
+  media: Array<{ relId: string; partPath: string; bytes: Uint8Array }>;
+  /** Relationship entries (id → target) referenced by the page. */
+  rels: Array<{ id: string; target: string; type: string }>;
+  /** Style ids used by the page (w:pStyle/w:rStyle w:val values). */
+  styleIds: string[];
+  /** Numbering ids used by the page (w:numId values). */
+  numberingIds: string[];
+  /** Raw style definitions (inner XML of the source styles.xml). */
+  stylesInner: string;
+  /** Raw numbering definitions (inner XML of the source numbering.xml). */
+  numberingInner: string;
+  /** Page count of the source document (informational). */
+  pageCount: number;
+
+  /**
+   * Namespace declarations (prefix → URI) from the SOURCE document's root
+   * element. The cover body references prefixed elements (wp:, a:, pic:, …)
+   * whose declarations live on the source root — the DOCX splice re-declares
+   * the ones the target document root is missing, otherwise the merged
+   * document.xml is not namespace-well-formed. Optional: assets imported
+   * before this capture fall back to a well-known OOXML URI map.
+   */
+  namespaces?: Array<{ prefix: string; uri: string }>;
+
+  /* ------------------------------------------------------------------ */
+  /* Page geometry (§42 — captured from the source's first w:sectPr so   */
+  /* PDF exports can size the cover page as authored). All fields are    */
+  /* OPTIONAL and best-effort: assets imported before this capture (or   */
+  /* documents without a sectPr) simply leave them undefined.            */
+  /* ------------------------------------------------------------------ */
+
+  /** Page width in millimetres (w:pgSz w:w). */
+  pageWidthMm?: number;
+  /** Page height in millimetres (w:pgSz w:h). */
+  pageHeightMm?: number;
+  /** Top margin in millimetres (w:pgMar w:top). */
+  marginTopMm?: number;
+  /** Right margin in millimetres (w:pgMar w:right). */
+  marginRightMm?: number;
+  /** Bottom margin in millimetres (w:pgMar w:bottom). */
+  marginBottomMm?: number;
+  /** Left margin in millimetres (w:pgMar w:left). */
+  marginLeftMm?: number;
 }

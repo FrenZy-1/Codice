@@ -13,7 +13,7 @@ import { formatBytes } from '@/lib/fileDiscovery';
 import { findDuplicateFileNames, duplicateContext, fileSelectionKey } from '@/lib/fileDuplicates';
 import { filterVisibleFiles } from '@/lib/bulkSelection';
 import { languageLabel } from '@/lib/languageDetection';
-import { ChevronRight, ChevronDown, File, Folder, FolderOpen, MoreVertical } from '@/components/common/Icons';
+import { ChevronRight, ChevronDown, File, Folder, FolderOpen, MoreVertical, Image as ImageIcon } from '@/components/common/Icons';
 import {
   FileContextMenu,
   type FileContextMenuState,
@@ -78,14 +78,15 @@ function sortTree(node: TreeNode) {
 interface FileTreeProps {
   project: ProjectEntry;
   searchQuery: string;
-  extensionFilter: string;
+  /** §44 — language id filter (from the central language mapping). */
+  languageFilter: string;
   showExcluded: boolean;
 }
 
 export function FileTree({
   project,
   searchQuery,
-  extensionFilter,
+  languageFilter,
   showExcluded,
 }: FileTreeProps) {
   const { state, dispatch, getSelectedFiles } = useAppState();
@@ -99,6 +100,15 @@ export function FileTree({
 
   const selectedIds = getSelectedFiles(project.id);
 
+  /** Files with attached images (§49 discoverability) — badge in the tree. */
+  const imageCounts = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const [fileId, ids] of Object.entries(state.fileImages)) {
+      if (ids.length > 0) counts.set(fileId, ids.length);
+    }
+    return counts;
+  }, [state.fileImages]);
+
   /** Filenames that occur more than once in this project — shown with path context. */
   const duplicateNames = useMemo(
     () => findDuplicateFileNames(project.files),
@@ -109,7 +119,7 @@ export function FileTree({
     () =>
       filterVisibleFiles(project.files, {
         showExcluded,
-        extensionFilter,
+        languageFilter,
         searchQuery,
         inclusions: state.inclusions,
         projectId: project.id,
@@ -118,7 +128,7 @@ export function FileTree({
       project.files,
       project.id,
       showExcluded,
-      extensionFilter,
+      languageFilter,
       searchQuery,
       state.inclusions,
     ],
@@ -131,7 +141,7 @@ export function FileTree({
   }, [filteredFiles]);
 
   const effectiveExpanded = useMemo(() => {
-    if (searchQuery || extensionFilter) {
+    if (searchQuery || languageFilter) {
       const all = new Set<string>();
       const walk = (node: TreeNode) => {
         for (const child of node.children.values()) {
@@ -145,7 +155,7 @@ export function FileTree({
       return new Set([...expanded, ...all]);
     }
     return expanded;
-  }, [expanded, searchQuery, extensionFilter, tree]);
+  }, [expanded, searchQuery, languageFilter, tree]);
 
   const toggleExpand = useCallback((path: string) => {
     setExpanded((prev) => {
@@ -202,6 +212,7 @@ export function FileTree({
       setMenu({
         fileId: file.id,
         fileName: file.name,
+        relativePath: file.relativePath,
         selected: selectedIds.has(file.id),
         x,
         y,
@@ -319,6 +330,7 @@ export function FileTree({
             isExcluded={isExcluded}
             needsContext={needsContext}
             depth={depth}
+            imageCount={imageCounts.get(file.id)}
             onToggle={toggleFile}
             onContextMenu={openMenu}
           />
@@ -375,6 +387,7 @@ function FileRow({
   isExcluded,
   needsContext,
   depth,
+  imageCount,
   onToggle,
   onContextMenu,
 }: {
@@ -383,6 +396,8 @@ function FileRow({
   isExcluded: boolean;
   needsContext: boolean;
   depth: number;
+  /** §49 — number of images attached to this file (badge when > 0). */
+  imageCount?: number;
   onToggle: (file: DiscoveredFile, selected: boolean) => void;
   onContextMenu: (
     file: DiscoveredFile,
@@ -428,6 +443,16 @@ function FileRow({
       {file.language && (
         <span className="mt-0.5 text-[10px] text-muted uppercase tracking-wide hidden md:inline">
           {languageLabel(file.language)}
+        </span>
+      )}
+      {typeof imageCount === 'number' && imageCount > 0 && (
+        <span
+          className="mt-0.5 flex flex-shrink-0 items-center gap-0.5 rounded-full border border-app px-1.5 text-[10px] text-secondary"
+          title={`${imageCount} image${imageCount === 1 ? '' : 's'} attached — manage in File properties`}
+          aria-label={`${imageCount} image${imageCount === 1 ? '' : 's'} attached`}
+        >
+          <ImageIcon size={9} />
+          {imageCount}
         </span>
       )}
       <span className="mt-0.5 text-[10px] text-muted pr-2 tabular-nums">

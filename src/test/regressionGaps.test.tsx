@@ -19,6 +19,7 @@ import {
   createEmptyTemplate,
   normalizeTemplate,
   sanitizeSectionType,
+  templateSections,
   type CustomLayoutTemplate,
 } from '@/lib/customLayouts/model';
 import {
@@ -58,23 +59,25 @@ function proj(id: string, label: string, files: Array<{ id: string; path: string
   };
 }
 
-/** One section with one block that requires nothing (simple assignment map). */
+/** One section with one block that requires nothing (simple assignment map).
+ * v3 shape: rootChildren (no `sections` array, no wrapper `ch-` ids). */
 function singleBlockTemplate(): CustomLayoutTemplate {
   const block = createBlockDef('Code', [{ type: 'code' }]);
   const section = createSection('custom', 'Section 1');
-  section.children = [{ kind: 'block', id: 'c-b1', block }];
+  section.children = [{ kind: 'block', block }];
   return {
     id: 'tpl',
     name: 'T',
-    version: 2,
+    version: 3,
     createdAt: 0,
     updatedAt: 0,
-    sections: [section],
+    rootChildren: [{ kind: 'section', section }],
+    fields: [],
   };
 }
 
 function blockIdOf(tpl: CustomLayoutTemplate): string {
-  const child = tpl.sections[0].children.find((c) => c.kind === 'block');
+  const child = templateSections(tpl)[0].children.find((c) => c.kind === 'block');
   if (!child || child.kind !== 'block') throw new Error('no block');
   return child.block.id;
 }
@@ -89,7 +92,7 @@ describe('§10 assignment dropdown filtering', () => {
     const b1 = blockIdOf(tpl);
     // A second section/block so "any other dropdown" is real.
     const b2 = createBlockDef('Code 2', [{ type: 'code' }]);
-    tpl.sections[0].children.push({ kind: 'block', id: 'c-b2', block: b2 });
+    templateSections(tpl)[0].children.push({ kind: 'block', block: b2 });
 
     const assignments: Record<string, string[]> = { [b1]: ['f1'] };
     const taken = assignedFileIds(tpl, assignments);
@@ -112,8 +115,8 @@ describe('§10 assignment dropdown filtering', () => {
     const b1 = blockIdOf(tpl);
     const s2 = createSection('custom', 'Section 2');
     const b2 = createBlockDef('Code 2', [{ type: 'code' }]);
-    s2.children = [{ kind: 'block', id: 'c-b2', block: b2 }];
-    tpl.sections.push(s2);
+    s2.children = [{ kind: 'block', block: b2 }];
+    tpl.rootChildren.push({ kind: 'section', section: s2 });
     expect(
       assignedFileIds(tpl, { [b1]: [], [b2.id]: ['f9'] }).has('f9'),
     ).toBe(true);
@@ -168,8 +171,10 @@ describe('§21 layout attention is derived from real state', () => {
   it('a missing required field value → dot', () => {
     const tpl = singleBlockTemplate();
     const noteField = { id: 'fld-note', label: 'Note', kind: 'text' as const, required: true };
-    const block = createBlockDef('Code', [{ type: 'code' }], [noteField]);
-    tpl.sections[0].children = [{ kind: 'block', id: 'c-b1', block }];
+    // v3: block fields are DERIVED from the pattern — bind the field to a
+    // node so the requirement survives normalizeTemplate.
+    const block = createBlockDef('Code', [{ type: 'text', fieldId: noteField.id }], [noteField]);
+    templateSections(tpl)[0].children = [{ kind: 'block', block }];
     const file = proj('p1', 'P1', [{ id: 'f1', path: 'A.java' }]);
     // Assigned but the required "Note" value is empty.
     expect(
@@ -178,7 +183,7 @@ describe('§21 layout attention is derived from real state', () => {
         fileDetails: {},
         fileFieldValues: {},
         sectionFieldValues: {},
-        fileAssignments: { [blockIdOf(tpl)]: ['f1'] },
+        fileAssignments: { [block.id]: ['f1'] },
       }),
     ).toBe(true);
     // Filling it clears the dot.
@@ -188,7 +193,7 @@ describe('§21 layout attention is derived from real state', () => {
         fileDetails: {},
         fileFieldValues: { f1: { [noteField.id]: 'done' } },
         sectionFieldValues: {},
-        fileAssignments: { [blockIdOf(tpl)]: ['f1'] },
+        fileAssignments: { [block.id]: ['f1'] },
       }),
     ).toBe(false);
   });
@@ -279,9 +284,9 @@ describe('§26 unknown section types degrade to custom (no crash)', () => {
 
   it('normalizeTemplate sanitizes persisted/imported section types', () => {
     const tpl = singleBlockTemplate();
-    (tpl.sections[0] as unknown as { type: string }).type = 'bogus_legacy_type';
+    (templateSections(tpl)[0] as unknown as { type: string }).type = 'bogus_legacy_type';
     const normalized = normalizeTemplate(tpl);
-    expect(normalized.sections[0].type).toBe('custom');
+    expect(templateSections(normalized)[0].type).toBe('custom');
     // createSection/appendSectionPreset are total too.
     expect(createSection('bogus' as never).type).toBe('custom');
   });
@@ -410,23 +415,43 @@ beforeEach(() => {
 });
 
 describe('§13 image library is the single registry', () => {
-  it('the sidebar image library panel lists uploaded assets and removes them through the shared store', async () => {
+  it('the sidebar image library panel lists assets (default expanded), edits captions and removes them through the shared store', async () => {
     const probe = renderInApp(
       <ProjectsSidebar selectedProjectId={null} onSelectProject={() => {}} />,
     );
-    // The panel only appears once assets exist.
+    // WS-5 (§32): once assets exist the panel is present and DEFAULT
+    // EXPANDED — no click needed to see the registry.
     const toggle = await screen.findByRole('button', { name: /Image library/ });
-    expect(toggle.getAttribute('aria-expanded')).toBe('false');
-    fireEvent.click(toggle);
+    expect(toggle.getAttribute('aria-expanded')).toBe('true');
     expect(await screen.findByText('screenshot.png')).toBeTruthy();
     expect(screen.getByTitle(/320×240px/)).toBeTruthy();
 
+    // Still collapsible: one click hides the rows, another reveals them.
+    fireEvent.click(toggle);
+    expect(toggle.getAttribute('aria-expanded')).toBe('false');
+    expect(screen.queryByText('screenshot.png')).toBeNull();
+    fireEvent.click(toggle);
+    expect(await screen.findByText('screenshot.png')).toBeTruthy();
+
+    // Inline caption editing goes through the shared store (§32).
+    fireEvent.click(
+      screen.getByRole('button', { name: /Edit the caption of screenshot\.png/ }),
+    );
+    const captionInput = screen.getByLabelText('Caption for screenshot.png');
+    fireEvent.change(captionInput, { target: { value: 'Result of run 1' } });
+    fireEvent.keyDown(captionInput, { key: 'Enter' });
+    expect(await screen.findByText('Result of run 1')).toBeTruthy();
+
     // Removing goes through the SAME reducer the preview/exporters read.
     fireEvent.click(screen.getByRole('button', { name: /Remove screenshot\.png/ }));
-    // Panel disappears when the registry is empty again (single registry).
+    // Empty registry → discoverability hint instead of a hidden subsystem
+    // (the collapsible panel itself goes away until images exist again).
     await waitFor(() =>
-      expect(screen.queryByRole('button', { name: /Image library/ })).toBeNull(),
+      expect(
+        screen.getByText(/No images yet — upload via the Images button/),
+      ).toBeTruthy(),
     );
+    expect(screen.queryByRole('button', { name: /Image library/ })).toBeNull();
     expect(screen.queryByText('screenshot.png')).toBeNull();
     probe.unmount();
   });

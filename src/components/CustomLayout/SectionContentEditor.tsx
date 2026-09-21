@@ -27,26 +27,31 @@ import {
   ChevronRight,
   ChevronUp,
   GripVertical,
+  X,
 } from '@/components/common/Icons';
 import {
+  blockFieldsInContentOrder,
   cloneTemplate,
-  createBoundFieldNode,
   genLayoutId,
   nodeTypeDescription,
+  sectionChildKey,
   sectionFieldsInContentOrder,
   sectionTypePreset,
   SECTION_TYPE_PRESETS,
-  type CustomLayoutTemplate,
   type SectionChild,
   type SectionTypeId,
+  type TemplateBlockDef,
   type TemplateFieldDefinition,
+  type TemplateFieldType,
   type TemplateNode,
   type TemplateBlockType,
+  type TemplateSection,
 } from '@/lib/customLayouts/model';
 import {
   findNodeList,
   makeNode,
   NodeInspector,
+  type InspectorScope,
 } from '@/components/CustomLayout/NodeTreeEditor';
 
 /* ------------------------------------------------------------------ */
@@ -61,7 +66,7 @@ export function moveChild(
   childId: string,
   delta: number,
 ): SectionChild[] {
-  const idx = children.findIndex((c) => c.id === childId);
+  const idx = children.findIndex((c) => sectionChildKey(c) === childId);
   const to = idx + delta;
   if (idx < 0 || to < 0 || to >= children.length) return children;
   const next = [...children];
@@ -71,24 +76,87 @@ export function moveChild(
 }
 
 export function removeChild(children: SectionChild[], childId: string): SectionChild[] {
-  return children.filter((c) => c.id !== childId);
+  return children.filter((c) => sectionChildKey(c) !== childId);
 }
 
 export function makeStandaloneChild(type: TemplateBlockType): SectionChild {
-  return { kind: 'node', id: genLayoutId('ch'), node: makeNode(type) };
+  return { kind: 'node', node: makeNode(type) };
 }
 
-/** Create a field-bound text/heading/image node + its field definition in
- * one step (§5 — content and settings are born together). */
-export function makeFieldChild(
-  kind: 'text' | 'textarea' | 'image',
-  label: string,
-): { child: SectionChild; field: TemplateFieldDefinition } {
-  const nodeType: 'text' | 'image' = kind === 'image' ? 'image' : 'text';
-  const { field, node } = createBoundFieldNode(kind, label, nodeType, {
-    ...(nodeType === 'text' ? { text: '' } : {}),
-  });
-  return { child: { kind: 'node', id: genLayoutId('ch'), node }, field };
+/** §1.3/§7 — insert a standalone child at an exact index. */
+export function insertChildAt(
+  children: SectionChild[],
+  index: number,
+  type: TemplateBlockType,
+): SectionChild[] {
+  const next = [...children];
+  next.splice(Math.max(0, Math.min(index, next.length)), 0, makeStandaloneChild(type));
+  return next;
+}
+
+/**
+ * §7/§1.3 — hover-reveal insertion row placed BETWEEN content rows (and at
+ * the top of a list): lets the user add a standalone node at an exact
+ * position instead of only appending. The revealed chip row reuses the
+ * standard standalone primitive vocabulary.
+ */
+export function InsertContentRow({
+  types,
+  onInsert,
+  label = 'Insert here',
+  asListItem = true,
+}: {
+  types: TemplateBlockType[];
+  onInsert: (type: TemplateBlockType) => void;
+  label?: string;
+  /** When false the row renders as a plain div (outside an <ol>). */
+  asListItem?: boolean;
+}) {
+  const [open, setOpen] = useState(false);
+  const inner = open ? (
+    <div className="flex flex-wrap items-center gap-1 rounded border border-dashed border-app bg-surface/40 p-1.5">
+      <span className="text-[10px] uppercase tracking-wide text-muted">Insert</span>
+      {types.map((t) => (
+        <button
+          key={t}
+          type="button"
+          className="codice-input-chip"
+          title={nodeTypeDescription(t)}
+          onClick={() => {
+            onInsert(t);
+            setOpen(false);
+          }}
+        >
+          {labelForType(t)}
+        </button>
+      ))}
+      <button
+        type="button"
+        className="ml-auto rounded p-0.5 text-muted hover:text-primary"
+        aria-label="Cancel insertion"
+        onClick={() => setOpen(false)}
+      >
+        <X size={10} />
+      </button>
+    </div>
+  ) : (
+    <div className="group/ins flex items-center py-0.5">
+      <button
+        type="button"
+        className="flex items-center gap-1 rounded border border-dashed border-app px-1.5 py-0.5 text-[10px] text-muted opacity-0 transition-opacity hover:text-primary focus:opacity-100 group-hover/ins:opacity-100 group-focus-within/ins:opacity-100"
+        onClick={() => setOpen(true)}
+      >
+        <Plus size={9} /> {label}
+      </button>
+    </div>
+  );
+  return asListItem ? (
+    <li className="list-none" role="presentation">
+      {inner}
+    </li>
+  ) : (
+    inner
+  );
 }
 
 /* ------------------------------------------------------------------ */
@@ -103,16 +171,14 @@ export const SECTION_STANDALONE_TYPES: TemplateBlockType[] = [
   'heading', 'text', 'image', 'divider', 'spacer', 'pageBreak', 'toc', 'metadata', 'panel', 'columns',
 ];
 
-const FIELD_CHIP_LABELS: Array<{ kind: 'text' | 'textarea' | 'image'; label: string }> = [
-  { kind: 'text', label: 'Field (text)' },
-  { kind: 'textarea', label: 'Field (paragraph)' },
-  { kind: 'image', label: 'Field (image)' },
-];
-
 /**
  * Ordered content list for ONE scope (a section, or the file level).
  * Nodes render recursively (panels/columns expand their stacks); block
  * children render as block cards with their assigned-file chips.
+ *
+ * §7/§8 — field nodes are no longer added from a separate "Field" chip row:
+ * the single Image/Text/Heading primitives are bound to fields from their
+ * inspector (Content → "＋ New field…"), which calls `onCreateField`.
  */
 export function SectionContentList({
   items,
@@ -120,9 +186,10 @@ export function SectionContentList({
   allowBlocks,
   blockCards,
   onUpdate,
+  onCreateField,
 }: {
   items: SectionChild[];
-  /** Scope field definitions (section fields, or [] at file level). */
+  /** Scope field definitions (LIVE derived section fields, or [] at file level). */
   fields: TemplateFieldDefinition[];
   /** Whether block children are allowed (false at the file level, §7). */
   allowBlocks: boolean;
@@ -130,13 +197,16 @@ export function SectionContentList({
   blockCards?: (child: Extract<SectionChild, { kind: 'block' }>) => React.ReactNode;
   /** Replace the whole children list. */
   onUpdate: (next: SectionChild[]) => void;
+  /** §9 — inspector "＋ New field…": create a field in the owning scope AND
+   * bind the given node to it in one mutation. */
+  onCreateField?: (label: string, kind: TemplateFieldType, bindNodeId: string) => void;
 }) {
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
 
   const mutateNode = (childId: string, fn: (node: TemplateNode) => void) => {
     onUpdate(
       items.map((c) => {
-        if (c.id !== childId || c.kind !== 'node') return c;
+        if (c.kind !== 'node' || c.node.id !== childId) return c;
         const node = cloneTemplate(c.node);
         fn(node);
         return { ...c, node };
@@ -146,27 +216,36 @@ export function SectionContentList({
 
   return (
     <ol className="space-y-1" role="list" aria-label="Section children">
-      {items.map((child, idx) => (
-        <li key={child.id} className="rounded border border-app bg-surface/60 p-1.5">
+      {/* §1.3 — insert-before rows let standalone content start BEFORE the
+          first block/heading and land BETWEEN any two children. */}
+      <InsertContentRow
+        types={SECTION_STANDALONE_TYPES}
+        onInsert={(type) => onUpdate(insertChildAt(items, 0, type))}
+        label="Insert at top"
+      />
+      {items.map((child, idx) => {
+        const childKey = sectionChildKey(child);
+        return (
+        <li key={childKey} className="rounded border border-app bg-surface/60 p-1.5">
           {child.kind === 'node' ? (
             <StandaloneNodeRow
               node={child.node}
-              childId={child.id}
+              childId={child.node.id}
               depth={0}
               fields={fields}
               selectedNodeId={selectedNodeId}
               onSelectNode={setSelectedNodeId}
-              onMove={(delta) => onUpdate(moveChild(items, child.id, delta))}
-              onRemove={() => onUpdate(removeChild(items, child.id))}
+              onCreateField={onCreateField}
+              onMove={(delta) => onUpdate(moveChild(items, childKey, delta))}
+              onRemove={() => onUpdate(removeChild(items, childKey))}
               onDuplicate={() => {
                 const copy = cloneTemplate(child);
-                copy.id = genLayoutId('ch');
                 copy.node.id = genLayoutId('n');
                 const next = [...items];
                 next.splice(idx + 1, 0, copy);
                 onUpdate(next);
               }}
-              onMutateNode={(fn) => mutateNode(child.id, fn)}
+              onMutateNode={(fn) => mutateNode(child.node.id, fn)}
             />
           ) : allowBlocks && blockCards ? (
             blockCards(child)
@@ -174,20 +253,29 @@ export function SectionContentList({
             <div className="text-xs text-muted">Block (not allowed here)</div>
           )}
         </li>
-      ))}
+        );
+      })}
+      <InsertContentRow
+        types={SECTION_STANDALONE_TYPES}
+        onInsert={(type) => onUpdate(insertChildAt(items, items.length, type))}
+        label="Insert at end"
+      />
     </ol>
   );
 }
 
-/** Add-controls row: standalone nodes + field-bound nodes (§5/§8). */
+/**
+ * Add-controls row: the standardized standalone primitive chips (§7/§8).
+ * Field-bound content is created from the node inspector's "Content"
+ * select ("＋ New field…") — NOT from a competing "Field" chip row, so the
+ * user-facing vocabulary exposes exactly ONE image/text/heading primitive.
+ */
 export function ContentAddControls({
   scope,
   onAddNode,
-  onAddField,
 }: {
   scope: 'file' | 'section';
   onAddNode: (type: TemplateBlockType) => void;
-  onAddField: (kind: 'text' | 'textarea' | 'image') => void;
 }) {
   const types = scope === 'file' ? FILE_LEVEL_TYPES : SECTION_STANDALONE_TYPES;
   return (
@@ -206,20 +294,11 @@ export function ContentAddControls({
           </button>
         ))}
       </div>
-      <div className="flex flex-wrap items-center gap-1">
-        <span className="w-24 flex-shrink-0 text-[10px] text-muted">Field node</span>
-        {FIELD_CHIP_LABELS.map((f) => (
-          <button
-            key={f.kind}
-            type="button"
-            className="codice-input-chip"
-            title="Adds a named content slot AND a node bound to it — settings and content stay in sync (§5/§6)"
-            onClick={() => onAddField(f.kind)}
-          >
-            <Plus size={9} /> {f.label}
-          </button>
-        ))}
-      </div>
+      <p className="pl-24 text-[10px] text-muted">
+        Need a fillable value instead of fixed text? Select a Text/Heading/Image node and use its
+        “Content” dropdown → “＋ New field…” — binding puts data from your document, section or file
+        into that spot (§9).
+      </p>
     </div>
   );
 }
@@ -251,6 +330,7 @@ function StandaloneNodeRow({
   fields,
   selectedNodeId,
   onSelectNode,
+  onCreateField,
   onMove,
   onRemove,
   onDuplicate,
@@ -262,6 +342,7 @@ function StandaloneNodeRow({
   fields: TemplateFieldDefinition[];
   selectedNodeId: string | null;
   onSelectNode: (id: string | null) => void;
+  onCreateField?: (label: string, kind: TemplateFieldType, bindNodeId: string) => void;
   onMove: (delta: number) => void;
   onRemove: () => void;
   onDuplicate: () => void;
@@ -271,6 +352,14 @@ function StandaloneNodeRow({
   const [expanded, setExpanded] = useState(true);
   const selected = selectedNodeId === node.id;
   const fieldLabel = node.fieldId ? fields.find((f) => f.id === node.fieldId)?.label : undefined;
+
+  // §9 — the inspector's "＋ New field…" creates the section field AND binds
+  // THIS node in the single owning mutation (scope is always 'section' here).
+  const handleCreateField = onCreateField
+    ? (scope: InspectorScope, label: string, kind: TemplateFieldType) => {
+        if (scope === 'section') onCreateField(label, kind, node.id);
+      }
+    : undefined;
 
   const innerOps = (listId: string) => ({
     onAdd: (type: TemplateBlockType, containerId?: string | null, columnIdx?: number) => {
@@ -396,6 +485,7 @@ function StandaloneNodeRow({
           fields={fields}
           selectedNodeId={selectedNodeId}
           onSelectNode={onSelectNode}
+          onCreateField={onCreateField}
           ops={innerOps(node.id)}
         />
       )}
@@ -412,6 +502,7 @@ function StandaloneNodeRow({
               fields={fields}
               selectedNodeId={selectedNodeId}
               onSelectNode={onSelectNode}
+              onCreateField={onCreateField}
               ops={innerOps(node.id)}
             />
           ))}
@@ -424,8 +515,10 @@ function StandaloneNodeRow({
         <div className="mt-1" style={{ paddingLeft: depth * 12 + 8 }}>
           <NodeInspector
             node={node}
+            scope="section"
             fields={[]}
             sectionFields={fields}
+            onCreateField={handleCreateField}
             onPatch={(patch) => onMutateNode((root) => Object.assign(root, patch))}
             onPatchStyle={(patch) =>
               onMutateNode((root) => {
@@ -448,6 +541,7 @@ function ContainerStack({
   fields,
   selectedNodeId,
   onSelectNode,
+  onCreateField,
   ops,
 }: {
   label: string;
@@ -458,6 +552,7 @@ function ContainerStack({
   fields: TemplateFieldDefinition[];
   selectedNodeId: string | null;
   onSelectNode: (id: string | null) => void;
+  onCreateField?: (label: string, kind: TemplateFieldType, bindNodeId: string) => void;
   ops: {
     onAdd: (type: TemplateBlockType, containerId?: string | null, columnIdx?: number) => void;
     onMove: (id: string, delta: number) => void;
@@ -482,6 +577,7 @@ function ContainerStack({
             fields={fields}
             selectedNodeId={selectedNodeId}
             onSelectNode={onSelectNode}
+            onCreateField={onCreateField}
             ops={ops}
           />
         ))}
@@ -510,6 +606,7 @@ function InnerNodeRow({
   fields,
   selectedNodeId,
   onSelectNode,
+  onCreateField,
   ops,
 }: {
   node: TemplateNode;
@@ -517,6 +614,7 @@ function InnerNodeRow({
   fields: TemplateFieldDefinition[];
   selectedNodeId: string | null;
   onSelectNode: (id: string | null) => void;
+  onCreateField?: (label: string, kind: TemplateFieldType, bindNodeId: string) => void;
   ops: {
     onMove: (id: string, delta: number) => void;
     onRemove: (id: string) => void;
@@ -527,6 +625,12 @@ function InnerNodeRow({
 }) {
   const selected = selectedNodeId === node.id;
   const fieldLabel = node.fieldId ? fields.find((f) => f.id === node.fieldId)?.label : undefined;
+  // §9 — "＋ New field…" for an inner node binds THAT node (section scope).
+  const handleCreateField = onCreateField
+    ? (scope: InspectorScope, label: string, kind: TemplateFieldType) => {
+        if (scope === 'section') onCreateField(label, kind, node.id);
+      }
+    : undefined;
   return (
     <div>
       <div
@@ -563,8 +667,10 @@ function InnerNodeRow({
         <div className="mt-1" style={{ paddingLeft: depth * 12 + 8 }}>
           <NodeInspector
             node={node}
+            scope="section"
             fields={[]}
             sectionFields={fields}
+            onCreateField={handleCreateField}
             onPatch={(patch) => ops.onPatch(node.id, patch)}
             onPatchStyle={(patch) => ops.onPatchStyle(node.id, patch)}
           />
@@ -588,7 +694,7 @@ export function SectionFieldsPanel({
   onPatchField,
   onDeleteField,
 }: {
-  section: CustomLayoutTemplate['sections'][number];
+  section: TemplateSection;
   onPatchField: (id: string, patch: Partial<TemplateFieldDefinition>) => void;
   /** Deleting a field also removes every content node bound to it (§6). */
   onDeleteField: (id: string) => void;
@@ -612,12 +718,13 @@ export function SectionFieldsPanel({
         <div className="space-y-1.5 border-t border-app p-2">
           <p className="text-[10px] text-muted">
             The order here mirrors “Section content” — move a node there and its field moves with
-            it (§6). Delete a field to remove its bound content with it. Add fields with the
-            “Field node” chips in the content list.
+            it (§6). Delete a field to remove its bound content with it. Add fields by selecting a
+            node and using its “Content” dropdown → “＋ New field…” (§9).
           </p>
           {derived.length === 0 && (
             <p className="px-1 py-2 text-center text-[11px] text-muted">
-              No fields yet — add a Field node to the section content.
+              No fields yet — select a Text/Heading/Image node and use its “Content” dropdown →
+              “＋ New field…”.
             </p>
           )}
           {derived.map((f) => (
@@ -653,6 +760,108 @@ export function SectionFieldsPanel({
                 className="codice-bulk-btn ml-auto"
                 title={`Remove field ${f.label} and its bound content`}
                 aria-label={`Remove field ${f.label} and its bound content`}
+                onClick={() => onDeleteField(f.id)}
+              >
+                <Trash size={10} />
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/* Derived BLOCK fields panel (§20 — same rule as sections)            */
+/* ------------------------------------------------------------------ */
+
+/**
+ * The Block's field settings, DERIVED from the block pattern (§20):
+ * pattern order wins; editing a label/kind/required patches the field
+ * definition; deleting a field removes the pattern nodes bound to it
+ * (mirroring the section behavior, so settings and content can never
+ * drift apart). Values are filled PER FILE (File properties).
+ */
+export function BlockFieldsPanel({
+  block,
+  sectionFields,
+  onPatchField,
+  onDeleteField,
+}: {
+  block: TemplateBlockDef;
+  /** The owning section's LIVE derived fields — their ids are NOT block
+   * fields even when a block node binds to them (scope rule, §20). */
+  sectionFields: TemplateFieldDefinition[];
+  onPatchField: (id: string, patch: Partial<TemplateFieldDefinition>) => void;
+  /** Deleting a field also removes every pattern node bound to it. */
+  onDeleteField: (id: string) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const derived = blockFieldsInContentOrder(
+    block,
+    new Set(sectionFields.map((f) => f.id)),
+  );
+
+  return (
+    <div className="rounded-md border border-app" data-tour="layout-fields">
+      <button
+        type="button"
+        className="flex w-full items-center gap-1.5 px-2 py-1.5 text-xs text-secondary transition-colors hover:text-primary"
+        onClick={() => setOpen((v) => !v)}
+        aria-expanded={open}
+      >
+        {open ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
+        <span className="font-medium">Block fields — derived from the pattern (filled per file)</span>
+        <span className="badge">{derived.length}</span>
+      </button>
+      {open && (
+        <div className="space-y-1.5 border-t border-app p-2">
+          <p className="text-[10px] text-muted">
+            The order mirrors the pattern — move a node and its field moves with it (§20). Values
+            are filled PER FILE in File properties (right-click a file). Add fields by selecting a
+            node and using its “Content” dropdown → “＋ New field…” (§9). Deleting a field removes
+            the nodes bound to it.
+          </p>
+          {derived.length === 0 && (
+            <p className="px-1 py-2 text-center text-[11px] text-muted">
+              No per-file fields yet — select a node in the pattern and use its “Content” dropdown →
+              “＋ New field…”.
+            </p>
+          )}
+          {derived.map((f) => (
+            <div key={f.id} className="flex flex-wrap items-center gap-1.5 text-xs">
+              <input
+                type="text"
+                className="input w-40 py-0.5"
+                value={f.label}
+                aria-label={`Block field label — ${f.label}`}
+                onChange={(e) => onPatchField(f.id, { label: e.target.value })}
+              />
+              <select
+                className="select w-24 py-0.5"
+                value={f.kind}
+                aria-label={`Block field kind — ${f.label}`}
+                onChange={(e) => onPatchField(f.id, { kind: e.target.value as TemplateFieldDefinition['kind'] })}
+              >
+                <option value="text">Text</option>
+                <option value="textarea">Paragraph</option>
+                <option value="image">Image</option>
+              </select>
+              <label className="flex items-center gap-1 text-[11px] text-secondary">
+                <input
+                  type="checkbox"
+                  className="h-3 w-3"
+                  checked={f.required}
+                  onChange={(e) => onPatchField(f.id, { required: e.target.checked })}
+                />
+                Required
+              </label>
+              <button
+                type="button"
+                className="codice-bulk-btn ml-auto"
+                title={`Remove field ${f.label} and its bound pattern nodes`}
+                aria-label={`Remove field ${f.label} and its bound pattern nodes`}
                 onClick={() => onDeleteField(f.id)}
               >
                 <Trash size={10} />

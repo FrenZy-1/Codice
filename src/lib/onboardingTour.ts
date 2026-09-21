@@ -26,18 +26,18 @@ export interface TourStepDef {
 export const TOUR_DONE_STORAGE_KEY = 'codice-tour-done-v1';
 
 /** True when the tour has been completed (or explicitly dismissed). */
-export function isTourDone(): boolean {
+export function isTourDone(key: string = TOUR_DONE_STORAGE_KEY): boolean {
   try {
-    return localStorage.getItem(TOUR_DONE_STORAGE_KEY) === '1';
+    return localStorage.getItem(key) === '1';
   } catch {
     return true; // storage unavailable → never auto-start
   }
 }
 
 /** Mark the tour as seen. */
-export function markTourDone(): void {
+export function markTourDone(key: string = TOUR_DONE_STORAGE_KEY): void {
   try {
-    localStorage.setItem(TOUR_DONE_STORAGE_KEY, '1');
+    localStorage.setItem(key, '1');
   } catch {
     // ignore
   }
@@ -83,11 +83,24 @@ export function getTourSteps(): TourStepDef[] {
       placement: 'right',
     },
     {
+      target: 'layouts',
+      title: 'Structure the document',
+      body: 'The Layout editor composes WHAT the document contains: sections, per-file blocks, headings, images, code — in any order. It walks you through its own tour when you open it.',
+      hint: 'Structure lives here',
+      placement: 'bottom',
+    },
+    {
       target: 'template',
       title: 'Style the document',
-      body: 'The template editor controls everything visual: page layout, fonts, syntax theme, headers, footers and the title page. The preview updates live.',
+      body: 'The Template editor controls everything VISUAL: fonts, colors, the syntax theme, Document Density, and the title page / TOC toggles. Page size, margins, headers and footers live in the Layout editor instead.',
       hint: 'Ctrl+T',
       placement: 'bottom',
+    },
+    {
+      target: 'images',
+      title: 'Keep images at hand',
+      body: 'Uploaded screenshots and diagrams live in the Image library — attach them to files in File properties or pick them from any Image node. They stay in your browser across sessions.',
+      placement: 'right',
     },
     {
       target: 'preview',
@@ -99,7 +112,7 @@ export function getTourSteps(): TourStepDef[] {
     {
       target: 'export',
       title: 'Generate the document',
-      body: 'Export a polished DOCX, PDF or ODT with one click. Cancel mid-run, re-download recent exports, or grab a plain ZIP of the selected sources.',
+      body: 'Export a polished DOCX, PDF or ODT with one click — or switch to Export groups to generate several different documents, each with its own projects, layout and file name. Cancel mid-run and re-download recent exports.',
       hint: 'Ctrl+E',
       placement: 'top',
     },

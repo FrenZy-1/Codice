@@ -11,7 +11,10 @@ import type { DiscoveredFile } from '@/types';
 /** Options shared by the sidebar's visibility filter and the FileTree. */
 export interface VisibleFilterOptions {
   showExcluded: boolean;
-  extensionFilter: string;
+  /** Legacy extension filter ("" = all). Kept for API compatibility. */
+  extensionFilter?: string;
+  /** §44 — language id filter derived from the central language mapping. */
+  languageFilter?: string;
   searchQuery: string;
   /** Per-project explicitly-included file ids (override defaults). */
   inclusions?: Record<string, Set<string>>;
@@ -40,6 +43,9 @@ export function filterVisibleFiles(
       const fext = dot >= 0 ? f.name.slice(dot).toLowerCase() : '';
       return fext === ext;
     });
+  }
+  if (opts.languageFilter) {
+    result = result.filter((f) => f.language === opts.languageFilter);
   }
   if (opts.searchQuery) {
     const q = opts.searchQuery.toLowerCase();

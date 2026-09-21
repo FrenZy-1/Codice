@@ -1,181 +1,179 @@
 # Codice
 
-**Turn a folder of source code into a polished, shareable document — DOCX, PDF or ODT — entirely in your browser.**
+**Codice turns project folders into polished, syntax-highlighted documents — DOCX, PDF and ODT — entirely in your browser.**
 
-Codice is a local-first documentation generator. Upload a project (or drop loose files), pick the files you want, customize a document template, live-preview the paginated result, and export a submission-ready report as **.docx**, **.pdf** or **.odt** — or bundle everything into a **.zip**. Nothing is uploaded to a server: all parsing, highlighting and document generation happens client-side.
+Point Codice at a source-code project (or a dozen), pick the files that matter, compose the document you want section by section, and generate submission-ready `.docx`, `.pdf` and `.odt` files. Nothing is ever uploaded: parsing, highlighting, layout, preview and export all run locally.
 
----
-
-## ✨ Feature Highlights
-
-### Project intake
-- **Upload a `.zip` archive** (or multiple archives) or **drag & drop a folder** — files are discovered recursively with common noise (`node_modules`, `.git`, build output, binaries, oversized files) excluded automatically.
-- **Multi-project support** — several archives side by side, each with its own label, file tree and selection.
-- **Loose-file drop** — dropping individual files creates a synthetic "Loose files" project; binary-only input is rejected with a clear error instead of silently adding junk.
-- **File tree with real relative paths** — `├ └ │ ─` box-drawing structure view, per-file language detection, size display.
-- **Duplicate filenames stay unambiguous** — files with the same name in different folders are distinguished by their relative paths everywhere (tree, selection, document, exports).
-- **Bulk selection** — All / None / Invert operating on the *currently filtered* tree, plus search, extension filter and a live selection progress bar (N/M files, selected size).
-- **Per-project selection rules** — include/exclude rule presets (by path, extension, pattern) evaluated against the filtered tree.
-
-### Template editor (4 top-level sections)
-1. **Page & Layout** — page size/orientation/margins, title page, project structure tree (toggle what appears in it), file & project headers (Single / Dual / Triple columns), table of contents, code behavior, document density, page breaks, advanced page options.
-2. **Fonts Settings** — four groups: Body, Headings (Title | H1–H4 tab pages), Code and Project Structure, each with family/size/weight/color controls.
-3. **Theme Settings** — syntax highlighting theme, 12 document colors (accents, headers, table rows, …) and the code-block theme (background, border style ☑ solid/dotted/dashed, padding).
-4. **Save Preset** — persist the current template as a named preset; load it back later. Built-in presets ship with the app, and older/custom preset JSON is auto-migrated with defaults filled in.
-
-### Live preview
-- **True multi-page preview** with real pagination — page size, orientation and margins respond instantly.
-- Every meaningful setting is visible: headers/footers (per-column content), vertical alignment (Top / Center / Bottom), code borders, colors and fonts.
-- **TOC page alignment** — the Table of Contents gets its own Horizontal (Left/Center/Right) × Vertical (Top/Center/Bottom) group alignment, honored in the preview and in all three exporters.
-- **Multi-project preview tabs** — in “Separate document per project” mode the preview shows browser-style tabs, one document per project; combined mode keeps the single sequential document.
-- **Change highlighting** — a ~1 s subtle flash marks ONLY the section affected by your last edit (Title edits flash the title object, not every heading), and the preview repositions so the affected object sits in the upper part of the viewport.
-- **Outline panel** — clickable document map (title → TOC → project → Project Structure / Source Files → files) with scroll-spy, glyph tones and a one-click **copy outline as indented text**.
-- **Print-friendly preview** — a print stylesheet so the preview doubles as a paper draft.
-
-### Export
-- **DOCX** (via `docx`), **PDF** (via `jsPDF`, with embedded DejaVu fonts so Unicode box-drawing glyphs render correctly) and **ODT** — all three share the same document model, so what you preview is what you get.
-- **Vertical export rail** — filename / format / mode / Generate live in a compact panel between the sidebar and the preview (never a footer bar); it stacks below the preview on narrow screens.
-- **Title-page group alignment** — Horizontal and Vertical (Top/Center/Bottom) position the whole title block coherently in every format, with the group kept together (never split across pages).
-- **TOC owns its page** — Title → page break → TOC → page break → content in DOCX, PDF and ODT alike (hard `fo:break-before` page breaks in ODT that every office suite honors).
-- **Single document** or **separate mode** — one document per project, zipped together (with collision-safe filenames: `demo.docx`, `demo_2.docx`, …).
-- **Source ZIP export** — bundle the selected files exactly as shown in the tree.
-- **Before-you-build archive previews** — inspect the exact ZIP contents (tree + sizes / planned document names) before committing to the export.
-- **Export history** — the last 5 generated documents are kept in memory for one-click re-download; export stats (files, pages, words, duration) are reported per run.
-
-### Workspace niceties
-- **Light / dark UI themes**, **stats panel** (projects/files/lines/words), **metadata dialog** per project, **guided onboarding tour** (7 steps), **help dialog**, keyboard-accessible dialogs with Escape handling, reduced-motion support and ARIA labeling throughout.
+- Repository: <https://github.com/FrenZy-1/Codice>
 
 ---
 
-## 🚀 Running the Project
+## Why Codice
 
-### Prerequisites
+Handing in coursework, audit packs or code reviews usually means copy-pasting source files into Word and fighting with formatting. Codice automates the whole pipeline:
 
-| Requirement | Notes |
-|---|---|
-| **Node.js 18+** (20+ recommended) | *or* **Bun 1.1+** — either runtime works |
-| npm / pnpm / yarn / bun | any package manager; examples below use npm & bun |
+- Upload one or many projects (folders, ZIPs, drag-and-drop).
+- Select the relevant files with search, bulk actions and glob include/exclude rules.
+- Compose the document — title, table of contents, sections, per-file code blocks, images, panels — with a visual layout editor.
+- Style it with presets (fonts, colors, syntax themes).
+- Generate pixel-faithful DOCX / PDF / ODT output with real pagination, headers, footers and cover pages.
 
-> Codice is a **client-side app** — no database, no authentication and no environment variables are required. All parsing, highlighting and document generation happen in your browser.
+---
 
-### 1. Install dependencies
+## Feature overview
 
-```bash
-# with npm
-npm install
+- **Multi-project workspace** — upload folders, ZIP archives or standalone files; split multi-project folders into separate projects; merge and unmerge projects without losing files (duplicate paths stay independent).
+- **Smart file selection** — extension/language filters, search, All/None/Invert bulk actions, gitignore-like include/exclude rule sets with presets, and configurable *default* selection preferences applied automatically at upload.
+- **Layout editor** — compose exactly what the document contains (see the model below), with a live preview resolved against your real data.
+- **Multi-export** — one document, one per project, or arbitrary export groups; each export can have its own layout, first page (title or imported cover), filename pattern and project set.
+- **Images** — a persistent image library with thumbnails and captions; attach images to files or bind them to layout nodes; images flow into the preview and every export format.
+- **Cover pages & title pages** — import a one-page `.docx` cover (kept exactly as authored for DOCX) or let Codice generate a title page; each export chooses independently.
+- **Real pagination** — the preview shows true pages with headers/footers, page numbers, `{time}`-style tokens, and page breaks you control.
+- **Outline & statistics** — the Outline pill lists the real document structure (headings, panels, dividers, images, files); the Statistics pill shows counts, sizes, languages and duplicate-name warnings.
+- **Syntax highlighting** — Shiki-powered, with the full theme catalog, in the preview and in all three export formats (including box-drawing characters like `├ └ │ ─` in PDF via an embedded Unicode font).
 
-# or with bun
-bun install
+---
+
+## The document model: File → Section → Block → Node/Field
+
+Understanding four words is enough to use the Layout editor:
+
+```
+Export (one output document)
+└── File layout                      ← ONE ordered list
+    ├── standalone node              ← e.g. Title, Panel, Text
+    ├── Section                      ← renders once
+    │   ├── standalone node          ← e.g. Heading, Image
+    │   ├── Block                    ← repeats ONCE per assigned file
+    │   │   ├── node ({fileName})
+    │   │   └── node (Code)
+    │   └── standalone node
+    ├── standalone node              ← between sections, if you like
+    └── Section
 ```
 
-### 2. Start the dev server
+- **File** — one export document. Its layout is a single ordered sequence: standalone nodes and Sections interleave freely, so content can appear *before*, *between* and *after* sections.
+- **Section** — a document subsection (“Task 01”, “Core classes”). Contains standalone nodes plus Blocks, in one order. Section Types (Task, Code + Output, Description + Answer, …) are one-click starter structures, not rigid schemas.
+- **Block** — the per-file pattern. Whatever the Block contains renders once for every file assigned to it. One file lives in exactly one block — assigning it elsewhere moves it, never duplicates it.
+- **Node / Field** — the content primitives: Text, Heading, Image, Code, File metadata (name/path/language/size/lines), Panel, Columns, Divider, Spacer, TOC, Page break, Metadata. A *field* is a named slot a node can bind to; values are filled per file, per section or once per document. Section field settings are **derived from the section content** — add a node and its field appears, delete the node and every trace disappears (validation included).
 
-```bash
-# with npm
-npm run dev
+### Binding
 
-# or with bun
-bun run dev
+Binding means “this node gets its content from this data”:
+
+| Node content | Result |
+| --- | --- |
+| Static text `Task 01` | Always renders `Task 01` |
+| Bound to `{fileName}` | Renders the current file's name — `Main.java`, `App.kt`, … |
+| Bound to `{filePath}` | Renders the file's path relative to its project root |
+| Bound to a custom field | Renders the value you fill in per file / section / document |
+| Code node | Renders the current file's real source, syntax-highlighted |
+
+Tokens like `{title}`, `{author}`, `{date}`, `{time}`, `{files}`, `{projectName}`, `{page}` and `{pages}` also work inside headers, footers and any literal text.
+
+---
+
+## Layout, page & template settings
+
+Codice deliberately splits *what the document is* from *how it looks*:
+
+| Area (button) | Owns |
+| --- | --- |
+| **Layout editor → File Layout** | Document structure: standalone nodes, sections, blocks, binding |
+| **Layout editor → Page Settings** | Page size, orientation, margins, headers/footers, title-page layout, project structure, file headers, TOC, page breaks |
+| **Layout editor → Assignment** | Files → blocks pool; projects → exports; per-export first page |
+| **Template editor** | Fonts (per heading level), document & code colors, panel colors (with per-panel overrides), Shiki syntax theme, Document Density, style presets |
+
+No control exists in both places, so nothing can drift out of sync.
+
+### Multi-export
+
+- **Combined** — all projects in one document.
+- **Separate** — one document per project, delivered as a ZIP.
+- **Export groups** — arbitrary named groups (Project 1+3 → “Client pack”, Project 2+1 → “Full set”). Each group can use a different layout (turn off *same layout for all exports* and per-export tabs appear in the Layout editor), its own title/cover first page, and its own filename pattern (`{title}`, `{group}`, `{date}`). *Generate all* runs every group in one click.
+
+### Layout templates
+
+Save, duplicate, rename, import and export layouts as versioned JSON. Older v1/v2 templates migrate automatically — file-bound blocks, standalone nodes, fields and ordering are preserved.
+
+### Style presets
+
+Four built-in presets (University, Developer, Minimal, Dark Code) plus your own saved presets, importable and exportable as JSON. Legacy presets migrate on load.
+
+---
+
+## Images
+
+Upload images with the *Images* pill (or drop them straight in). They live in one canonical library in the sidebar — visible, captionable, removable — and persist in your browser. Use them three ways in a layout: a fixed library image, a bound image field filled per instance, or “images attached to the current file” inside a Block. Images are normalized to PNG/JPEG data URLs at import so all three exporters embed real pixels — never a temporary URL.
+
+## Cover pages
+
+Codice does not design covers — you import one. Upload a one-page `.docx` and its **first page only** is kept as raw document data and prepended as-is: DOCX output splices the original OOXML in verbatim; PDF and ODT re-render the page (text, formatting, images — best effort). Each export picks a cover **or** the generated title page, never both. Covers persist across sessions.
+
+---
+
+## Supported inputs
+
+Source and text files in any language Codice's Shiki catalog knows: C, C++, C#, Java, Kotlin, Scala, Groovy, Python, Ruby, PHP, Lua, Perl, JavaScript, TypeScript, Rust, Go, Swift, Dart, Zig, shell scripts, HTML/CSS/SCSS/Less, Vue, Svelte, JSON, YAML, TOML, XML, INI, SQL, Markdown, reStructuredText, Dockerfile, Makefile, CMake, QML, Protocol Buffers, GraphQL and more — plus config files (all detected automatically). Upload via folder picker, multi-folder drag-and-drop, ZIP archive (unpacked locally) or loose files; a persistent **Standalone files** project holds anything uploaded without a folder. Common noise (build outputs, VCS dirs, binaries, lockfiles) is excluded by default and configurable.
+
+## Output formats
+
+| Format | Fidelity notes |
+| --- | --- |
+| **DOCX** | Full layout support: headings, panels (fill/border/text color), columns, images, page breaks, structured headers/footers with live page-number fields, TOC placeholder + static entries, verbatim cover splice. |
+| **PDF** | True pagination with code blocks that never split mid-line, panel boxes with radius, embedded Unicode fallback font so `├ └ │ ─` stay literal, per-page header/footer overlay. |
+| **ODT** | Complete layout support with panel tables, images in `Pictures/`, page-break styles, live page-number fields. |
+
+## Architecture
+
+Codice is a **local, browser-only application** — there is no server, no account and no telemetry. Everything (projects, layouts, presets, images, covers, export history) is stored on your device: preferences in `localStorage`, binary assets in IndexedDB. One canonical pipeline feeds every consumer:
+
+```
+Projects + selection + layout + content + style preset
+        ↓
+   Canonical resolver (one ordered resolved-document stream)
+        ↓
+   Shared paginator
+        ↓
+Main preview · Outline · Statistics · DOCX/PDF/ODT exporters
 ```
 
-Then open **http://localhost:3000** in your browser. The dev server runs on port **3000** by default.
+Preview and exports therefore always agree — what you see is literally the same data the exporters receive.
 
-### 3. Production build & serve (optional)
+---
+
+## Development
 
 ```bash
-# with npm
+# install
+npm install        # or: bun install
+
+# dev server (Turbopack)
+npm run dev        # http://localhost:3000
+
+# lint & type-check
+npm run lint
+npx tsc --noEmit
+
+# unit tests (Vitest + jsdom)
+npm test           # one-shot
+npm run test:watch # watch mode
+
+# production build
 npm run build
-npm start        # serves the standalone build on port 3000
-
-# or with bun
-bun run build
-bun start
+npm start
 ```
 
-### 4. Quality checks
+The test suite covers the document model, resolver, assignment invariants, multi-export behavior, migrations, selection rules, pagination, outline/statistics, cover-page splicing and the three exporters (including golden-path export matrix tests).
 
-```bash
-npm run lint         # ESLint (Next.js rules)
-npm run test         # vitest unit suite (40 files, 443 tests)
-npm run test:watch   # vitest in watch mode
-npx tsc --noEmit     # strict TypeScript check
-```
+## Known limitations
 
-## 📜 npm scripts reference
+- The PDF/ODT cover render is best-effort: exotic Word shapes/effects may simplify (DOCX keeps covers byte-exact; the UI warns whenever a cover could not be rendered).
+- The DOCX table of contents is a static list plus Word's field placeholder — press “Update field” in Word for live page numbers.
+- PDF panel boxes wrap only measurable children; code blocks inside a panel render below the box at full width.
+- Very large previews are capped at 25 files (exports always include everything).
 
-| Script | What it does |
-|---|---|
-| `dev` | Next.js dev server on port 3000 (logs piped to `dev.log`) |
-| `build` | Production build (standalone output) + copy `static/` and `public/` |
-| `start` | Serve the standalone production build |
-| `lint` | ESLint across the repo |
-| `test` | Run the vitest unit suite once |
-| `test:watch` | Run vitest in watch mode |
+## License & links
 
-
----
-
-## 🧱 Tech Stack
-
-- **Next.js 16** (App Router) + **TypeScript 5** — strict mode (Next provides the dev server & routing shell; the app itself is one client-side page)
-- **React 19**, Tailwind CSS 4 + a purpose-built Codice design system (`src/app/codice.css`), Lucide icons
-- **Shiki** for syntax highlighting, lazy-loaded and cached per file
-- **docx** (DOCX), **jsPDF** (PDF), **JSZip** (archive I/O)
-- **vitest** + Testing Library — 40 files / 443 unit & component tests
-- Zero server-side dependencies: 8 runtime packages total (next, react, react-dom, docx, jspdf, jszip, shiki, lucide-react)
-
----
-
-## 📁 Project Structure
-
-```
-src/
-├── app/                    # Next.js App Router (page.tsx mounts CodiceApp)
-├── components/
-│   ├── CodiceApp.tsx       # Application shell (sidebar / editor / preview / export)
-│   ├── ProjectUpload.tsx   # ZIP & folder intake, exclusions, error surfacing
-│   ├── ProjectsSidebar.tsx # Multi-project list, search, bulk selection, rules
-│   ├── FileTree/           # Tree view with Unicode connectors & relative paths
-│   ├── Settings/           # TemplateCustomizer (4 sections) + TemplatePreview
-│   ├── Preview/            # Paginated DocumentPreview, OutlinePanel, empty states
-│   ├── ExportPanel.tsx     # Format/mode controls, progress, history
-│   └── common/             # Dialogs (help, metadata, archive preview), stats, tour
-├── hooks/                  # useAppState (single source of truth)
-├── lib/
-│   ├── presets/            # DocumentPreset model, built-ins, migration, options
-│   ├── exporters/          # docx / pdf / odt exporters + Unicode fallback map
-│   ├── themes/             # Syntax theme registry, UI theme tokens
-│   ├── highlight/          # Shiki lazy highlighter (per-file cache)
-│   ├── documentBuilder.ts  # Canonical preview document model
-│   ├── fileDiscovery.ts    # Recursive discovery + default exclusions
-│   ├── selectionRules.ts   # Per-project include/exclude rules
-│   ├── archivePreview.ts   # Before-you-build ZIP tree model
-│   ├── documentOutline.ts  # Outline model + copy-as-text formatter
-│   ├── preview/            # SHARED pagination model (both previews + tests)
-│   └── …
-├── test/                   # vitest suite (unit + component + e2e-flow tests)
-└── types/                  # Shared domain types
-```
-
----
-
-## 🖱️ Quick Usage Walkthrough
-
-1. **Upload** — drop a project `.zip` or folder onto the upload zone (multiple projects welcome).
-2. **Select files** — check the files you want in the tree; use search / extension filter / All-None-Invert; optionally attach selection rules per project.
-3. **Customize the template** — open the editor and tune Page & Layout, Fonts and Theme; save presets you like.
-4. **Preview** — watch the paginated, syntax-highlighted document update live; navigate via the outline panel; print it if you like.
-5. **Export** — pick DOCX / PDF / ODT, single or separate-per-project mode, preview the archive contents, then download. Re-download anything recent from the export history.
-
----
-
-## 📝 Notes
-
-- **Privacy**: file parsing, highlighting and document generation run entirely in your browser; no source code ever leaves the machine. No server APIs, no database, no auth.
-- **Unicode box-drawing** (`├ └ │ ─`) is preserved verbatim in preview, DOCX, PDF and ODT. The PDF exporter embeds DejaVu Sans Mono and applies a glyph-level font fallback so tree glyphs render on every platform.
-- **Presets** are plain JSON and forward/backward compatible — the loader migrates older shapes and fills missing keys with defaults.
-- This project derives from the original **Codice** (MIT, © Codice contributors — see `LICENSE`), ported to Next.js and extended substantially.
-
-## 📄 License
-
-MIT — see [LICENSE](./LICENSE).
+- Repository: <https://github.com/FrenZy-1/Codice>
+- Issues and PRs welcome.

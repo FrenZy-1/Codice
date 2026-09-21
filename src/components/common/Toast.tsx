@@ -131,6 +131,15 @@ export function useToast(): ToastContextValue {
   return ctx;
 }
 
+/**
+ * Toast access for components that may render OUTSIDE the ToastProvider
+ * (tests render AppStateProvider bare, for example). Returns null when
+ * no provider is mounted — callers must treat toasting as optional.
+ */
+export function useToastOptional(): ToastContextValue | null {
+  return useContext(ToastCtx);
+}
+
 function ToastViewport({
   toasts,
   onDismiss,

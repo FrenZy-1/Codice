@@ -18,10 +18,16 @@
  * the rows it carries, and no row is ever placed past the bottom margin, so
  * split blocks keep their border and never overlap the footer/page number.
  * Headers and footers support the structured single/dual/triple layouts.
+ *
+ * Cover pages (§42): an imported cover (CoverPageAsset) is flow-rendered
+ * onto page 1 by coverPdf.ts — with the cover's own captured page geometry
+ * when available — before any other content; headers/footers skip it and
+ * the document content starts on page 2 with the export's geometry.
  */
 
 import { jsPDF } from 'jspdf';
 import type {
+  CoverPageAsset,
   DocumentImage,
   DocumentModel,
   DocumentOptions,
@@ -34,8 +40,9 @@ import type {
   ResolvedTextProps,
 } from '@/types';
 import type { DocumentExporter } from './types';
-import { parseHex, isLightColor } from './colors';
+import { parseHex, isLightColor, withPanelTextDefault } from './colors';
 import { loadGlyphFonts } from './glyphFonts';
+import { coverPageGeometry, renderCoverToPdf } from '@/lib/coverPdf';
 import { getThemeColors } from '@/lib/highlight/highlighter';
 import { formatBytes } from '@/lib/fileDiscovery';
 import { splitRuns } from './unicodeFallback';
@@ -98,6 +105,8 @@ interface LayoutState {
   margin: { top: number; right: number; bottom: number; left: number };
   cursorY: number;
   page: number;
+  /** First physical page carrying document content (2 with a cover). */
+  firstContentPage: number;
   options: DocumentOptions;
   defaultColor: { r: number; g: number; b: number };
   /** Fallback font availability. */
@@ -134,32 +143,57 @@ function countCodeLine(state: LayoutState) {
   state.pageMeta.set(state.page, meta);
 }
 
-/** Build the jsPDF document with all content. */
-async function buildPdf(model: DocumentModel): Promise<jsPDF> {
+/** Orientation flag that yields an exact [width, height] page (jsPDF sorts
+ * array formats by orientation, so the wider dimension decides). */
+function orientationFor(wPt: number, hPt: number): 'portrait' | 'landscape' {
+  return wPt > hPt ? 'landscape' : 'portrait';
+}
+
+/** Build the jsPDF document with all content. Returns the document and
+ * whether the imported cover page (§42) actually made it onto page 1. */
+async function buildPdf(
+  model: DocumentModel,
+  coverAsset?: CoverPageAsset,
+): Promise<{ doc: jsPDF; coverRendered: boolean }> {
   const opts = model.options;
   const [w, h] = PAGE_DIMENSIONS_PT[opts.pageSize] ?? PAGE_DIMENSIONS_PT.A4;
   const orientation = opts.landscape ? 'landscape' : 'portrait';
-  const doc = new jsPDF({
-    orientation,
-    unit: 'pt',
-    format: opts.pageSize.toLowerCase(),
-  });
+  const exportW = opts.landscape ? h : w;
+  const exportH = opts.landscape ? w : h;
 
-  // Embed the Unicode fallback font (used ONLY for box-drawing runs).
-  let glyphFonts = false;
-  try {
-    const fonts = await loadGlyphFonts();
-    if (fonts) {
-      doc.addFileToVFS('DejaVuSansMono.ttf', fonts.normal);
-      doc.addFont('DejaVuSansMono.ttf', GLYPH_FONT_NORMAL, 'normal');
-      doc.addFileToVFS('DejaVuSansMono-Bold.ttf', fonts.bold);
-      doc.addFont('DejaVuSansMono-Bold.ttf', GLYPH_FONT_BOLD, 'bold');
-      glyphFonts = true;
+  /** Create a jsPDF document with the Unicode fallback font embedded. */
+  const createDoc = async (format: string | [number, number], docOrientation: 'portrait' | 'landscape') => {
+    const newDoc = new jsPDF({ orientation: docOrientation, unit: 'pt', format });
+    // Embed the Unicode fallback font (used ONLY for box-drawing runs).
+    let fontsOk = false;
+    try {
+      const fonts = await loadGlyphFonts();
+      if (fonts) {
+        newDoc.addFileToVFS('DejaVuSansMono.ttf', fonts.normal);
+        newDoc.addFont('DejaVuSansMono.ttf', GLYPH_FONT_NORMAL, 'normal');
+        newDoc.addFileToVFS('DejaVuSansMono-Bold.ttf', fonts.bold);
+        newDoc.addFont('DejaVuSansMono-Bold.ttf', GLYPH_FONT_BOLD, 'bold');
+        fontsOk = true;
+      }
+    } catch {
+      // Without the embedded font the tree glyphs would not render; we still
+      // export (viewer-side fallback may save us) — never ASCII-substitute.
     }
-  } catch {
-    // Without the embedded font the tree glyphs would not render; we still
-    // export (viewer-side fallback may save us) — never ASCII-substitute.
-  }
+    return { newDoc, fontsOk };
+  };
+
+  // §42 — the imported cover's own page geometry (when the source .docx
+  // declared one) sizes page 1; every content page keeps the export's
+  // geometry regardless.
+  const coverGeo = coverAsset ? coverPageGeometry(coverAsset) : null;
+  const coverFormat: [number, number] | string =
+    coverGeo ? [coverGeo.widthMm * MM_TO_PT, coverGeo.heightMm * MM_TO_PT] : opts.pageSize.toLowerCase();
+
+  let doc: jsPDF;
+  let glyphFonts: boolean;
+  const initial = await createDoc(coverFormat, coverGeo ? orientationFor(coverGeo.widthMm * MM_TO_PT, coverGeo.heightMm * MM_TO_PT) : orientation);
+  doc = initial.newDoc;
+  glyphFonts = initial.fontsOk;
 
   // Pull theme foreground for the default code color.
   let defaultColor = { r: 36, g: 41, b: 46 };
@@ -168,6 +202,32 @@ async function buildPdf(model: DocumentModel): Promise<jsPDF> {
     defaultColor = parseHex(tc.foreground);
   } catch {
     // ignore
+  }
+
+  // §42 — imported cover page: flow-rendered onto page 1 BEFORE any other
+  // content (it replaces the generated title page — the export rail sets
+  // includeFrontMatter:false for firstPage:'cover'). Best-effort: on any
+  // failure the document is rebuilt clean and the export proceeds WITHOUT
+  // the cover (the UI warns for that export).
+  let coverRendered = false;
+  if (coverAsset && coverAsset.bodyXml.trim() !== '') {
+    try {
+      const geo = coverGeo ?? {
+        widthMm: exportW / MM_TO_PT,
+        heightMm: exportH / MM_TO_PT,
+        marginTopMm: opts.margins.top,
+        marginRightMm: opts.margins.right,
+        marginBottomMm: opts.margins.bottom,
+        marginLeftMm: opts.margins.left,
+      };
+      renderCoverToPdf(doc, coverAsset, geo);
+      coverRendered = true;
+    } catch {
+      const rebuilt = await createDoc(opts.pageSize.toLowerCase(), orientation);
+      doc = rebuilt.newDoc;
+      glyphFonts = rebuilt.fontsOk;
+      coverRendered = false;
+    }
   }
 
   const state: LayoutState = {
@@ -188,6 +248,9 @@ async function buildPdf(model: DocumentModel): Promise<jsPDF> {
     pageMeta: new Map(),
     currentFileName: null,
     currentProjectName: null,
+    /** Physical page the document content starts on (2 when a cover
+     * page was rendered — the cover itself never gets headers/footers). */
+    firstContentPage: coverRendered ? 2 : 1,
     hfCtx: {
       ...buildStaticTokenContext({
         metadata: model.metadata,
@@ -198,6 +261,15 @@ async function buildPdf(model: DocumentModel): Promise<jsPDF> {
       fileName: model.projects[0]?.files[0]?.relativePath.split('/').pop() ?? '',
     },
   };
+
+  // The cover occupied page 1 — content starts on a fresh page with the
+  // export's own geometry (subsequent no-argument addPage() calls inherit
+  // the size of the last page, i.e. the export geometry again).
+  if (coverRendered) {
+    state.doc.addPage([exportW, exportH], orientationFor(exportW, exportH));
+    state.page = 2;
+    state.cursorY = state.margin.top;
+  }
 
   // Front matter
   if (model.customLayout) {
@@ -278,7 +350,7 @@ async function buildPdf(model: DocumentModel): Promise<jsPDF> {
   // Page header / footer
   applyHeaderFooter(state, model);
 
-  return doc;
+  return { doc, coverRendered };
 }
 
 // ---------------------------------------------------------------------------
@@ -1568,17 +1640,21 @@ function renderPanelPdf(
   // §25 — panels without their own style use the preset's panel colors.
   const fillColor = block.fillColor ?? options.panelFillColor ?? undefined;
   const borderColor = block.borderColor ?? options.panelBorderColor ?? undefined;
+  // §12 — panel text color: node style → preset panelTextColor; it is the
+  // default color for children that resolved no own color.
+  const panelTextColor = block.textColor ?? options.panelTextColor ?? undefined;
+  const children = withPanelTextDefault(block.children, panelTextColor);
 
   // Measure the leading measurable children so the rect covers them.
   const measured: Array<{ block: ResolvedLayoutBlock }> = [];
   let measuredH = 0;
-  for (const child of block.children) {
+  for (const child of children) {
     const h = measurePdfBlockHeight(state, child, inner);
     if (h == null) break;
     measured.push({ block: child });
     measuredH += h;
   }
-  const rest = block.children.slice(measured.length);
+  const rest = children.slice(measured.length);
 
   const totalH = measuredH + pad * 2;
   const maxPanelH = state.pageH - state.margin.top - state.margin.bottom;
@@ -1721,7 +1797,9 @@ function applyHeaderFooter(state: LayoutState, model: DocumentModel) {
   // Shared token context — identical to the DOCX/ODT exporters and preview.
   const staticCtx = state.hfCtx;
 
-  for (let i = 1; i <= totalPages; i++) {
+  // §42 — an imported cover page (page 1) is rendered as authored and
+  // never receives headers/footers; they start with the first content page.
+  for (let i = state.firstContentPage; i <= totalPages; i++) {
     doc.setPage(i);
 
     // ---- Header ----
@@ -1802,7 +1880,9 @@ export const pdfExporter: DocumentExporter = {
   extension: 'pdf',
   async export(model: DocumentModel, options: ExportOptions): Promise<ExportResult> {
     const start = performance.now();
-    const doc = await buildPdf(model);
+    // §42 — render the imported cover page as page 1 (best effort; a
+    // failed render degrades to an export without it and is signalled).
+    const { doc, coverRendered } = await buildPdf(model, options.cover);
     const blob = doc.output('blob');
     const elapsed = performance.now() - start;
     return {
@@ -1810,6 +1890,7 @@ export const pdfExporter: DocumentExporter = {
       filename: `${options.filename || 'codice'}.pdf`,
       format: 'pdf',
       elapsedMs: elapsed,
+      ...(options.cover && !coverRendered ? { coverSkipped: true } : {}),
     };
   },
 };

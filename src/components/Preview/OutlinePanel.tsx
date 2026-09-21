@@ -25,12 +25,15 @@ export function OutlinePanel({
   activeId,
   onNavigate,
   onClose,
+  style,
 }: {
   entries: OutlineEntry[];
   /** Currently top-most visible section (scroll-spy). */
   activeId: string | null;
   onNavigate: (id: string) => void;
   onClose: () => void;
+  /** Optional inline overrides (the preview renders the panel in flow). */
+  style?: React.CSSProperties;
 }) {
   const [copied, setCopied] = useState(false);
   const toast = useToast();
@@ -92,6 +95,7 @@ export function OutlinePanel({
       className="codice-outline-panel codice-print-hidden"
       aria-label="Document outline"
       role="navigation"
+      style={style}
     >
       <header className="flex items-center gap-2 border-b border-app px-3 py-2">
         <span className="text-[11px] font-semibold uppercase tracking-wide text-secondary">

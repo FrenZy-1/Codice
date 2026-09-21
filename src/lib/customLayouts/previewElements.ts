@@ -52,7 +52,7 @@ export function buildLayoutIndexMaps(
 }
 
 /** Map a resolved image to a standalone image element. */
-function imageElement(img: Extract<ResolvedLayoutBlock, { kind: 'image' }>): PreviewElement {
+function imageElement(img: Extract<ResolvedLayoutBlock, { kind: 'image' }>): Extract<PreviewElement, { type: 'image' }> {
   const image: DocumentImage = {
     id: img.imageId,
     name: img.name,
@@ -69,6 +69,16 @@ function imageElement(img: Extract<ResolvedLayoutBlock, { kind: 'image' }>): Pre
 function textElement(
   block: Extract<ResolvedLayoutBlock, { kind: 'heading' | 'paragraph' | 'labeled' }>,
 ): PreviewElement {
+  // §12/§46 — carry the resolved presentation props (align/size/bold/
+  // italic/color) onto the preview element so the MAIN preview renders the
+  // same canonical stream the exporters and the layout studio receive.
+  const props = {
+    align: block.align,
+    fontSizePt: block.fontSizePt,
+    bold: block.bold,
+    italic: block.italic,
+    color: block.color,
+  };
   if (block.kind === 'heading') {
     return {
       type: 'heading',
@@ -80,12 +90,13 @@ function textElement(
       outlineId: (block.anchorId ?? block.nodeId)
         ? `outline-h-${block.anchorId ?? block.nodeId}`
         : undefined,
+      ...props,
     };
   }
   if (block.kind === 'labeled') {
-    return { type: 'fileDetail', label: block.label, text: block.text };
+    return { type: 'fileDetail', label: block.label, text: block.text, ...props };
   }
-  return { type: 'paragraph', text: block.text };
+  return { type: 'paragraph', text: block.text, ...props };
 }
 
 /**
@@ -97,6 +108,8 @@ export function customLayoutToElements(
   projects: PaginationProject[],
   maps: LayoutIndexMaps = buildLayoutIndexMaps(projects),
 ): PreviewElement[] {
+  // §39 — positional divider anchor counter (see the divider case).
+  let dividerSeq = 0;
   const convert = (blocks: ResolvedLayoutBlock[]): PreviewElement[] => {
     const out: PreviewElement[] = [];
     for (const block of blocks) {
@@ -136,7 +149,11 @@ export function customLayoutToElements(
           break;
         }
         case 'image':
-          out.push(imageElement(block));
+          out.push({
+            ...imageElement(block),
+            // §39 — standalone layout images are navigable landmarks.
+            outlineId: `outline-image-${block.imageId}`,
+          });
           break;
         case 'pageBreak':
           out.push({ type: 'pageBreak' });
@@ -149,6 +166,9 @@ export function customLayoutToElements(
             type: 'divider',
             heightPx: Math.max(1, block.heightPt * (4 / 3)),
             fillColor: block.fillColor ?? undefined,
+            // §39 — positional anchor: dividers have no model id, so the
+            // conversion index provides a stable-per-resolution anchor.
+            outlineId: `outline-divider-${dividerSeq++}`,
           });
           break;
         case 'panel':
@@ -161,6 +181,7 @@ export function customLayoutToElements(
             paddingPt: block.paddingPt,
             heightPt: block.heightPt,
             textColor: block.textColor,
+            outlineId: block.nodeId ? `outline-panel-${block.nodeId}` : undefined,
             children: convert(block.children),
           });
           break;
@@ -168,6 +189,7 @@ export function customLayoutToElements(
           out.push({
             type: 'columns',
             count: block.count,
+            outlineId: block.nodeId ? `outline-panel-${block.nodeId}` : undefined,
             columns: block.columns.map(convert),
           });
           break;
@@ -211,6 +233,10 @@ export function buildLayoutOutline(
   // dedupe so the panel never lists a file twice (§15).
   const seenFiles = new Set<string>();
   const seenHeadings = new Set<string>();
+  // §39 — panel/column/image/divider landmark dedupe + positional anchors.
+  const seenPanels = new Set<string>();
+  const seenImages = new Set<string>();
+  let dividerSeq = 0;
 
   const walk = (blocks: ResolvedLayoutBlock[]) => {
     for (const block of blocks) {
@@ -242,6 +268,58 @@ export function buildLayoutOutline(
             tooltip: 'Heading in the document layout',
           });
         }
+      } else if (block.kind === 'panel') {
+        // §39 — panels are navigable landmarks (before descending into
+        // their content, so the panel entry precedes its children).
+        if (block.nodeId && !seenPanels.has(block.nodeId)) {
+          seenPanels.add(block.nodeId);
+          entries.push({
+            id: `outline-panel-${block.nodeId}`,
+            kind: 'panel',
+            label: 'Panel',
+            detail: block.children.length > 0 ? `${block.children.length} item${block.children.length === 1 ? '' : 's'}` : undefined,
+            depth: 1,
+            tooltip: 'Panel container in the document layout',
+          });
+        }
+        walk(block.children);
+      } else if (block.kind === 'columns') {
+        // §39 — columns are panel-family landmarks.
+        if (block.nodeId && !seenPanels.has(block.nodeId)) {
+          seenPanels.add(block.nodeId);
+          entries.push({
+            id: `outline-panel-${block.nodeId}`,
+            kind: 'panel',
+            label: `Columns (${block.count})`,
+            depth: 1,
+            tooltip: 'Column layout in the document layout',
+          });
+        }
+        for (const col of block.columns) walk(col);
+      } else if (block.kind === 'image') {
+        // §39 — standalone images are navigable landmarks (deduped by id:
+        // file-attachment images repeat per file instance).
+        if (!seenImages.has(block.imageId)) {
+          seenImages.add(block.imageId);
+          entries.push({
+            id: `outline-image-${block.imageId}`,
+            kind: 'image',
+            label: block.caption?.trim() || block.name,
+            depth: 1,
+            tooltip: block.caption?.trim() || `Image — ${block.name}`,
+          });
+        }
+      } else if (block.kind === 'divider') {
+        // §39 — dividers are navigable landmarks (positional anchor shared
+        // with the element conversion: same resolution order).
+        const anchor = `outline-divider-${dividerSeq++}`;
+        entries.push({
+          id: anchor,
+          kind: 'divider',
+          label: 'Divider',
+          depth: 1,
+          tooltip: 'Divider rule in the document layout',
+        });
       } else if (block.kind === 'fileHeader' || block.kind === 'code') {
         const fileId = block.fileId;
         if (seenFiles.has(fileId)) continue;
@@ -263,10 +341,6 @@ export function buildLayoutOutline(
           projectId: block.projectId,
           fileId,
         });
-      } else if (block.kind === 'panel') {
-        walk(block.children);
-      } else if (block.kind === 'columns') {
-        for (const col of block.columns) walk(col);
       }
     }
   };

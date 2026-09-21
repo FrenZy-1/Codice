@@ -3,9 +3,16 @@
 /**
  * Codice Template Preview.
  *
- * A realistic, content-rich, MULTI-PAGE document preview that consumes the
- * SAME canonical `DocumentPreset` (+ metadata) as the exporters — there is
- * no preview-only style state (spec §13).
+ * §15/§46 — renders the REAL user document (same state projection the main
+ * preview uses), not a private dummy model:
+ *
+ *   state (projects/files/details/images) + preset + metadata
+ *     → shared element builder / custom-layout resolver
+ *     → shared paginator → these pages.
+ *
+ * When NO files are selected at all (new users), it falls back to a tiny
+ * built-in SAMPLE project (clearly captioned) so the template editor is
+ * never blank.
  *
  * Pagination and the element model live in the SHARED module
  * `@/lib/preview/documentPagination` — the main document preview packs pages
@@ -31,15 +38,27 @@ import { ChevronDown, ChevronUp, Minus, Plus } from '@/components/common/Icons';
 import { ToolbarButton } from '@/components/common/PreviewControls';
 import type { DocumentPreset } from '@/lib/presets/documentPreset';
 import type {
+  DocumentImage,
   DocumentMetadata,
+  DocumentProject,
+  FileDetails,
   FooterSlotType,
   HighlightedFile,
+  ImageAsset,
 } from '@/types';
-import { highlightFile, getThemeColors } from '@/lib/highlight/highlighter';
+import { highlightFile, getThemeColors, plainHighlightedFile } from '@/lib/highlight/highlighter';
 import { resolveSyntaxTheme } from '@/lib/themes/syntaxThemeRegistry';
 import { fontStack } from '@/lib/fonts/fontCatalog';
 import { formatBytes } from '@/lib/fileDiscovery';
+import { languageLabel } from '@/lib/languageDetection';
 import { expandTokens } from '@/lib/tokens';
+import { useAppState } from '@/hooks/useAppState';
+import { effectiveFileOrder } from '@/lib/documentOrder';
+import { resolveCustomLayout, type ResolutionInputs } from '@/lib/customLayouts/resolver';
+import {
+  customLayoutToElements,
+  buildLayoutIndexMaps,
+} from '@/lib/customLayouts/previewElements';
 import {
   buildDocumentElements,
   paginateDocument,
@@ -54,130 +73,52 @@ import {
 } from '@/lib/preview/documentPagination';
 
 /* ------------------------------------------------------------------ */
-/* Sample content — intentionally rich so every setting is visible.    */
+/* Fallback sample — only used when the user has no files selected.    */
 /* ------------------------------------------------------------------ */
 
-const MAIN_KT = `/*
- * Project layout:
- *
- *  sample-app/
- *  ├── build.gradle.kts
- *  ├── src/
- *  │   └── main/
- *  │       └── kotlin/
- *  │           └── Main.kt
- *  └── README.md
+const SAMPLE_KT = `package com.example
+
+/*
+ * A tiny sample document so the template editor is never blank.
+ * Add files to your project to preview YOUR document here.
  */
-package com.example
-
-data class User(val name: String, val age: Int)
-
 fun main() {
-    val users = listOf(User("Ada", 36), User("Alan", 41), User("Grace", 45))
-    val averageAge = users.map { it.age }.average()
-    println("Hello from Codice! Average age: $averageAge")
-    // A deliberately long line used to demonstrate how the preview wraps (or clips) very long code lines depending on the current Wrap-long-lines template setting, so the difference is clearly visible in the generated document.
+    val users = listOf("Ada", "Alan", "Grace")
+    println("Hello from Codice! Users: " + users.joinToString())
 }`;
 
-const UTILS_KT = `package com.example
-
-object Utils {
-    fun formatBytes(bytes: Long): String =
-        if (bytes < 1024) "$bytes B" else "\${bytes / 1024} KB"
-
-    fun slugify(value: String): String =
-        value.trim().lowercase().replace(Regex("[^a-z0-9]+"), "-")
-}`;
-
-const README_MD = `# Sample App
-
-A tiny Kotlin sample used by the Codice template preview.
-
-## Build
-
-\`\`\`
-./gradlew build
-\`\`\`
-
-## Layout
-
-- \`src/main/kotlin\` — application sources
-- \`src/test/kotlin\` — unit tests
-`;
-
-const DEPLOY_SH = `#!/usr/bin/env bash
-set -euo pipefail
-
-# Bundle layout:
-# ├── config/
-# │   └── production.env
-# └── deploy.sh
-
-ENVIRONMENT="\${1:-staging}"
-echo "Deploying to $ENVIRONMENT…"
-rsync -a build/ "server:/srv/app/$ENVIRONMENT/"`;
-
-interface SampleFile {
-  name: string;
-  path: string;
-  language: string;
-  size: number;
-  code: string;
-}
-
-interface SampleProject {
-  label: string;
-  path: string;
-  structure: string[];
-  files: SampleFile[];
-}
-
-const SAMPLE_PROJECTS: SampleProject[] = [
+/** §15 — minimal ONE-file fallback, clearly labeled in the toolbar caption. */
+const SAMPLE_PROJECTS: PaginationProject[] = [
   {
-    label: 'sample-app',
-    path: '/home/dev/projects/sample-app',
+    label: 'sample',
+    path: 'sample/',
     structure: [
-      'build.gradle.kts',
       'README.md',
-      'settings.gradle.kts',
       'src/main/kotlin/com/example/Main.kt',
-      'src/main/kotlin/com/example/Utils.kt',
-      'src/main/resources/application.conf',
-      'src/test/kotlin/com/example/MainTest.kt',
     ],
     files: [
-      { name: 'Main.kt', path: 'src/main/kotlin/com/example/Main.kt', language: 'kotlin', size: 1124, code: MAIN_KT },
-      { name: 'Utils.kt', path: 'src/main/kotlin/com/example/Utils.kt', language: 'kotlin', size: 612, code: UTILS_KT },
-      { name: 'README.md', path: 'README.md', language: 'markdown', size: 226, code: README_MD },
-    ],
-  },
-  {
-    label: 'deploy-tools',
-    path: '/home/dev/projects/deploy-tools',
-    structure: [
-      'config/production.env',
-      'deploy.sh',
-      'README.md',
-    ],
-    files: [
-      { name: 'deploy.sh', path: 'deploy.sh', language: 'shell', size: 384, code: DEPLOY_SH },
+      {
+        name: 'Main.kt',
+        path: 'src/main/kotlin/com/example/Main.kt',
+        language: 'kotlin',
+        size: 412,
+        code: SAMPLE_KT,
+        outlineFileId: 'sample-main',
+        details: {
+          description: 'A tiny sample file — the template preview falls back to this when no files are selected.',
+        },
+      },
     ],
   },
 ];
 
-/** Sample projects in the shared pagination-model shape. */
-const PAGINATION_PROJECTS: PaginationProject[] = SAMPLE_PROJECTS.map((p) => ({
-  label: p.label,
-  path: p.path,
-  structure: p.structure,
-  files: p.files.map((f) => ({
-    name: f.name,
-    path: f.path,
-    language: f.language,
-    size: f.size,
-    code: f.code,
-  })),
-}));
+/** Cache key that includes the syntax theme so theme changes invalidate it. */
+function cacheKey(fileId: string, theme: string): string {
+  return `${fileId}::${theme}`;
+}
+
+/** Preview file limit — mirrors the main preview's documented window. */
+const PREVIEW_LIMIT = 25;
 
 /* ------------------------------------------------------------------ */
 /* Highlight regions                                                   */
@@ -195,13 +136,16 @@ function HighlightRegion({
   style,
   children,
   as = 'div',
+  outlineId,
 }: {
   id: string;
   highlight: HighlightSignal;
   className?: string;
   style?: React.CSSProperties;
-  children: React.ReactNode;
+  children?: React.ReactNode;
   as?: 'div' | 'section';
+  /** §39 — optional outline anchor for landmark regions (panel/columns/…). */
+  outlineId?: string;
 }) {
   const ref = useRef<HTMLDivElement>(null);
   const active = highlight.ids.includes(id);
@@ -226,7 +170,13 @@ function HighlightRegion({
 
   const Tag = as;
   return (
-    <Tag ref={ref as any} data-highlight={id} className={className} style={style}>
+    <Tag
+      ref={ref as any}
+      data-highlight={id}
+      data-outline-id={outlineId}
+      className={className}
+      style={style}
+    >
       {children}
     </Tag>
   );
@@ -286,15 +236,90 @@ export function TemplatePreview({
   metadata: DocumentMetadata;
   highlight: HighlightSignal;
 }) {
+  // §15 — REAL user data: the same state projection the main preview uses.
+  const { state, getSelectedFiles } = useAppState();
   const resolvedTheme = resolveSyntaxTheme(preset.syntaxTheme);
   const [highlighted, setHighlighted] = useState<Record<string, HighlightedFile>>({});
   const [themeColors, setThemeColors] = useState({ background: '#0d1117', foreground: '#e6edf3' });
   const containerRef = useRef<HTMLDivElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const [containerWidth, setContainerWidth] = useState(640);
-  // Zoom: 'fit' or a percentage (30–200).
+  // Zoom: 'fit' or a percentage (30–200) — this preview's OWN zoom state.
   const [zoom, setZoom] = useState<number | 'fit'>('fit');
   const [currentPage, setCurrentPage] = useState(1);
+
+  // Gather all selected files across projects — in the CANONICAL document
+  // order (§13/§36) with per-file details + images attached (§6/§10).
+  const allSelected = useMemo(() => {
+    const result: Array<{
+      projectLabel: string;
+      projectId: string;
+      relativePath: string;
+      language: string | null;
+      sizeBytes: number;
+      fileId: string;
+      details?: FileDetails;
+      images?: DocumentImage[];
+    }> = [];
+    for (const project of state.projects) {
+      const selected = getSelectedFiles(project.id);
+      const ordered = effectiveFileOrder(project.files, state.fileOrder[project.id]);
+      for (const file of ordered) {
+        if (selected.has(file.id)) {
+          const details = state.fileDetails[file.id];
+          const imageIds = state.fileImages[file.id] ?? [];
+          const images = imageIds
+            .map((id) => state.imageAssets.find((a) => a.id === id))
+            .filter((a): a is ImageAsset => Boolean(a))
+            .map((a) => ({
+              id: a.id,
+              name: a.name,
+              dataUrl: a.dataUrl,
+              mime: a.mime,
+              width: a.width,
+              height: a.height,
+              caption: a.caption,
+            }));
+          result.push({
+            projectLabel: project.label,
+            projectId: project.id,
+            relativePath: file.relativePath,
+            language: file.language,
+            sizeBytes: file.size,
+            fileId: file.id,
+            ...(details ? { details } : {}),
+            ...(images.length > 0 ? { images } : {}),
+          });
+        }
+      }
+    }
+    return result;
+  }, [
+    state.projects,
+    state.fileOrder,
+    state.fileDetails,
+    state.fileImages,
+    state.imageAssets,
+    getSelectedFiles,
+  ]);
+
+  const filesToPreview = allSelected.slice(0, PREVIEW_LIMIT);
+  /** §15 — no files selected → the clearly-captioned minimal sample. */
+  const usingSample = allSelected.length === 0;
+
+  // Prune stale theme entries when the theme changes.
+  useEffect(() => {
+    const t = window.setTimeout(() => {
+      setHighlighted((prev) => {
+        const next: Record<string, HighlightedFile> = {};
+        for (const [k, v] of Object.entries(prev)) {
+          if (k.endsWith(`::${resolvedTheme}`)) next[k] = v;
+        }
+        return next;
+      });
+    }, 0);
+    return () => window.clearTimeout(t);
+  }, [resolvedTheme]);
 
   // Measure the scroll viewport to compute the fit-to-width scale.
   useLayoutEffect(() => {
@@ -307,7 +332,8 @@ export function TemplatePreview({
     return () => ro.disconnect();
   }, []);
 
-  // Highlight sample sources with the selected Shiki theme (cached by theme).
+  // §15 — LAZY highlight of the real user files (or the fallback sample)
+  // with the selected Shiki theme, cached per (fileId, theme).
   useEffect(() => {
     let cancelled = false;
     // .catch guard: a theme that fails to load must never leave stale
@@ -321,44 +347,56 @@ export function TemplatePreview({
         if (!cancelled) setThemeColors({ background: '#0d1117', foreground: '#e6edf3' });
       });
     (async () => {
-      for (const project of SAMPLE_PROJECTS) {
-        for (const file of project.files) {
-          const key = `${file.path}::${resolvedTheme}`;
+      const targets: Array<{
+        id: string;
+        path: string;
+        language: string | null;
+        load: () => Promise<string | null>;
+      }> = usingSample
+        ? SAMPLE_PROJECTS[0].files.map((f) => ({
+            id: f.outlineFileId!,
+            path: f.path,
+            language: f.language,
+            load: async () => f.code ?? '',
+          }))
+        : filesToPreview.map((item) => {
+            const project = state.projects.find((p) => p.id === item.projectId);
+            const file = project?.files.find((f) => f.id === item.fileId);
+            const handle = file?.fileHandle;
+            return {
+              id: item.fileId,
+              path: item.relativePath,
+              language: item.language,
+              load: async () => (handle ? await handle.getText() : null),
+            };
+          });
+      for (const target of targets) {
+        if (cancelled) return;
+        const key = cacheKey(target.id, resolvedTheme);
+        if (highlighted[key]) continue;
+        try {
+          const text = await target.load();
+          if (text == null) continue;
+          let hl: HighlightedFile;
           try {
-            const h = await highlightFile(file.path, file.path, file.language, file.code, resolvedTheme);
-            if (!cancelled) {
-              setHighlighted((prev) => ({ ...prev, [key]: h }));
-            }
+            hl = await highlightFile(target.id, target.path, target.language, text, resolvedTheme);
           } catch {
-            // A sample that cannot be highlighted still renders — as plain
-            // text — so the code region never gets stuck on "Highlighting…".
-            if (!cancelled) {
-              setHighlighted((prev) =>
-                prev[key]
-                  ? prev
-                  : {
-                      ...prev,
-                      [key]: {
-                        fileId: file.path,
-                        relativePath: file.path,
-                        language: null,
-                        lines: file.code.split('\n').map((text, i) => ({
-                          lineNumber: i + 1,
-                          text,
-                          tokens: [{ start: 0, length: text.length, scopes: [] }],
-                        })),
-                      },
-                    },
-              );
-            }
+            // spec §8: a file whose highlighting fails (unknown language,
+            // grammar error) still renders — as plaintext.
+            hl = plainHighlightedFile(target.id, target.path, text);
           }
+          if (!cancelled) {
+            setHighlighted((prev) => ({ ...prev, [key]: hl }));
+          }
+        } catch {
+          // Unreadable file handle — nothing to render.
         }
       }
     })();
     return () => {
       cancelled = true;
     };
-  }, [resolvedTheme]);
+  }, [usingSample, filesToPreview.map((f) => f.fileId).join(','), resolvedTheme]);
 
   // spec §3 — ONE scroll per change batch: bring the FIRST affected region
   // into the upper portion of the preview viewport (never the bottom edge).
@@ -379,34 +417,141 @@ export function TemplatePreview({
   }, [highlight.nonce, highlight.ids]);
 
   const getHl = useCallback(
-    (path: string): HighlightedFile | null =>
-      highlighted[`${path}::${resolvedTheme}`] ?? null,
+    (fileId: string | undefined): HighlightedFile | null =>
+      fileId ? highlighted[cacheKey(fileId, resolvedTheme)] ?? null : null,
     [highlighted, resolvedTheme],
   );
 
-  /* ---------------- Sample document elements (shared model) ---------------- */
+  /* ---------------- Real document projection (shared model) ---------------- */
+
+  const paginationProjects = useMemo<PaginationProject[]>(() => {
+    if (usingSample) return SAMPLE_PROJECTS;
+    const groups: PaginationProject[] = [];
+    for (const item of filesToPreview) {
+      let g = groups.find((g) => g.label === item.projectLabel && g.outlineProjectId === item.projectId);
+      if (!g) {
+        g = {
+          label: item.projectLabel,
+          path: `${item.projectLabel}/`,
+          structure: [],
+          files: [],
+          outlineProjectId: item.projectId,
+        };
+        groups.push(g);
+      }
+      g.structure.push(item.relativePath);
+      g.files.push({
+        name: item.relativePath.split('/').pop() || item.relativePath,
+        path: item.relativePath,
+        language: item.language ?? 'plaintext',
+        size: item.sizeBytes,
+        outlineFileId: item.fileId,
+        ...(item.details ? { details: item.details } : {}),
+        ...(item.images ? { images: item.images } : {}),
+      });
+    }
+    return groups;
+  }, [usingSample, filesToPreview]);
+
+  /* ---------------- Applied custom layout (§16-§33, same as main preview) ---------------- */
+
+  const appliedLayout = useMemo(
+    () => state.customLayouts.find((t) => t.id === state.appliedLayoutId) ?? null,
+    [state.customLayouts, state.appliedLayoutId],
+  );
+
+  // DocumentProject-shaped projection of the pagination groups (the
+  // resolver consumes the document model, not preview internals).
+  const layoutProjects = useMemo<DocumentProject[]>(
+    () =>
+      paginationProjects.map((g) => ({
+        id: g.outlineProjectId ?? g.label,
+        label: g.label,
+        folderName: g.label,
+        structurePaths: [],
+        files: g.files.map((f) => ({
+          projectId: g.outlineProjectId ?? g.label,
+          projectLabel: g.label,
+          relativePath: f.path,
+          language: null,
+          highlighted: {
+            fileId: f.outlineFileId ?? f.path,
+            relativePath: f.path,
+            language: null,
+            lines: [],
+          },
+          sizeBytes: f.size,
+          details: f.details,
+          images: f.images,
+        })),
+      })),
+    [paginationProjects],
+  );
+
+  const layoutResolution = useMemo(() => {
+    if (!appliedLayout) return null;
+    const inputs: ResolutionInputs = {
+      projects: layoutProjects,
+      fileDetails: state.fileDetails,
+      fileFieldValues: state.fileFieldValues,
+      sectionFieldValues: state.sectionFieldValues,
+      documentFieldValues: state.documentFieldValues,
+      fileOrder: state.fileOrder,
+      assignments: state.layoutAssignments,
+      imageAssets: Object.fromEntries(state.imageAssets.map((a) => [a.id, a])),
+      metadata: state.metadata,
+      fileCount: layoutProjects.reduce((acc, p) => acc + p.files.length, 0),
+      // §12/§14 — preset panel text color is the resolver-level default.
+      panelText: preset.colors.panelText,
+    };
+    return resolveCustomLayout(appliedLayout, inputs);
+  }, [
+    appliedLayout,
+    layoutProjects,
+    state.fileDetails,
+    state.fileFieldValues,
+    state.sectionFieldValues,
+    state.documentFieldValues,
+    state.fileOrder,
+    state.layoutAssignments,
+    state.imageAssets,
+    state.metadata,
+    preset.colors.panelText,
+  ]);
+
+  /* ---------------- Document elements (shared model) ---------------- */
 
   const elements = useMemo(
-    () => buildDocumentElements(preset, PAGINATION_PROJECTS, { includeNotesBlock: true }),
-    [preset],
+    () =>
+      layoutResolution
+        ? customLayoutToElements(
+            layoutResolution,
+            paginationProjects,
+            buildLayoutIndexMaps(paginationProjects),
+          )
+        : // Real data mirrors the main preview exactly; ONLY the fallback
+          // sample injects the notes/status showcase so every setting stays
+          // visible for brand-new users (§15: no second fake model).
+          buildDocumentElements(preset, paginationProjects, usingSample ? { includeNotesBlock: true } : {}),
+    [layoutResolution, preset, paginationProjects, usingSample],
   );
 
   /* ---------------- Pagination (shared paginator) ---------------- */
 
   const pages = useMemo(
     () =>
-      paginateDocument(elements, preset, PAGINATION_PROJECTS, {
+      paginateDocument(elements, preset, paginationProjects, {
         getLineCount: (file) => {
-          const hl = getHl(file.path);
+          const hl = getHl(file.outlineFileId);
           if (hl) return hl.lines.length;
           return file.code ? file.code.split('\n').length : 1;
         },
         getLineText: (file, lineIdx) => {
-          const hl = getHl(file.path);
+          const hl = getHl(file.outlineFileId);
           return hl?.lines[lineIdx]?.text ?? '';
         },
       }),
-    [elements, preset, getHl],
+    [elements, preset, paginationProjects, getHl],
   );
 
   /* ---------------- Page box ---------------- */
@@ -436,12 +581,11 @@ export function TemplatePreview({
 
   const today = new Date().toLocaleDateString();
   const nowDate = new Date();
-  const sampleFileCount = SAMPLE_PROJECTS.reduce(
-    (acc, pr) => acc + pr.files.length,
-    0,
-  );
-  const sampleFirstFileName =
-    SAMPLE_PROJECTS[0]?.files[0]?.path.split('/').pop() ?? '';
+  const totalFileCount = usingSample
+    ? SAMPLE_PROJECTS.reduce((acc, pr) => acc + pr.files.length, 0)
+    : allSelected.length;
+  const firstProjectLabel = paginationProjects[0]?.label ?? '';
+  const firstFileName = paginationProjects[0]?.files[0]?.name ?? '';
 
   function headerText(slot: string | null): string | null {
     if (slot == null || slot === '') return null;
@@ -450,9 +594,9 @@ export function TemplatePreview({
       author: metadata.author ?? '',
       date: metadata.date || today,
       time: nowDate.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }),
-      files: sampleFileCount,
-      projectName: SAMPLE_PROJECTS[0]?.label ?? '',
-      fileName: sampleFirstFileName,
+      files: totalFileCount,
+      projectName: firstProjectLabel,
+      fileName: firstFileName,
       now: nowDate,
     });
   }
@@ -472,7 +616,7 @@ export function TemplatePreview({
           time: nowDate.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }),
           title: metadata.title ?? '',
           author: metadata.author ?? '',
-          files: sampleFileCount,
+          files: totalFileCount,
           now: nowDate,
         });
       case 'pageNumber':
@@ -614,15 +758,24 @@ export function TemplatePreview({
         return renderHeading(el, key);
       case 'paragraph':
         return (
-          <p
+          <HighlightRegion
             key={key}
-            data-codice-region="body"
+            id="body"
+            highlight={highlight}
             style={{
-              // Primary text is the CANONICAL body color (spec §5) — the
-              // Document Colors "Primary text" picker drives body copy.
-              color: preset.colors.primaryText,
-              fontSize: preset.typography.bodyFontSizePt * PT_TO_PX,
-              fontWeight: WEIGHT_MAP[preset.typography.bodyWeight],
+              // §5/§46 — preset body style is the default; resolved props
+              // override. Color falls back to INHERIT so panels (§12) tint
+              // their children through the CSS cascade.
+              color: el.color ?? 'inherit',
+              fontSize: (el.fontSizePt ?? preset.typography.bodyFontSizePt) * PT_TO_PX,
+              fontWeight:
+                el.bold === true
+                  ? WEIGHT_MAP.bold
+                  : el.bold === false
+                    ? WEIGHT_MAP.normal
+                    : WEIGHT_MAP[preset.typography.bodyWeight],
+              fontStyle: el.italic === true ? 'italic' : el.italic === false ? 'normal' : undefined,
+              textAlign: el.align,
               lineHeight: preset.typography.lineSpacing,
               margin: `0 0 ${preset.typography.paragraphSpacingPt}pt 0`,
               fontFamily: fontStack(preset.typography.bodyFont),
@@ -638,16 +791,41 @@ export function TemplatePreview({
                   </span>
                 ))
               : el.text}
-          </p>
+          </HighlightRegion>
         );
       case 'statusCard':
         return renderStatusCard(key);
       case 'fileHeader':
         return renderFileHeader(el.projectIdx, el.fileIdx, key);
+      case 'fileDetail':
+        return renderFileDetail(el, key);
       case 'code':
         return renderCodeBlock(el, key, effectiveBg, fallbackFg, codeBorderCss);
+      case 'image':
+        return renderImage(el, key);
       case 'spacer':
         return <div key={key} style={{ height: el.height }} />;
+      case 'divider':
+        return (
+          <HighlightRegion
+            key={key}
+            id="divider"
+            highlight={highlight}
+            outlineId={el.outlineId}
+            style={{
+              height: Math.max(1, el.heightPx),
+              background: el.fillColor ?? preset.colors.mutedText,
+              borderRadius: Math.min(2, Math.max(1, el.heightPx / 2)),
+              margin: `${preset.typography.paragraphSpacingPt}px 0`,
+            }}
+          />
+        );
+      case 'panel':
+        return renderPanel(el, key);
+      case 'columns':
+        return renderColumns(el, key);
+      case 'pageBreak':
+        return null; // consumed by the paginator (real page separation)
       default:
         return null;
     }
@@ -655,22 +833,23 @@ export function TemplatePreview({
 
   /**
    * Title page — ONE coherent content group (spec §9).
-   * Horizontal alignment applies to the WHOLE group (including the title —
-   * the title is not a special element that ignores the alignment setting);
-   * the group is moved vertically as a unit via the page's justify-content.
+   * §15 — REAL metadata first; the sample placeholders only apply to the
+   * fallback sample so the title-page styling stays visible for new users.
    */
   function renderTitlePage(key: string) {
     const tp = preset.titlePage;
-    const title = metadata.title || 'Sample Project Report';
-    const subtitle = metadata.subtitle || 'A Practical Guide to Codice Document Templates';
-    const author = metadata.author || 'Ada Lovelace';
-    const course = metadata.course || 'CS 402 — Software Engineering';
-    const university = metadata.university || 'Sample State University';
+    const title = metadata.title || (usingSample ? 'Sample Project Report' : 'Untitled document');
+    const subtitle = metadata.subtitle || (usingSample ? 'A Practical Guide to Codice Document Templates' : '');
+    const author = metadata.author || (usingSample ? 'Ada Lovelace' : '');
+    const course = metadata.course || (usingSample ? 'CS 402 — Software Engineering' : '');
+    const university = metadata.university || (usingSample ? 'Sample State University' : '');
     const date = metadata.date || today;
-    const version = metadata.version || 'v1.0.0';
+    const version = metadata.version || (usingSample ? 'v1.0.0' : '');
     const description =
       metadata.description ||
-      'This sample document demonstrates every template control: typography, spacing, colors, page behavior, and code presentation.';
+      (usingSample
+        ? 'This sample document demonstrates every template control: typography, spacing, colors, page behavior, and code presentation.'
+        : '');
 
     const titleH = preset.headings.title;
     // The description keeps a readable measure; it follows the group
@@ -713,7 +892,7 @@ export function TemplatePreview({
             </div>
           </HighlightRegion>
         )}
-        {tp.showSubtitle && (
+        {tp.showSubtitle && subtitle && (
           <div
             style={{
               fontFamily: fontStack(preset.typography.bodyFont),
@@ -725,17 +904,17 @@ export function TemplatePreview({
             {subtitle}
           </div>
         )}
-        {tp.showAuthor && (
+        {tp.showAuthor && author && (
           <div style={{ fontSize: preset.typography.bodyFontSizePt * PT_TO_PX + 2, color: preset.colors.secondaryText, marginTop: 18 }}>
             by {author}
           </div>
         )}
-        {tp.showCourse && (
+        {tp.showCourse && course && (
           <div style={{ fontSize: 12, color: preset.colors.mutedText, marginTop: 8 }}>
             {course}
           </div>
         )}
-        {tp.showUniversity && (
+        {tp.showUniversity && university && (
           <div style={{ fontSize: 12, color: preset.colors.mutedText, marginTop: 4 }}>
             {university}
           </div>
@@ -745,7 +924,7 @@ export function TemplatePreview({
             {date}
           </div>
         )}
-        {tp.showVersion && (
+        {tp.showVersion && version && (
           <div style={{ marginTop: 6 }}>
             <span
               style={{
@@ -766,7 +945,7 @@ export function TemplatePreview({
             </span>
           </div>
         )}
-        {tp.showDescription && (
+        {tp.showDescription && description && (
           <div
             style={{
               fontSize: 12,
@@ -793,7 +972,7 @@ export function TemplatePreview({
       if (level === 'h3') return `${p}.${f}.${s} `;
       return `${p}.${f}.${s}.1 `;
     };
-    SAMPLE_PROJECTS.forEach((project, p) => {
+    paginationProjects.forEach((project, p) => {
       entries.push({
         level: 'h1',
         text: project.label,
@@ -808,9 +987,12 @@ export function TemplatePreview({
           meta: preset.misc.showFileMetadata ? `${file.language} · ${formatBytes(file.size)}` : undefined,
         });
       });
+    });
+    if (usingSample) {
+      // Only the fallback sample exercises H3/H4 TOC lines (§15).
       entries.push({ level: 'h3', text: 'Notes', numberPrefix: n('h3', 1, 1, 1) });
       entries.push({ level: 'h4', text: 'Implementation Notes', numberPrefix: n('h4', 1, 1, 1) });
-    });
+    }
     return entries;
   }
 
@@ -872,7 +1054,8 @@ export function TemplatePreview({
 
   function renderProjectHeader(projectIdx: number, key: string) {
     const ph = preset.projectHeaders;
-    const project = SAMPLE_PROJECTS[projectIdx];
+    const project = paginationProjects[projectIdx];
+    if (!project) return null;
     const totalSize = project.files.reduce((a, f) => a + f.size, 0);
     return (
       <HighlightRegion key={key} id="project-header" highlight={highlight}>
@@ -908,7 +1091,8 @@ export function TemplatePreview({
   }
 
   function structureLines(projectIdx: number): string[] {
-    const project = SAMPLE_PROJECTS[projectIdx];
+    const project = paginationProjects[projectIdx];
+    if (!project) return [];
     interface Node {
       name: string;
       children: Map<string, Node>;
@@ -962,6 +1146,8 @@ export function TemplatePreview({
   function renderStructure(projectIdx: number, key: string) {
     const ps = preset.projectStructure;
     const h2 = preset.headings.h2;
+    const project = paginationProjects[projectIdx];
+    if (!project) return null;
     const lines = structureLines(projectIdx);
     return (
       <HighlightRegion key={key} id="structure" highlight={highlight} style={{ marginBottom: preset.layout.sectionSpacingPt }}>
@@ -976,7 +1162,7 @@ export function TemplatePreview({
           }}
         >
           <span style={{ color: preset.colors.accent }}>
-            {preset.misc.numberHeadings && h2.numbered ? `${projectIdx + 1}.${SAMPLE_PROJECTS[projectIdx].files.length + 1} ` : ''}
+            {preset.misc.numberHeadings && h2.numbered ? `${projectIdx + 1}.${project.files.length + 1} ` : ''}
           </span>
           Project Structure
         </div>
@@ -1004,11 +1190,18 @@ export function TemplatePreview({
         highlight={highlight}
         style={{
           fontFamily: fontStack(h.font),
-          fontSize: h.sizePt * PT_TO_PX,
-          fontWeight: WEIGHT_MAP[h.weight],
-          fontStyle: h.italic ? 'italic' : 'normal',
-          color: h.color,
-          textAlign: h.alignment,
+          // §46 — presentation overrides on top of the preset heading style.
+          fontSize: (el.fontSizePt ?? h.sizePt) * PT_TO_PX,
+          fontWeight:
+            el.bold === true
+              ? WEIGHT_MAP.bold
+              : el.bold === false
+                ? WEIGHT_MAP.normal
+                : WEIGHT_MAP[h.weight],
+          fontStyle:
+            el.italic === true ? 'italic' : el.italic === false ? 'normal' : h.italic ? 'italic' : 'normal',
+          color: el.color ?? h.color,
+          textAlign: el.align ?? h.alignment,
           marginTop: h.spaceBeforePt,
           marginBottom: h.spaceAfterPt,
           lineHeight: h.lineHeight,
@@ -1058,11 +1251,12 @@ export function TemplatePreview({
 
   function renderFileHeader(projectIdx: number, fileIdx: number, key: string) {
     const fh = preset.fileHeaders;
-    const file = SAMPLE_PROJECTS[projectIdx].files[fileIdx];
-    const hl = getHl(file.path);
-    const lineCount = hl ? hl.lines.length : file.code.split('\n').length;
+    const file = paginationProjects[projectIdx]?.files[fileIdx];
+    if (!file) return null;
+    const hl = getHl(file.outlineFileId);
+    const lineCount = hl ? hl.lines.length : file.code ? file.code.split('\n').length : 0;
     const metaBits: string[] = [];
-    if (fh.showLanguageLabel) metaBits.push(languageLabelOf(file.language));
+    if (fh.showLanguageLabel) metaBits.push(languageLabel(file.language));
     if (fh.showFileSize) metaBits.push(formatBytes(file.size));
     if (fh.showLineCount) metaBits.push(`${lineCount} lines`);
     return (
@@ -1097,6 +1291,158 @@ export function TemplatePreview({
     );
   }
 
+  /** §6 — a labeled detail paragraph (Description / Summary / Note / custom). */
+  function renderFileDetail(
+    el: Extract<PreviewElement, { type: 'fileDetail' }>,
+    key: string,
+  ) {
+    return (
+      <HighlightRegion
+        key={key}
+        id="file-detail"
+        highlight={highlight}
+        style={{ marginBottom: preset.typography.paragraphSpacingPt, textAlign: el.align }}
+      >
+        <div
+          style={{
+            fontSize: Math.max(9, (el.fontSizePt ?? preset.typography.bodyFontSizePt) * PT_TO_PX - 2),
+            fontWeight: 600,
+            letterSpacing: 0.4,
+            textTransform: 'uppercase',
+            color: preset.colors.mutedText,
+            marginBottom: 3,
+          }}
+        >
+          {el.label}
+        </div>
+        <p
+          style={{
+            // §12/§46 — resolved color wins; otherwise INHERIT so a panel's
+            // text color reaches detail text that resolved no own color.
+            color: el.color ?? 'inherit',
+            fontSize: (el.fontSizePt ?? preset.typography.bodyFontSizePt) * PT_TO_PX,
+            fontWeight:
+              el.bold === true
+                ? WEIGHT_MAP.bold
+                : el.bold === false
+                  ? WEIGHT_MAP.normal
+                  : WEIGHT_MAP[preset.typography.bodyWeight],
+            fontStyle: el.italic === true ? 'italic' : el.italic === false ? 'normal' : undefined,
+            lineHeight: preset.typography.lineSpacing,
+            margin: 0,
+            fontFamily: fontStack(preset.typography.bodyFont),
+            whiteSpace: 'pre-wrap',
+          }}
+        >
+          {el.text}
+        </p>
+      </HighlightRegion>
+    );
+  }
+
+  /** §10/§12 — an image (attached to a file or standalone from the layout). */
+  function renderImage(el: Extract<PreviewElement, { type: 'image' }>, key: string) {
+    const g = el.projectIdx !== undefined ? paginationProjects[el.projectIdx] : undefined;
+    const file = el.fileIdx !== undefined ? g?.files[el.fileIdx] : undefined;
+    const img = el.image ?? file?.images?.[el.imageIdx ?? 0];
+    if (!img) return null;
+    return (
+      <figure
+        key={key}
+        data-codice-region="image"
+        data-outline-id={el.outlineId}
+        style={{
+          margin: `${preset.typography.paragraphSpacingPt}pt 0`,
+          textAlign: 'center',
+        }}
+      >
+        <img
+          src={img.dataUrl}
+          alt={img.caption || img.name}
+          style={{
+            maxWidth: '62%',
+            maxHeight: 420,
+            height: 'auto',
+            border: `0.5px solid ${preset.colors.borders}`,
+            borderRadius: 2,
+          }}
+        />
+        {img.caption && (
+          <figcaption
+            style={{
+              fontSize: Math.max(9, preset.typography.bodyFontSizePt * PT_TO_PX - 3),
+              color: preset.colors.secondaryText,
+              marginTop: 4,
+              fontStyle: 'italic',
+            }}
+          >
+            {img.caption}
+          </figcaption>
+        )}
+      </figure>
+    );
+  }
+
+  /** §6 — visual container: fill/border/radius/padding around child blocks. */
+  function renderPanel(el: Extract<PreviewElement, { type: 'panel' }>, key: string) {
+    const hasChildren = el.children.length > 0;
+    return (
+      <HighlightRegion
+        key={key}
+        id="panel"
+        highlight={highlight}
+        outlineId={el.outlineId}
+        style={{
+          // §25 — panels fall back to the preset's panel colors when the
+          // layout node declares none of its own.
+          background: el.fillColor ?? preset.colors.panelFill ?? undefined,
+          border:
+            el.borderWidthPt && el.borderColor
+              ? `${el.borderWidthPt}px solid ${el.borderColor}`
+              : undefined,
+          borderRadius: el.radiusPt ? el.radiusPt * PT_TO_PX : undefined,
+          padding: el.paddingPt ? el.paddingPt * PT_TO_PX : undefined,
+          height:
+            !hasChildren && el.heightPt ? Math.max(1, el.heightPt * PT_TO_PX) : undefined,
+          margin: `${preset.typography.paragraphSpacingPt}px 0`,
+          // §12 — the panel's text color (node style → preset panelText) is
+          // the DEFAULT for its content; children inherit through the CSS
+          // cascade unless they resolved their own color.
+          color: el.textColor ?? preset.colors.panelText,
+        }}
+      >
+        {/* Key includes the child KIND — prevents DOM-node reuse across
+            element kinds when the resolved stream shifts (React otherwise
+            diffs removed shorthands against the new kind's longhands). */}
+        {el.children.map((child, i) => renderElement(child, `${key}-${i}-${child.type}`))}
+      </HighlightRegion>
+    );
+  }
+
+  /** §6 — side-by-side regions; each column stacks its own children. */
+  function renderColumns(el: Extract<PreviewElement, { type: 'columns' }>, key: string) {
+    return (
+      <HighlightRegion
+        key={key}
+        id="columns"
+        highlight={highlight}
+        outlineId={el.outlineId}
+        style={{
+          display: 'flex',
+          gap: 12,
+          alignItems: 'flex-start',
+          margin: `${preset.typography.paragraphSpacingPt}px 0`,
+        }}
+      >
+        {el.columns.map((col, i) => (
+          <div key={i} style={{ flex: 1, minWidth: 0 }}>
+            {col.map((child, j) => renderElement(child, `${key}-${i}-${j}-${child.type}`))}
+          </div>
+        ))}
+      </HighlightRegion>
+    );
+  }
+
   function renderCodeBlock(
     el: Extract<PreviewElement, { type: 'code' }>,
     key: string,
@@ -1105,8 +1451,9 @@ export function TemplatePreview({
     borderCss: string,
   ) {
     const c = preset.code;
-    const file = SAMPLE_PROJECTS[el.projectIdx].files[el.fileIdx];
-    const hl = getHl(file.path);
+    const file = paginationProjects[el.projectIdx]?.files[el.fileIdx];
+    if (!file) return null;
+    const hl = getHl(file.outlineFileId);
     const lines = hl ? hl.lines.slice(el.fromLine, el.toLine) : null;
     const lineNumberWidth = c.lineNumberWidthChars > 0
       ? c.lineNumberWidthChars
@@ -1198,7 +1545,7 @@ export function TemplatePreview({
 
   return (
     <div className="flex h-full min-h-0 w-full min-w-0 flex-col overflow-hidden">
-      {/* ---------- Toolbar: zoom + page navigation ---------- */}
+      {/* ---------- Toolbar: zoom + page navigation + source caption ---------- */}
       <div className="flex flex-shrink-0 items-center gap-1 border-b border-app bg-surface/70 px-3 py-1.5 backdrop-blur">
         <div className="flex items-center gap-0.5">
           <ToolbarButton label="Zoom out" onClick={() => stepZoom(-10)}>
@@ -1234,9 +1581,22 @@ export function TemplatePreview({
           </ToolbarButton>
         </div>
 
-        <div className="ml-auto text-[10px] text-muted">
+        {/* §15 — the preview source is explicit: real document vs sample. */}
+        <span
+          className="ml-auto rounded-full border border-app px-2 py-0.5 text-[10px] text-muted"
+          data-preview-source={usingSample ? 'sample' : 'document'}
+          title={
+            usingSample
+              ? 'No files selected yet — showing a built-in sample document. Add or select files to preview your own content.'
+              : 'Rendering your currently selected files and custom layout.'
+          }
+        >
+          {usingSample ? 'Preview source: sample (no files yet)' : 'Preview source: your document'}
+        </span>
+
+        <span className="ml-2 text-[10px] text-muted">
           {pageW}×{pageH}px · {preset.page.landscape ? 'landscape' : 'portrait'}
-        </div>
+        </span>
       </div>
 
       {/* ---------- Scrollable pages ---------- */}
@@ -1289,7 +1649,10 @@ export function TemplatePreview({
 
                   {/* Content */}
                   <div style={{ flex: '0 0 auto' }}>
-                    {page.elements.map((el, i) => renderElement(el, `${idx}-${i}`))}
+                    {/* Key includes the element KIND — same rationale as the
+                        main preview: index-only keys let one element kind
+                        inherit another kind's DOM node across rerenders. */}
+                    {page.elements.map((el, i) => renderElement(el, `${idx}-${i}-${el.type}`))}
                   </div>
 
                   {/* Footer — positioned at the very bottom */}
@@ -1318,6 +1681,22 @@ export function TemplatePreview({
               </div>
             );
           })}
+
+          {!usingSample && allSelected.length > PREVIEW_LIMIT && (
+            <div
+              style={{
+                marginTop: 16,
+                padding: 12,
+                background: '#fef3c7',
+                color: '#92400e',
+                fontSize: 12,
+                borderRadius: 4,
+              }}
+            >
+              Preview limited to {PREVIEW_LIMIT} files. The exported document
+              will contain all {allSelected.length} selected files.
+            </div>
+          )}
         </div>
       </div>
     </div>
@@ -1350,20 +1729,4 @@ export function TemplatePreview({
     });
     setCurrentPage(current);
   }
-}
-
-/** Map a language id to its display label. */
-function languageLabelOf(id: string): string {
-  const map: Record<string, string> = {
-    kotlin: 'Kotlin',
-    typescript: 'TypeScript',
-    javascript: 'JavaScript',
-    markdown: 'Markdown',
-    shell: 'Shell',
-    java: 'Java',
-    python: 'Python',
-    go: 'Go',
-    rust: 'Rust',
-  };
-  return map[id] ?? id;
 }

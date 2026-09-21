@@ -3,26 +3,27 @@
 /**
  * Codice Template Editor.
  *
- * Organized into exactly FOUR top-level sections:
+ * §17 — the structural page/layout configuration now lives in the Layout
+ * studio; this editor owns the STYLING/theme configuration only. Organized
+ * into FOUR top-level sections:
  *
- *   ├── Page & Layout     — page geometry, document sections, layout,
- *   │                       spacing, pagination
- *   ├── Fonts Settings    — all document typography (body, headings, code,
- *   │                       project structure)
- *   ├── Theme Settings    — syntax theme + document colors + code colors
- *   └── Save Preset       — preset management
- *
- * (The former "Document & Misc" section was merged into Page & Layout.)
+ *   ├── Typography & Density — document density (spacing rhythm)
+ *   ├── Fonts Settings      — all document typography (body, headings, code,
+ *   │                         project structure)
+ *   ├── Theme Settings      — syntax theme + document colors + panels + code
+ *   │                         colors (title-page typography/colors live in
+ *   │                         Fonts → Headings → Title)
+ *   └── Save Preset         — preset management
  *
  * Dependent settings are HIDDEN until their parent feature is enabled
  * (not merely disabled). Advanced controls collapse behind "Advanced ▼".
  *
  * The right pane shows a live multi-page preview consuming the SAME
- * `DocumentPreset` as the exporters. Changing a setting briefly highlights
- * the affected preview region.
+ * `DocumentPreset` as the exporters AND the REAL user document (§15).
+ * Changing a setting briefly highlights the affected preview region.
  */
 
-import { useEffect, useRef, useState, type RefObject } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useAppState } from '@/hooks/useAppState';
 import { useToast } from '@/components/common/Toast';
 import { BUILT_IN_DOCUMENT_PRESETS } from '@/lib/presets/builtInPresets';
@@ -30,32 +31,18 @@ import type {
   CodeBlockStyle,
   DocumentColors,
   DocumentPreset,
-  FileHeaderStyle,
-  FooterSlotType,
-  HeaderFooterLayout,
   HeadingStyle,
   HeadingStyles,
   LayoutDensity,
-  MiscDocumentOptions,
-  PageBreakBehavior,
-  PageStyle,
-  ProjectHeaderStyle,
   ProjectStructureStyle,
-  TocStyle,
-  TitlePageStyle,
   TypographyStyle,
-  FontWeight,
-  Alignment,
-  VerticalAlignment,
 } from '@/lib/presets/documentPreset';
 import {
   getGroupedSyntaxThemes,
   ensureSyntaxThemeCatalog,
 } from '@/lib/themes/syntaxThemeRegistry';
 import { FontSelector } from '@/components/common/FontSelector';
-import { fontStack } from '@/lib/fonts/fontCatalog';
 import {
-  ChevronDown,
   ChevronRight,
   X,
   Save,
@@ -76,44 +63,29 @@ import {
   AlignmentSelect,
   Toggle,
   ColorInput,
-  AdvancedSection,
-  DependentSettings,
   computeHighlightIds,
 } from './templateShared';
 import { TemplatePreview, type HighlightSignal } from './TemplatePreview';
-import { TOKEN_CATALOG } from '@/lib/tokens';
-import type { DocumentMetadata } from '@/types';
 
 interface Props {
   open: boolean;
   onClose: () => void;
 }
 
-type Section = 'page' | 'fonts' | 'theme' | 'preset';
+type Section = 'density' | 'fonts' | 'theme' | 'preset';
 
 const SECTIONS: Array<{ id: Section; label: string; icon: any }> = [
-  { id: 'page', label: 'Page & Layout', icon: Layout },
+  { id: 'density', label: 'Typography & Density', icon: Layout },
   { id: 'fonts', label: 'Fonts Settings', icon: Type },
   { id: 'theme', label: 'Theme Settings', icon: Palette },
   { id: 'preset', label: 'Save Preset', icon: SettingsIcon },
-];
-
-const FOOTER_SLOT_OPTIONS: Array<{ value: FooterSlotType; label: string }> = [
-  { value: 'none', label: '— Empty —' },
-  { value: 'pageNumber', label: 'Page number' },
-  { value: 'pageCount', label: 'Page count' },
-  { value: 'linesOnPage', label: 'Lines on this page' },
-  { value: 'fileName', label: 'File name' },
-  { value: 'projectName', label: 'Project name' },
-  { value: 'date', label: 'Date' },
-  { value: 'text', label: 'Custom text…' },
 ];
 
 export function TemplateCustomizer({ open, onClose }: Props) {
   const { state, dispatch, allPresets } = useAppState();
   const toast = useToast();
   const [expanded, setExpanded] = useState<Set<Section>>(
-    new Set(['page', 'fonts']),
+    new Set(['fonts']),
   );
   const [highlight, setHighlight] = useState<HighlightSignal>({ ids: [], nonce: 0 });
   const highlightTimer = useRef<number | null>(null);
@@ -205,15 +177,6 @@ export function TemplateCustomizer({ open, onClose }: Props) {
     );
   };
 
-  const patchMetadata = (patch: Partial<DocumentMetadata>) => {
-    dispatch({ type: 'SET_METADATA', metadata: patch });
-    const metadataIds = computeHighlightIds({}, Object.keys(patch));
-    flashHighlight(metadataIds);
-    window.dispatchEvent(
-      new CustomEvent('codice:flash-regions', { detail: metadataIds }),
-    );
-  };
-
   const handleDuplicate = () => {
     dispatch({
       type: 'DUPLICATE_PRESET',
@@ -288,12 +251,13 @@ export function TemplateCustomizer({ open, onClose }: Props) {
         onClick={onClose}
       />
       <div className="relative ml-auto flex h-full w-full max-w-6xl flex-col border-l border-app bg-app shadow-2xl">
-        {/* Header */}
-        <div className="flex items-center justify-between border-b border-app px-4 py-3">
-          <div className="flex items-center gap-3">
+        {/* Header — wraps on narrow screens so the preset select + buttons
+            never overflow (§62 responsive). */}
+        <div className="flex flex-wrap items-center justify-between gap-2 border-b border-app px-4 py-3">
+          <div className="flex min-w-0 flex-wrap items-center gap-3">
             <h2 className="text-sm font-semibold text-primary">Template Editor</h2>
             <select
-              className="select w-56"
+              className="select w-40 sm:w-56"
               value={preset.id}
               onChange={(e) => {
                 const found = allPresets.find((p) => p.id === e.target.value);
@@ -342,10 +306,12 @@ export function TemplateCustomizer({ open, onClose }: Props) {
           </div>
         </div>
 
-        {/* Body: split into editor + preview */}
-        <div className="flex flex-1 overflow-hidden">
+        {/* Body: split into editor + preview. Stacks vertically below xl
+            (§62 responsive) so the preview never squeezes the editor into
+            an unusable column on small screens. */}
+        <div className="flex flex-1 flex-col overflow-hidden xl:flex-row">
           {/* Editor pane — 4 accordion sections */}
-          <div className="flex w-1/2 flex-col border-r border-app">
+          <div className="flex w-full flex-col border-b border-app xl:w-1/2 xl:border-b-0 xl:border-r">
             <div className="flex-1 overflow-auto">
               {SECTIONS.map((section) => (
                 <AccordionSection
@@ -355,13 +321,8 @@ export function TemplateCustomizer({ open, onClose }: Props) {
                   expanded={expanded.has(section.id)}
                   onToggle={() => toggleSection(section.id)}
                 >
-                  {section.id === 'page' && (
-                    <PageLayoutSection
-                      preset={preset}
-                      metadata={state.metadata}
-                      patchPreset={patchPreset}
-                      patchMetadata={patchMetadata}
-                    />
+                  {section.id === 'density' && (
+                    <DensitySection preset={preset} patchPreset={patchPreset} />
                   )}
                   {section.id === 'fonts' && (
                     <FontsSection preset={preset} patchPreset={patchPreset} />
@@ -459,560 +420,32 @@ function AccordionSection({
   );
 }
 
-/* --------------------------- Page & Layout --------------------------- */
-
-/** A header/footer text input registered for token insertion. */
-interface TokenTarget {
-  el: HTMLInputElement;
-  apply: (value: string) => void;
-}
+/* ----------------------- Typography & Density ----------------------- */
 
 /**
- * Text input that registers itself as the token-insert target while focused.
- * Token chips insert at the caret of the last-focused target.
+ * §17 — the document-density controls (the LayoutDensity part of the
+ * former Page & Layout section). The structural page/layout configuration
+ * now lives in the Layout studio; the spacing RHYTHM stays with the
+ * template's styling.
  */
-function TokenInput({
-  value,
-  onChange,
-  placeholder,
-  ariaLabel,
-  onRegister,
-}: {
-  value: string;
-  onChange: (v: string) => void;
-  placeholder?: string;
-  ariaLabel?: string;
-  onRegister: (target: TokenTarget | null) => void;
-}) {
-  const ref = useRef<HTMLInputElement>(null);
-  const applyRef = useRef<(v: string) => void>(onChange);
-  useEffect(() => {
-    applyRef.current = onChange;
-  }, [onChange]);
-  return (
-    <input
-      ref={ref}
-      type="text"
-      className="input"
-      placeholder={placeholder}
-      aria-label={ariaLabel}
-      value={value}
-      onChange={(e) => onChange(e.target.value)}
-      onFocus={() => {
-        if (ref.current) {
-          onRegister({
-            el: ref.current,
-            apply: (v: string) => applyRef.current(v),
-          });
-        }
-      }}
-      onBlur={() => onRegister(null)}
-    />
-  );
-}
-
-/**
- * Clickable token catalog — inserts the token at the caret of the
- * focused header/footer input. Chips keep focus on the input via
- * preventDefault-on-mousedown so insertion lands at the caret.
- */
-function TokenInsertChips({ targetRef }: { targetRef: RefObject<TokenTarget | null> }) {
-  const insert = (token: string) => {
-    const target = targetRef.current;
-    if (!target) return;
-    const el = target.el;
-    const start = el.selectionStart ?? el.value.length;
-    const end = el.selectionEnd ?? start;
-    const next = el.value.slice(0, start) + token + el.value.slice(end);
-    target.apply(next);
-    requestAnimationFrame(() => {
-      el.focus();
-      try {
-        const pos = start + token.length;
-        el.setSelectionRange(pos, pos);
-      } catch {
-        // detached input — ignore
-      }
-    });
-  };
-
-  return (
-    <div
-      className="codice-token-chips"
-      role="toolbar"
-      aria-label="Insert token"
-    >
-      <span className="text-[10px] text-muted uppercase tracking-wide">Tokens</span>
-      {TOKEN_CATALOG.map((t) => (
-        <button
-          key={t.token}
-          type="button"
-          className="codice-token-chip"
-          title={`${t.description} — e.g. ${t.example}`}
-          aria-label={`Insert token ${t.token} (${t.description})`}
-          onMouseDown={(e) => e.preventDefault()}
-          onClick={() => insert(t.token)}
-        >
-          {t.token}
-        </button>
-      ))}
-    </div>
-  );
-}
-
-function PageLayoutSection({
+function DensitySection({
   preset,
-  metadata,
   patchPreset,
-  patchMetadata,
 }: {
   preset: DocumentPreset;
-  metadata: DocumentMetadata;
   patchPreset: (p: Partial<DocumentPreset>) => void;
-  patchMetadata: (p: Partial<DocumentMetadata>) => void;
 }) {
-  const p = preset.page;
   const d = preset.layout;
-  const pb = preset.pageBreaks;
-  const tp = preset.titlePage;
-  const ps = preset.projectStructure;
-  const fh = preset.fileHeaders;
-  const ph = preset.projectHeaders;
-  const misc = preset.misc;
-
-  const patchPage = (patch: Partial<PageStyle>) =>
-    patchPreset({ page: { ...p, ...patch } });
   const patchLayout = (patch: Partial<LayoutDensity>) =>
     patchPreset({ layout: { ...d, ...patch } });
-  const patchPageBreaks = (patch: Partial<PageBreakBehavior>) =>
-    patchPreset({ pageBreaks: { ...pb, ...patch } });
-  const patchTitlePage = (patch: Partial<TitlePageStyle>) =>
-    patchPreset({ titlePage: { ...tp, ...patch } });
-  const patchProjectStructure = (patch: Partial<ProjectStructureStyle>) =>
-    patchPreset({ projectStructure: { ...ps, ...patch } });
-  const patchFileHeaders = (patch: Partial<FileHeaderStyle>) =>
-    patchPreset({ fileHeaders: { ...fh, ...patch } });
-  const patchProjectHeaders = (patch: Partial<ProjectHeaderStyle>) =>
-    patchPreset({ projectHeaders: { ...ph, ...patch } });
-  const patchMisc = (patch: Partial<MiscDocumentOptions>) =>
-    patchPreset({ misc: { ...misc, ...patch } });
-  const patchToc = (patch: Partial<TocStyle>) =>
-    patchPreset({ toc: { ...preset.toc, ...patch } });
-
-  /** Last-focused header/footer input — the token-chip insert target. */
-  const tokenTargetRef = useRef<TokenTarget | null>(null);
-  const registerTokenTarget = (t: TokenTarget | null) => {
-    tokenTargetRef.current = t;
-  };
-
-  const layoutSummary = [
-    pb.afterTitlePage && 'title',
-    pb.beforeProject && 'project',
-    pb.beforeFile && 'file',
-    pb.beforeH1 && 'H1',
-  ]
-    .filter(Boolean)
-    .join(', ');
 
   return (
     <>
-      {/* ------------------------------ Page ------------------------------ */}
-      <SubGroup label="Page">
-        <div className="grid grid-cols-2 gap-2">
-          <Field label="Page size">
-            <select
-              className="select"
-              value={p.size}
-              onChange={(e) => patchPage({ size: e.target.value as any })}
-            >
-              <option value="A4">A4</option>
-              <option value="Letter">Letter</option>
-              <option value="Legal">Legal</option>
-              <option value="A3">A3</option>
-            </select>
-          </Field>
-          <Field label="Orientation">
-            <select
-              className="select"
-              value={p.landscape ? 'landscape' : 'portrait'}
-              onChange={(e) => patchPage({ landscape: e.target.value === 'landscape' })}
-            >
-              <option value="portrait">Portrait</option>
-              <option value="landscape">Landscape</option>
-            </select>
-          </Field>
-        </div>
-        <div className="grid grid-cols-4 gap-2">
-          <Field label="Top (mm)"><NumberInput value={p.marginTopMm} min={0} onChange={(v) => patchPage({ marginTopMm: v })} /></Field>
-          <Field label="Right (mm)"><NumberInput value={p.marginRightMm} min={0} onChange={(v) => patchPage({ marginRightMm: v })} /></Field>
-          <Field label="Bottom (mm)"><NumberInput value={p.marginBottomMm} min={0} onChange={(v) => patchPage({ marginBottomMm: v })} /></Field>
-          <Field label="Left (mm)"><NumberInput value={p.marginLeftMm} min={0} onChange={(v) => patchPage({ marginLeftMm: v })} /></Field>
-        </div>
-
-        <AdvancedSection>
-          <div className="grid grid-cols-2 gap-2">
-            <Field label="Header spacing (mm)"><NumberInput value={p.headerSpacingMm} min={0} onChange={(v) => patchPage({ headerSpacingMm: v })} /></Field>
-            <Field label="Footer spacing (mm)"><NumberInput value={p.footerSpacingMm} min={0} onChange={(v) => patchPage({ footerSpacingMm: v })} /></Field>
-          </div>
-
-          {/* Page header layout + content */}
-          <Toggle
-            label="Show page header"
-            checked={p.pageHeaderShow}
-            onChange={(v) => patchPage({ pageHeaderShow: v })}
-          />
-          <DependentSettings enabled={p.pageHeaderShow}>
-            <div className="grid grid-cols-2 gap-2">
-              <Field label="Header layout">
-                <select
-                  className="select"
-                  value={p.pageHeaderLayout}
-                  onChange={(e) => patchPage({ pageHeaderLayout: e.target.value as HeaderFooterLayout })}
-                >
-                  <option value="single">Single</option>
-                  <option value="dual">Dual</option>
-                  <option value="triple">Triple</option>
-                </select>
-              </Field>
-              {p.pageHeaderLayout === 'single' && (
-                <Field label="Header alignment">
-                  <AlignmentSelect
-                    value={p.pageHeaderAlign}
-                    label="Header alignment"
-                    onChange={(v) => patchPage({ pageHeaderAlign: v })}
-                  />
-                </Field>
-              )}
-            </div>
-            {p.pageHeaderLayout === 'single' ? (
-              <Field label="Header text">
-                <TokenInput
-                  value={p.pageHeaderCenter ?? ''}
-                  placeholder="(none)"
-                  ariaLabel="Header text"
-                  onChange={(e) => patchPage({ pageHeaderCenter: e || null })}
-                  onRegister={registerTokenTarget}
-                />
-              </Field>
-            ) : (
-              <div className="grid grid-cols-2 gap-2">
-                {p.pageHeaderLayout === 'triple' && (
-                  <Field label="Header center">
-                    <TokenInput
-                      value={p.pageHeaderCenter ?? ''}
-                      ariaLabel="Header center"
-                      onChange={(e) => patchPage({ pageHeaderCenter: e || null })}
-                      onRegister={registerTokenTarget}
-                    />
-                  </Field>
-                )}
-                <Field label="Header left">
-                  <TokenInput
-                    value={p.pageHeaderLeft ?? ''}
-                    ariaLabel="Header left"
-                    onChange={(e) => patchPage({ pageHeaderLeft: e || null })}
-                    onRegister={registerTokenTarget}
-                  />
-                </Field>
-                <Field label="Header right">
-                  <TokenInput
-                    value={p.pageHeaderRight ?? ''}
-                    ariaLabel="Header right"
-                    onChange={(e) => patchPage({ pageHeaderRight: e || null })}
-                    onRegister={registerTokenTarget}
-                  />
-                </Field>
-              </div>
-            )}
-            <TokenInsertChips targetRef={tokenTargetRef} />
-          </DependentSettings>
-
-          {/* Page footer layout + content options */}
-          <Toggle
-            label="Show page footer"
-            checked={p.pageFooterShow}
-            onChange={(v) => patchPage({ pageFooterShow: v })}
-          />
-          <DependentSettings enabled={p.pageFooterShow}>
-            <div className="grid grid-cols-2 gap-2">
-              <Field label="Footer layout">
-                <select
-                  className="select"
-                  value={p.pageFooterLayout}
-                  onChange={(e) => patchPage({ pageFooterLayout: e.target.value as HeaderFooterLayout })}
-                >
-                  <option value="single">Single</option>
-                  <option value="dual">Dual</option>
-                  <option value="triple">Triple</option>
-                </select>
-              </Field>
-              {p.pageFooterLayout === 'single' && (
-                <Field label="Footer alignment">
-                  <AlignmentSelect
-                    value={p.pageFooterAlign}
-                    label="Footer alignment"
-                    onChange={(v) => patchPage({ pageFooterAlign: v })}
-                  />
-                </Field>
-              )}
-            </div>
-            {p.pageFooterLayout === 'single' ? (
-              <Field label="Footer content">
-                <FooterSlotSelect
-                  value={p.pageFooterCenter}
-                  onValue={(v) => patchPage({ pageFooterCenter: v })}
-                />
-              </Field>
-            ) : (
-              <>
-                <div className="grid grid-cols-2 gap-2">
-                  <Field label="Footer left">
-                    <FooterSlotSelect
-                      value={p.pageFooterLeft}
-                      onValue={(v) => patchPage({ pageFooterLeft: v })}
-                    />
-                  </Field>
-                  {p.pageFooterLayout === 'triple' && (
-                    <Field label="Footer center">
-                      <FooterSlotSelect
-                        value={p.pageFooterCenter}
-                          onValue={(v) => patchPage({ pageFooterCenter: v })}
-                        />
-                    </Field>
-                  )}
-                  <Field label="Footer right">
-                    <FooterSlotSelect
-                      value={p.pageFooterRight}
-                      onValue={(v) => patchPage({ pageFooterRight: v })}
-                    />
-                  </Field>
-                </div>
-              </>
-            )}
-            <Field label="Footer custom text">
-              <TokenInput
-                value={p.pageFooterText ?? ''}
-                placeholder="Page {page} of {pages}"
-                ariaLabel="Footer custom text"
-                onChange={(e) => patchPage({ pageFooterText: e })}
-                onRegister={registerTokenTarget}
-              />
-            </Field>
-            <TokenInsertChips targetRef={tokenTargetRef} />
-          </DependentSettings>
-        </AdvancedSection>
-      </SubGroup>
-
-      {/* --------------------------- Title Page --------------------------- */}
-      <SubGroup label="Title Page">
-        <Toggle
-          label="Include title page"
-          checked={tp.enabled}
-          onChange={(v) => patchTitlePage({ enabled: v })}
-        />
-        <DependentSettings enabled={tp.enabled}>
-          <AdvancedSection>
-            <MetadataFieldRow
-              label="Title"
-              showChecked={tp.showTitle}
-              onShow={(v) => patchTitlePage({ showTitle: v })}
-              value={metadata.title ?? ''}
-              placeholder="Project Report"
-              onChange={(v) => patchMetadata({ title: v })}
-            />
-            <MetadataFieldRow
-              label="Subtitle"
-              showChecked={tp.showSubtitle}
-              onShow={(v) => patchTitlePage({ showSubtitle: v })}
-              value={metadata.subtitle ?? ''}
-              placeholder="A Practical Guide…"
-              onChange={(v) => patchMetadata({ subtitle: v })}
-            />
-            <MetadataFieldRow
-              label="Author"
-              showChecked={tp.showAuthor}
-              onShow={(v) => patchTitlePage({ showAuthor: v })}
-              value={metadata.author ?? ''}
-              placeholder="Jane Doe"
-              onChange={(v) => patchMetadata({ author: v })}
-            />
-            <MetadataFieldRow
-              label="Course"
-              showChecked={tp.showCourse}
-              onShow={(v) => patchTitlePage({ showCourse: v })}
-              value={metadata.course ?? ''}
-              placeholder="CS 402"
-              onChange={(v) => patchMetadata({ course: v })}
-            />
-            <MetadataFieldRow
-              label="University"
-              showChecked={tp.showUniversity}
-              onShow={(v) => patchTitlePage({ showUniversity: v })}
-              value={metadata.university ?? ''}
-              placeholder="State University"
-              onChange={(v) => patchMetadata({ university: v })}
-            />
-            <MetadataFieldRow
-              label="Date"
-              showChecked={tp.showDate}
-              onShow={(v) => patchTitlePage({ showDate: v })}
-              value={metadata.date ?? ''}
-              placeholder="(today)"
-              onChange={(v) => patchMetadata({ date: v })}
-            />
-            <MetadataFieldRow
-              label="Version"
-              showChecked={tp.showVersion}
-              onShow={(v) => patchTitlePage({ showVersion: v })}
-              value={metadata.version ?? ''}
-              placeholder="v1.0.0"
-              onChange={(v) => patchMetadata({ version: v })}
-            />
-            <MetadataFieldRow
-              label="Description"
-              showChecked={tp.showDescription}
-              onShow={(v) => patchTitlePage({ showDescription: v })}
-              value={metadata.description ?? ''}
-              placeholder="Short description…"
-              onChange={(v) => patchMetadata({ description: v })}
-            />
-            <div className="grid grid-cols-2 gap-2">
-              <Field label="Alignment">
-                <AlignmentSelect
-                  value={tp.alignment}
-                  label="Title page alignment"
-                  onChange={(v) => patchTitlePage({ alignment: v })}
-                />
-              </Field>
-              <Field label="Vertical alignment">
-                <select
-                  className="select"
-                  aria-label="Title page vertical alignment"
-                  value={tp.verticalAlignment}
-                  onChange={(e) => patchTitlePage({ verticalAlignment: e.target.value as VerticalAlignment })}
-                >
-                  <option value="top">Top</option>
-                  <option value="center">Center</option>
-                  <option value="bottom">Bottom</option>
-                </select>
-              </Field>
-            </div>
-            <Field label="Vertical offset (pt)">
-              <NumberInput value={tp.verticalOffsetPt} min={0} onChange={(v) => patchTitlePage({ verticalOffsetPt: v })} />
-            </Field>
-          </AdvancedSection>
-        </DependentSettings>
-      </SubGroup>
-
-      {/* ------------------------ Project Structure ------------------------ */}
-      <SubGroup label="Project Structure">
-        <Toggle
-          label="Include project structure"
-          checked={ps.enabled}
-          onChange={(v) => patchProjectStructure({ enabled: v })}
-        />
-        <DependentSettings enabled={ps.enabled}>
-          <AdvancedSection>
-            <Toggle label="Show file sizes" checked={ps.showFileSizes} onChange={(v) => patchProjectStructure({ showFileSizes: v })} />
-            <Toggle label="Directories first" checked={ps.dirsFirst} onChange={(v) => patchProjectStructure({ dirsFirst: v })} />
-          </AdvancedSection>
-        </DependentSettings>
-      </SubGroup>
-
-      {/* -------------------------- File Headers -------------------------- */}
-      <SubGroup label="File Headers">
-        <Toggle
-          label="Show file headers"
-          checked={fh.show}
-          onChange={(v) => patchFileHeaders({ show: v })}
-        />
-        <DependentSettings enabled={fh.show}>
-          <AdvancedSection summary={fh.showFileName || fh.showRelativePath ? '' : 'all off'}>
-            <div className="grid grid-cols-2 gap-2">
-              <Toggle label="File name" checked={fh.showFileName} onChange={(v) => patchFileHeaders({ showFileName: v })} />
-              <Toggle label="Relative path" checked={fh.showRelativePath} onChange={(v) => patchFileHeaders({ showRelativePath: v })} />
-              <Toggle label="Language label" checked={fh.showLanguageLabel} onChange={(v) => patchFileHeaders({ showLanguageLabel: v })} />
-              <Toggle label="File size" checked={fh.showFileSize} onChange={(v) => patchFileHeaders({ showFileSize: v })} />
-              <Toggle label="Line count" checked={fh.showLineCount} onChange={(v) => patchFileHeaders({ showLineCount: v })} />
-              <Toggle label="Bold" checked={fh.bold} onChange={(v) => patchFileHeaders({ bold: v })} />
-            </div>
-          </AdvancedSection>
-        </DependentSettings>
-      </SubGroup>
-
-      {/* ------------------------- Project Headers ------------------------- */}
-      <SubGroup label="Project Headers">
-        <Toggle
-          label="Show project title"
-          checked={ph.showTitle}
-          onChange={(v) => patchProjectHeaders({ showTitle: v })}
-        />
-        <DependentSettings enabled={ph.showTitle}>
-          <AdvancedSection>
-            <Toggle label="Show project path" checked={ph.showPath} onChange={(v) => patchProjectHeaders({ showPath: v })} />
-            <Toggle label="Show metadata" checked={ph.showMetadata} onChange={(v) => patchProjectHeaders({ showMetadata: v })} />
-          </AdvancedSection>
-        </DependentSettings>
-      </SubGroup>
-
-      {/* ------------------------ Table of Contents ------------------------ */}
-      <SubGroup label="Table of Contents">
-        <Toggle
-          label="Include table of contents"
-          checked={misc.includeToc}
-          onChange={(v) => patchMisc({ includeToc: v })}
-        />
-        <DependentSettings enabled={misc.includeToc}>
-          {/* spec §4 — ALL TOC options live behind "Advanced ▼": the TOC is a
-              rarely-reconfigured feature, and its alignment controls (a whole
-              page of their own, like the title page) are not top-level
-              material. Dependency behavior is unchanged: unchecking "Include
-              table of contents" hides the entire section. */}
-          <AdvancedSection>
-            <div className="grid grid-cols-2 gap-2">
-              <Field label="Horizontal alignment">
-                <AlignmentSelect
-                  value={preset.toc.horizontalAlignment}
-                  onChange={(v) => patchToc({ horizontalAlignment: v })}
-                  label="TOC horizontal alignment"
-                />
-              </Field>
-              <Field label="Vertical alignment">
-                <select
-                  className="select"
-                  value={preset.toc.verticalAlignment}
-                  aria-label="TOC vertical alignment"
-                  onChange={(e) =>
-                    patchToc({ verticalAlignment: e.target.value as VerticalAlignment })
-                  }
-                >
-                  <option value="top">Top</option>
-                  <option value="center">Center</option>
-                  <option value="bottom">Bottom</option>
-                </select>
-              </Field>
-            </div>
-            <Toggle label="Number headings" checked={misc.numberHeadings} onChange={(v) => patchMisc({ numberHeadings: v })} />
-            <Toggle label="Show file metadata" checked={misc.showFileMetadata} onChange={(v) => patchMisc({ showFileMetadata: v })} />
-          </AdvancedSection>
-        </DependentSettings>
-      </SubGroup>
-
-      {/* -------------------------- Code Behavior -------------------------- */}
-      <SubGroup label="Code Behavior">
-        <Toggle
-          label="Show line numbers"
-          checked={preset.code.showLineNumbers}
-          onChange={(v) => patchPreset({ code: { ...preset.code, showLineNumbers: v } })}
-        />
-        <Toggle
-          label="Wrap long lines"
-          checked={preset.code.wrapLongLines}
-          onChange={(v) => patchPreset({ code: { ...preset.code, wrapLongLines: v } })}
-        />
-      </SubGroup>
-
-      {/* ------------------------ Document Density ------------------------- */}
+      <div className="text-xs text-secondary">
+        Document density controls the vertical rhythm of the document. Page
+        geometry, page breaks and document sections are configured in the
+        Layout studio.
+      </div>
       <SubGroup label="Document Density">
         <div className="grid grid-cols-2 gap-2">
           <Field label="Body line spacing">
@@ -1051,25 +484,15 @@ function PageLayoutSection({
             />
           </Field>
           <Field label="Title page offset (pt)">
-            <NumberInput value={tp.verticalOffsetPt} min={0} onChange={(v) => patchTitlePage({ verticalOffsetPt: v })} />
+            <NumberInput value={preset.titlePage.verticalOffsetPt} min={0} onChange={(v) => patchPreset({ titlePage: { ...preset.titlePage, verticalOffsetPt: v } })} />
           </Field>
           <Field label="File header spacing (pt)">
-            <NumberInput value={fh.spacingAfterPt} onChange={(v) => patchFileHeaders({ spacingAfterPt: v })} />
+            <NumberInput value={preset.fileHeaders.spacingAfterPt} onChange={(v) => patchPreset({ fileHeaders: { ...preset.fileHeaders, spacingAfterPt: v } })} />
           </Field>
           <Field label="Project header spacing (pt)">
-            <NumberInput value={ph.spaceBeforePt} onChange={(v) => patchProjectHeaders({ spaceBeforePt: v })} />
+            <NumberInput value={preset.projectHeaders.spaceBeforePt} onChange={(v) => patchPreset({ projectHeaders: { ...preset.projectHeaders, spaceBeforePt: v } })} />
           </Field>
         </div>
-      </SubGroup>
-
-      {/* --------------------------- Page Breaks --------------------------- */}
-      <SubGroup label="Page Breaks">
-        <AdvancedSection summary={layoutSummary ? `${layoutSummary}` : 'none'}>
-          <Toggle label="Page break after title page" checked={pb.afterTitlePage} onChange={(v) => patchPageBreaks({ afterTitlePage: v })} />
-          <Toggle label="Page break before each project" checked={pb.beforeProject} onChange={(v) => patchPageBreaks({ beforeProject: v })} />
-          <Toggle label="Page break before each file" checked={pb.beforeFile} onChange={(v) => patchPageBreaks({ beforeFile: v })} />
-          <Toggle label="Page break before H1" checked={pb.beforeH1} onChange={(v) => patchPageBreaks({ beforeH1: v })} />
-        </AdvancedSection>
       </SubGroup>
     </>
   );
@@ -1088,62 +511,6 @@ function applyToAllHeadings(
     h3: apply(headings.h3),
     h4: apply(headings.h4),
   };
-}
-
-/** Show-toggle + value input row for title-page metadata fields. */
-function MetadataFieldRow({
-  label,
-  showChecked,
-  onShow,
-  value,
-  placeholder,
-  onChange,
-}: {
-  label: string;
-  showChecked: boolean;
-  onShow: (v: boolean) => void;
-  value: string;
-  placeholder: string;
-  onChange: (v: string) => void;
-}) {
-  return (
-    <div className="flex items-end gap-2">
-      <div className="pb-1.5">
-        <Toggle label={label} checked={showChecked} onChange={onShow} />
-      </div>
-      <input
-        type="text"
-        className="input flex-1"
-        placeholder={placeholder}
-        value={value}
-        onChange={(e) => onChange(e.target.value)}
-        aria-label={`${label} text`}
-      />
-    </div>
-  );
-}
-
-/** Footer slot selector — what to render in this footer region. */
-function FooterSlotSelect({
-  value,
-  onValue,
-}: {
-  value: FooterSlotType;
-  onValue: (v: FooterSlotType) => void;
-}) {
-  return (
-    <select
-      className="select"
-      value={value}
-      onChange={(e) => onValue(e.target.value as FooterSlotType)}
-    >
-      {FOOTER_SLOT_OPTIONS.map((opt) => (
-        <option key={opt.value} value={opt.value}>
-          {opt.label}
-        </option>
-      ))}
-    </select>
-  );
 }
 
 /* --------------------------- Fonts Settings --------------------------- */
@@ -1567,7 +934,9 @@ function PanelOverrides() {
     textColor?: string;
   }> = [];
   if (applied) {
-    for (const section of applied.sections) {
+    for (const rootChild of applied.rootChildren) {
+      if (rootChild.kind !== 'section') continue;
+      const section = rootChild.section;
       for (const child of section.children) {
         if (child.kind !== 'node') continue;
         if (child.node.type === 'panel' || child.node.type === 'columns') {
@@ -1581,18 +950,18 @@ function PanelOverrides() {
           });
         }
       }
-      for (const child of applied.children ?? []) {
-        if (child.kind !== 'node') continue;
-        if (child.node.type === 'panel' || child.node.type === 'columns') {
-          panels.push({
-            nodeId: child.node.id,
-            kind: child.node.type,
-            section: '(document content)',
-            fillColor: child.node.style?.fillColor,
-            borderColor: child.node.style?.borderColor,
-            textColor: child.node.style?.textColor,
-          });
-        }
+    }
+    for (const rootChild of applied.rootChildren) {
+      if (rootChild.kind !== 'node') continue;
+      if (rootChild.node.type === 'panel' || rootChild.node.type === 'columns') {
+        panels.push({
+          nodeId: rootChild.node.id,
+          kind: rootChild.node.type,
+          section: '(document content)',
+          fillColor: rootChild.node.style?.fillColor,
+          borderColor: rootChild.node.style?.borderColor,
+          textColor: rootChild.node.style?.textColor,
+        });
       }
     }
   }
@@ -1607,17 +976,30 @@ function PanelOverrides() {
 
   const patchNodeStyle = (nodeId: string, patch: { fillColor?: string; borderColor?: string; textColor?: string }) => {
     const next = JSON.parse(JSON.stringify(applied)) as typeof applied;
-    const visit = (nodes: Array<{ node: { id: string; type: string; style?: Record<string, unknown> } }>) => {
-      for (const child of nodes) {
-        if (child.node.id === nodeId) {
-          child.node.style = { ...(child.node.style ?? {}), ...patch };
+    const visit = (nodes: Array<{ id: string; type: string; style?: Record<string, unknown> }>) => {
+      for (const node of nodes) {
+        if (node.id === nodeId) {
+          node.style = { ...(node.style ?? {}), ...patch };
         }
       }
     };
-    for (const section of next.sections) {
-      visit(section.children.filter((c) => c.kind === 'node') as never);
+    const visitChildren = (children: Array<{ kind: 'node' | 'block'; node?: { id: string; type: string; style?: Record<string, unknown> } }>) => {
+      for (const child of children) {
+        if (child.kind === 'node' && child.node) {
+          if (child.node.id === nodeId) {
+            child.node.style = { ...(child.node.style ?? {}), ...patch };
+          }
+        }
+      }
+    };
+    for (const rootChild of next.rootChildren) {
+      if (rootChild.kind === 'section') {
+        visitChildren(rootChild.section.children as never);
+      } else if (rootChild.node.id === nodeId) {
+        rootChild.node.style = { ...(rootChild.node.style ?? {}), ...patch };
+      }
     }
-    visit((next.children ?? []).filter((c) => c.kind === 'node') as never);
+    void visit;
     dispatch({ type: 'UPDATE_CUSTOM_LAYOUT', template: next });
   };
 

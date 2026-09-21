@@ -11,6 +11,7 @@ import { SelectionRulesPanel } from '@/components/common/SelectionRulesPanel';
 import { MergeProjectsDialog } from '@/components/Merge/MergeProjectsDialog';
 import { formatBytes } from '@/lib/fileDiscovery';
 import { dominantLanguage, languageHueColor } from '@/lib/documentStats';
+import { languageFilterOptions } from '@/lib/languageDetection';
 import {
   filterVisibleFiles,
   visibleIdsFor,
@@ -33,6 +34,7 @@ import {
   Merge,
   Split,
   ImagePlus,
+  Pencil,
 } from '@/components/common/Icons';
 import type { ProjectEntry, ImageAsset } from '@/types';
 
@@ -41,14 +43,17 @@ interface Props {
   onSelectProject: (id: string) => void;
 }
 
+/** §44 — computed ONCE from the central language mapping (module scope). */
+const LANGUAGE_FILTER_OPTIONS = languageFilterOptions();
+
 export function ProjectsSidebar({ selectedProjectId, onSelectProject }: Props) {
   const { state, dispatch, getSelectedFiles } = useAppState();
   const [searchQuery, setSearchQuery] = useState('');
-  const [extensionFilter, setExtensionFilter] = useState('');
+  // §44 — the file-type filter is LANGUAGE-based, derived from the central
+  // languageDetection mapping (C, C++, C#, Kotlin, Java, Python, … — every
+  // language the mapping knows is offered automatically).
+  const [languageFilter, setLanguageFilter] = useState('');
   const [showExcluded, setShowExcluded] = useState(false);
-  const [expandedProjects, setExpandedProjects] = useState<Set<string>>(
-    new Set(),
-  );
   // §11 — project merge flow (explicit, undoable via Unmerge).
   const [mergeTargetId, setMergeTargetId] = useState<string | null>(null);
 
@@ -72,7 +77,7 @@ export function ProjectsSidebar({ selectedProjectId, onSelectProject }: Props) {
       selectedProject
         ? filterVisibleFiles(selectedProject.files, {
             showExcluded,
-            extensionFilter,
+            languageFilter,
             searchQuery,
             inclusions: state.inclusions,
             projectId: selectedProject.id,
@@ -81,7 +86,7 @@ export function ProjectsSidebar({ selectedProjectId, onSelectProject }: Props) {
     [
       selectedProject,
       showExcluded,
-      extensionFilter,
+      languageFilter,
       searchQuery,
       state.inclusions,
     ],
@@ -127,25 +132,6 @@ export function ProjectsSidebar({ selectedProjectId, onSelectProject }: Props) {
     };
   }, [selectedProject, getSelectedFiles]);
 
-  const extensions = useMemo(() => {
-    if (!selectedProject) return [];
-    const set = new Set<string>();
-    for (const f of selectedProject.files) {
-      const dot = f.name.lastIndexOf('.');
-      if (dot >= 0) set.add(f.name.slice(dot).toLowerCase());
-    }
-    return Array.from(set).sort();
-  }, [selectedProject]);
-
-  const toggleProjectExpand = (id: string) => {
-    setExpandedProjects((prev) => {
-      const next = new Set(prev);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
-      return next;
-    });
-  };
-
   const moveProject = (from: number, to: number) => {
     if (from === to || to < 0 || to >= state.projects.length) return;
     dispatch({ type: 'REORDER_PROJECTS', from, to });
@@ -187,7 +173,6 @@ export function ProjectsSidebar({ selectedProjectId, onSelectProject }: Props) {
         <ProjectUpload
           onProjectAdded={(id) => {
             onSelectProject(id);
-            setExpandedProjects((prev) => new Set(prev).add(id));
           }}
         />
       </div>
@@ -245,15 +230,8 @@ export function ProjectsSidebar({ selectedProjectId, onSelectProject }: Props) {
                   onDragEnd={clearDragState}
                   onDragOverRow={(e) => handleRowDragOver(e, index)}
                   onMoveRelative={(delta) => moveProject(index, index + delta)}
-                  isExpanded={expandedProjects.has(project.id)}
-                  onToggleExpand={() => toggleProjectExpand(project.id)}
                   isSelected={selectedProjectId === project.id}
-                  onSelect={() => {
-                    onSelectProject(project.id);
-                    if (!expandedProjects.has(project.id)) {
-                      toggleProjectExpand(project.id);
-                    }
-                  }}
+                  onSelect={() => onSelectProject(project.id)}
                   onRemove={() => {
                     dispatch({ type: 'REMOVE_PROJECT', projectId: project.id });
                     if (selectedProjectId === project.id) {
@@ -277,14 +255,15 @@ export function ProjectsSidebar({ selectedProjectId, onSelectProject }: Props) {
         )}
       </div>
 
+      {/* §32 — the image library is a first-class sidebar citizen (above the
+          Document order editor): uploaded images are DISCOVERABLE here
+          (thumbnail, name, caption) and attachable from File properties /
+          layout image fields. One storage system — the sidebar renders the
+          same imageAssets slice the preview and exporters read. */}
+      <ImageLibraryPanel />
+
       {/* §13 — canonical document order editor (shared with the Outline). */}
       <DocumentOrderPanel />
-
-      {/* §13 — the image library is a first-class sidebar citizen: uploaded
-          images are DISCOVERABLE here (thumbnail, name, size) and attachable
-          from File properties / layout image fields. One storage system —
-          the sidebar renders the same imageAssets slice. */}
-      <ImageLibraryPanel />
 
       {/* §11 — explicit, undoable project merge. */}
       {mergeTargetId && (
@@ -304,18 +283,18 @@ export function ProjectsSidebar({ selectedProjectId, onSelectProject }: Props) {
                   the search input keeps a sensible, clickable text-field
                   width (.select's width:100% fills this wrapper instead of
                   fighting flex-1 for the whole row). */}
-              <div className="w-24 flex-shrink-0">
+              <div className="w-28 flex-shrink-0">
                 <select
                   className="select"
-                  value={extensionFilter}
-                  onChange={(e) => setExtensionFilter(e.target.value)}
-                  title="Filter by extension"
-                  aria-label="Filter by extension"
+                  value={languageFilter}
+                  onChange={(e) => setLanguageFilter(e.target.value)}
+                  title="Filter by file type (all supported languages)"
+                  aria-label="Filter by file type"
                 >
-                  <option value="">All</option>
-                  {extensions.map((ext) => (
-                    <option key={ext} value={ext}>
-                      {ext}
+                  <option value="">All types</option>
+                  {LANGUAGE_FILTER_OPTIONS.map((lang) => (
+                    <option key={lang.id} value={lang.id}>
+                      {lang.label}
                     </option>
                   ))}
                 </select>
@@ -428,7 +407,7 @@ export function ProjectsSidebar({ selectedProjectId, onSelectProject }: Props) {
             <FileTree
               project={selectedProject}
               searchQuery={searchQuery}
-              extensionFilter={extensionFilter}
+              languageFilter={languageFilter}
               showExcluded={showExcluded}
             />
           </div>
@@ -476,8 +455,6 @@ function ProjectRow({
   onDragEnd,
   onDragOverRow,
   onMoveRelative,
-  isExpanded,
-  onToggleExpand,
   isSelected,
   onSelect,
   onRemove,
@@ -497,8 +474,6 @@ function ProjectRow({
   onDragOverRow: (e: React.DragEvent) => void;
   /** Move this row by a relative offset (keyboard reordering). */
   onMoveRelative: (delta: number) => void;
-  isExpanded: boolean;
-  onToggleExpand: () => void;
   isSelected: boolean;
   onSelect: () => void;
   onRemove: () => void;
@@ -510,10 +485,16 @@ function ProjectRow({
   selectedCount: number;
   selectedIds: Set<string>;
 }) {
-  const { dispatch } = useAppState();
+  const { state, dispatch } = useAppState();
   const [isEditing, setIsEditing] = useState(false);
   const [label, setLabel] = useState(project.label);
   const [dragArmed, setDragArmed] = useState(false);
+
+  // R11 — the handle now serves TWO purposes: sidebar reordering (needs
+  // ≥2 projects) and drag-to-assign onto export-group rows (needs at
+  // least one group scaffold — the drop targets). Keep the handle hidden
+  // only when NEITHER is possible (no nonfunctional controls, §38).
+  const canAssignToGroups = state.exportGroups.length > 0;
 
   // Dominant language dot + total selected size — cheap metadata only.
   const domLang = useMemo(
@@ -548,13 +529,23 @@ function ProjectRow({
           ? { background: 'color-mix(in srgb, var(--color-accent) 8%, transparent)' }
           : undefined
       }
-      draggable={canReorder && dragArmed}
+      draggable={dragArmed}
       onDragStart={(e) => {
         e.dataTransfer.effectAllowed = 'move';
         e.dataTransfer.setData('text/plain', String(index));
+        // R11 — carry the project identity so EXPORT-GROUP rows (Export
+        // panel) can accept this drag as an ASSIGNMENT (§EXPORT-004 DnD):
+        // dropping a sidebar project onto a group appends it. The sidebar's
+        // own drop logic ignores foreign payloads (dragIndex guard), so
+        // both behaviors coexist on the same drag gesture.
+        e.dataTransfer.setData('application/x-codice-project', project.id);
+        window.dispatchEvent(new CustomEvent('codice-project-drag-start'));
         onDragStart();
       }}
-      onDragEnd={onDragEnd}
+      onDragEnd={() => {
+        window.dispatchEvent(new CustomEvent('codice-project-drag-end'));
+        onDragEnd();
+      }}
       onDragOver={onDragOverRow}
     >
       {/* Selected accent bar */}
@@ -568,15 +559,22 @@ function ProjectRow({
         className="flex items-center gap-1.5 px-2 py-1.5 cursor-pointer hover-surface active:scale-[0.995] transition-transform"
         onClick={() => {
           onSelect();
-          if (!isExpanded) onToggleExpand();
         }}
       >
-        {canReorder && (
+        {(canReorder || canAssignToGroups) && (
           <button
             type="button"
             className="codice-drag-handle flex-shrink-0"
-            title={`Drag to reorder — or focus and press ↑/↓ (position ${index + 1})`}
-            aria-label={`Reorder project ${project.label}. Currently position ${index + 1}. Press ArrowUp or ArrowDown to move.`}
+            title={
+              canReorder
+                ? `Drag to reorder${canAssignToGroups ? ' — or onto an export group to assign' : ''} — or focus and press ↑/↓ (position ${index + 1})`
+                : `Drag onto an export group to assign (position ${index + 1})`
+            }
+            aria-label={
+              canReorder
+                ? `Reorder project ${project.label}. Currently position ${index + 1}. Press ArrowUp or ArrowDown to move.${canAssignToGroups ? ' Or drag onto an export group in the export panel to assign it.' : ''}`
+                : `Drag project ${project.label} onto an export group in the export panel to assign it.`
+            }
             onMouseDown={() => setDragArmed(true)}
             onMouseUp={() => setDragArmed(false)}
             onBlur={() => setDragArmed(false)}
@@ -594,19 +592,9 @@ function ProjectRow({
             <GripVertical size={13} />
           </button>
         )}
-        <button
-          onClick={(e) => {
-            e.stopPropagation();
-            onToggleExpand();
-          }}
-          className="text-secondary hover:text-primary"
-        >
-          {isExpanded ? (
-            <ChevronDown size={14} />
-          ) : (
-            <ChevronRight size={14} />
-          )}
-        </button>
+        {/* §38 — no chevron here: the file tree below shows the SELECTED
+            project, so a per-row expander had nothing to gate. Clicking the
+            row selects the project; that is the only behavior. */}
         <span className="text-secondary">
           <FolderCog size={14} />
         </span>
@@ -710,28 +698,46 @@ function ProjectRow({
 }
 
 /**
- * §13 — Image library panel. Uploaded images appear alongside the usable
+ * §32 — Image library panel. Uploaded images appear alongside the usable
  * content in the sidebar (never a disconnected second storage): each asset
- * shows its thumbnail, name and size; the tooltip carries the full name and
- * dimensions. Removing an asset here removes it from the SAME registry the
- * preview and exporters read.
+ * shows its thumbnail, name and caption (caption editable inline →
+ * UPDATE_IMAGE_ASSET); removing an asset here removes it from the SAME
+ * registry the preview and exporters read. Empty library → discoverability
+ * hint instead of a hidden subsystem.
  */
 function ImageLibraryPanel() {
-  const { state, dispatch } = useAppState();
-  const [open, setOpen] = useState(false);
+  const { state } = useAppState();
+  // §32 — expanded by default while images exist; collapsible via the
+  // chevron when the sidebar space is needed.
+  const [open, setOpen] = useState(true);
   const assets = state.imageAssets;
 
-  if (assets.length === 0) return null;
+  if (assets.length === 0) {
+    return (
+      <div
+        className="flex items-center gap-1.5 border-t border-app px-3 py-1.5 text-[10px] text-muted"
+        title="Images uploaded with the Images button are collected here — attach them in File properties or a layout Image node"
+        data-tour="images"
+      >
+        <ImagePlus size={11} className="flex-shrink-0" />
+        <span>
+          No images yet — upload via the Images button in the upload area.
+          Uploaded images stay in your browser across sessions (up to 40).
+        </span>
+      </div>
+    );
+  }
 
   return (
-    <div className="border-t border-app">
+    <div className="flex-shrink-0 border-t border-app">
       <button
         type="button"
-        className="flex w-full items-center gap-1.5 px-3 py-2 text-xs text-secondary transition-colors hover:text-primary"
+        className="flex w-full flex-wrap items-center gap-1.5 px-3 py-2 text-xs text-secondary transition-colors hover:text-primary"
         onClick={() => setOpen((v) => !v)}
         aria-expanded={open}
         aria-controls="codice-image-library"
         title="Images uploaded to the library — attach them in File properties or a layout image field"
+        data-tour="images"
       >
         {open ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
         <span className="font-medium">Image library</span>
@@ -746,39 +752,96 @@ function ImageLibraryPanel() {
           className="codice-fade-in max-h-44 space-y-1 overflow-y-auto px-2 pb-2"
         >
           {assets.map((asset: ImageAsset) => (
-            <div
-              key={asset.id}
-              className="group flex items-center gap-2 rounded px-1 py-1 hover:bg-app"
-            >
-              <img
-                src={asset.dataUrl}
-                alt={asset.name}
-                className="h-8 w-12 flex-shrink-0 rounded border border-app object-cover"
-                title={`${asset.name} — ${asset.width}×${asset.height}px`}
-              />
-              <span className="min-w-0 flex-1">
-                <span className="block truncate text-[11px] text-secondary" title={asset.name}>
-                  {asset.name}
-                </span>
-                <span className="block text-[9px] text-muted">
-                  {asset.width}×{asset.height}px · {formatBytes(asset.sizeBytes ?? 0)}
-                </span>
-              </span>
-              <button
-                type="button"
-                className="text-muted opacity-0 transition-opacity hover:text-error group-hover:opacity-100"
-                title={`Remove ${asset.name} from the library`}
-                aria-label={`Remove ${asset.name} from the library`}
-                onClick={() => dispatch({ type: 'REMOVE_IMAGE_ASSET', id: asset.id })}
-              >
-                <Trash size={11} />
-              </button>
-            </div>
+            <ImageLibraryRow key={asset.id} asset={asset} />
           ))}
           <p className="px-1 pt-1 text-[10px] text-muted">
-            Attach in File properties (per file) or a layout image field — they render in the
-            preview and all exports.
+            Attach to a file in File properties, or pick a library image from a
+            layout Image node — captions render below the image everywhere.
           </p>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** One library row: thumbnail + name/caption + inline caption edit + remove. */
+function ImageLibraryRow({ asset }: { asset: ImageAsset }) {
+  const { dispatch } = useAppState();
+  const [editing, setEditing] = useState(false);
+  const [caption, setCaption] = useState(asset.caption ?? '');
+
+  const commitCaption = () => {
+    setEditing(false);
+    if ((asset.caption ?? '') !== caption) {
+      dispatch({ type: 'UPDATE_IMAGE_ASSET', id: asset.id, caption });
+    }
+  };
+
+  return (
+    <div className="group rounded px-1 py-1 hover:bg-app">
+      <div className="flex items-center gap-2">
+        <img
+          src={asset.dataUrl}
+          alt={asset.name}
+          className="h-10 w-10 flex-shrink-0 rounded border border-app object-cover"
+          title={`${asset.name}${
+            asset.caption ? ` — ${asset.caption}` : ''
+          } — ${asset.width}×${asset.height}px`}
+        />
+        <span className="min-w-0 flex-1">
+          <span className="block truncate text-[11px] text-secondary" title={asset.name}>
+            {asset.name}
+          </span>
+          <span
+            className="block truncate text-[9px] text-muted"
+            title={asset.caption ? `Caption: ${asset.caption}` : 'No caption set'}
+          >
+            {asset.caption
+              ? asset.caption
+              : `${asset.width}×${asset.height}px · ${formatBytes(asset.sizeBytes ?? 0)}`}
+          </span>
+        </span>
+        <button
+          type="button"
+          className="text-muted opacity-0 transition-opacity hover:text-primary focus-visible:opacity-100 group-hover:opacity-100"
+          title={`Edit the caption of ${asset.name}`}
+          aria-label={`Edit the caption of ${asset.name}`}
+          onClick={() => {
+            setCaption(asset.caption ?? '');
+            setEditing((v) => !v);
+          }}
+        >
+          <Pencil size={11} />
+        </button>
+        <button
+          type="button"
+          className="text-muted opacity-0 transition-opacity hover:text-error focus-visible:opacity-100 group-hover:opacity-100"
+          title={`Remove ${asset.name} from the library`}
+          aria-label={`Remove ${asset.name} from the library`}
+          onClick={() => dispatch({ type: 'REMOVE_IMAGE_ASSET', id: asset.id })}
+        >
+          <Trash size={11} />
+        </button>
+      </div>
+      {editing && (
+        <div className="mt-1 pl-12">
+          <input
+            type="text"
+            className="input py-0.5 text-[11px]"
+            value={caption}
+            placeholder="Caption shown below the image…"
+            aria-label={`Caption for ${asset.name}`}
+            autoFocus
+            onChange={(e) => setCaption(e.target.value)}
+            onBlur={commitCaption}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') commitCaption();
+              if (e.key === 'Escape') {
+                setCaption(asset.caption ?? '');
+                setEditing(false);
+              }
+            }}
+          />
         </div>
       )}
     </div>

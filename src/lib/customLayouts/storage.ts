@@ -1,17 +1,26 @@
 /**
- * Custom layout template persistence v2 (§30).
+ * Custom layout template persistence v3 (§30/§53).
  *
  * Templates are stored locally in localStorage as a versioned JSON list —
  * no account/database required. CRUD + import/export live here so the React
  * state layer only mirrors this module's truth.
  *
- * v1 templates (flat blocks + repeat) are MIGRATED into the v2
- * File → Section → Block → Field hierarchy on load and on import (§9 —
- * the old Block Editor's work is kept, re-homed in the new semantics).
+ * Legacy templates are MIGRATED into the current shape on load and on
+ * import (§53 — never silently destroy old work):
+ *   v1 (flat blocks + repeat)          → v3 (one "Content" section + Files block)
+ *   v2 (sections[] + file children[])  → v3 (rootChildren ordered interleave)
+ *
+ * EVERY write runs `normalizeTemplate` — the §6/§20 field-content sync and
+ * the §10/§11 dangling-binding cleanup are enforced at persistence time,
+ * not just at load time.
  */
 
-import type { CustomLayoutTemplate, CustomLayoutTemplateV1 } from './model';
-import { cloneTemplate, ensureTemplateV2, genLayoutId, normalizeTemplate } from './model';
+import type {
+  CustomLayoutTemplate,
+  CustomLayoutTemplateV1,
+  CustomLayoutTemplateV2,
+} from './model';
+import { cloneTemplate, ensureTemplateV3, genLayoutId, normalizeTemplate } from './model';
 
 const STORAGE_KEY = 'codice-custom-layouts-v1';
 
@@ -23,11 +32,13 @@ function safeParseList(raw: string | null): CustomLayoutTemplate[] {
     const out: CustomLayoutTemplate[] = [];
     for (const t of parsed) {
       if (!t || typeof t.id !== 'string' || typeof t.name !== 'string') continue;
-      // v2 shape: sections array. v1 shape: blocks + fields arrays.
-      if (Array.isArray(t.sections)) {
-        out.push(ensureTemplateV2(t as CustomLayoutTemplate));
+      // v3 shape: rootChildren. v2 shape: sections array. v1: blocks+fields.
+      if (Array.isArray(t.rootChildren)) {
+        out.push(ensureTemplateV3(t as CustomLayoutTemplate));
+      } else if (Array.isArray(t.sections)) {
+        out.push(ensureTemplateV3(t as CustomLayoutTemplateV2));
       } else if (Array.isArray(t.blocks) && Array.isArray(t.fields)) {
-        out.push(ensureTemplateV2(t as CustomLayoutTemplateV1));
+        out.push(ensureTemplateV3(t as CustomLayoutTemplateV1));
       }
     }
     return out;
@@ -37,10 +48,11 @@ function safeParseList(raw: string | null): CustomLayoutTemplate[] {
 }
 
 /**
- * Load every stored template (migrating any legacy v1 entries). Each load
+ * Load every stored template (migrating any legacy entries). Each load
  * runs `normalizeTemplate` so templates saved by older builds pick up the
- * §5/§6 field-content sync and the §7 file-level children array — the
- * exporter, preview and studio all observe the same normalized shape.
+ * §6/§20 field-content sync, the §10/§11 binding cleanup and the v3 root
+ * container — the exporter, preview and studio all observe the same
+ * normalized shape.
  */
 export function loadCustomLayouts(): CustomLayoutTemplate[] {
   if (typeof window === 'undefined') return [];
@@ -60,19 +72,19 @@ function persist(templates: CustomLayoutTemplate[]) {
   }
 }
 
-/** Add a template; returns the stored list. */
+/** Add a template (normalized on write); returns the stored list. */
 export function storeCustomLayout(template: CustomLayoutTemplate): CustomLayoutTemplate[] {
   const list = loadCustomLayouts();
-  list.push(cloneTemplate(template));
+  list.push(normalizeTemplate(cloneTemplate(template)));
   persist(list);
   return list;
 }
 
-/** Replace a template (by id); returns the stored list. */
+/** Replace a template (by id, normalized on write); returns the stored list. */
 export function updateCustomLayout(template: CustomLayoutTemplate): CustomLayoutTemplate[] {
   const list = loadCustomLayouts();
   const idx = list.findIndex((t) => t.id === template.id);
-  const updated = { ...cloneTemplate(template), updatedAt: Date.now() };
+  const updated = { ...normalizeTemplate(cloneTemplate(template)), updatedAt: Date.now() };
   if (idx >= 0) list[idx] = updated;
   else list.push(updated);
   persist(list);
@@ -110,7 +122,7 @@ export function duplicateCustomLayout(
   copy.createdAt = Date.now();
   copy.updatedAt = Date.now();
   const list = loadCustomLayouts();
-  list.push(copy);
+  list.push(normalizeTemplate(copy));
   persist(list);
   return { templates: list, copy: cloneTemplate(copy) };
 }
@@ -126,7 +138,7 @@ export function findCustomLayout(id: string): CustomLayoutTemplate | undefined {
 
 export interface CustomLayoutExport {
   kind: 'codice-custom-layout';
-  version: 2;
+  version: 3;
   exportedAt: string;
   template: CustomLayoutTemplate;
 }
@@ -135,9 +147,9 @@ export interface CustomLayoutExport {
 export function exportLayoutJson(template: CustomLayoutTemplate): string {
   const payload: CustomLayoutExport = {
     kind: 'codice-custom-layout',
-    version: 2,
+    version: 3,
     exportedAt: new Date().toISOString(),
-    template: cloneTemplate(template),
+    template: normalizeTemplate(cloneTemplate(template)),
   };
   return JSON.stringify(payload, null, 2);
 }
@@ -153,17 +165,24 @@ export function importLayoutJson(
   } catch {
     throw new Error('The file is not valid JSON.');
   }
-  const payload = parsed as Partial<CustomLayoutExport> & Partial<CustomLayoutTemplateV1> & Partial<CustomLayoutTemplate>;
+  const payload = parsed as Partial<CustomLayoutExport> &
+    Partial<CustomLayoutTemplateV1> &
+    Partial<CustomLayoutTemplate> &
+    Partial<CustomLayoutTemplateV2>;
   const template = (payload.template ?? parsed) as Partial<CustomLayoutTemplate> &
-    Partial<CustomLayoutTemplateV1>;
+    Partial<CustomLayoutTemplateV1> &
+    Partial<CustomLayoutTemplateV2>;
+  const hasV3 = Array.isArray(template.rootChildren);
   const hasV2 = Array.isArray(template.sections);
   const hasV1 =
     Array.isArray((template as Partial<CustomLayoutTemplateV1>).blocks) &&
     Array.isArray((template as Partial<CustomLayoutTemplateV1>).fields);
-  if (!template || (!hasV2 && !hasV1)) {
+  if (!template || (!hasV3 && !hasV2 && !hasV1)) {
     throw new Error('This JSON is not a Codice custom layout template.');
   }
-  const migrated = ensureTemplateV2(template as CustomLayoutTemplate | CustomLayoutTemplateV1);
+  const migrated = ensureTemplateV3(
+    template as CustomLayoutTemplate | CustomLayoutTemplateV2 | CustomLayoutTemplateV1,
+  );
   const imported: CustomLayoutTemplate = {
     ...migrated,
     id: genLayoutId('clt'),

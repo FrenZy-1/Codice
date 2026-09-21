@@ -35,18 +35,14 @@ export function DocumentOrderPanel() {
     fileId: string;
     below: boolean;
   } | null>(null);
-  // §20 — per-project collapse. Opening ONE project reveals its files like
-  // the Template Settings accordion; the first project starts expanded.
-  // Collapse state is session-local and never touches fileOrder.
-  const [collapsedProjects, setCollapsedProjects] = useState<Set<string>>(new Set());
-  const toggleProject = (projectId: string) => {
-    setCollapsedProjects((prev) => {
-      const next = new Set(prev);
-      if (next.has(projectId)) next.delete(projectId);
-      else next.add(projectId);
-      return next;
-    });
-  };
+  // §37 — per-project collapse, accordion-style like Template Settings.
+  // `null` means “untouched”: the DEFAULT is derived — the first project is
+  // expanded, the rest are collapsed when there are more than two projects,
+  // and all are expanded otherwise. Once the user toggles, the explicit set
+  // wins, so clicking an implicitly-collapsed project really expands it on
+  // the first click. Collapse state is session-local and never touches
+  // fileOrder.
+  const [collapsedProjects, setCollapsedProjects] = useState<Set<string> | null>(null);
 
   /** Selected files of every project in effective document order. */
   const groups = useMemo(
@@ -61,6 +57,24 @@ export function DocumentOrderPanel() {
         .filter((g) => g.files.length > 1),
     [state.projects, state.fileOrder, getSelectedFiles],
   );
+
+  /** §37 — the effective collapsed set (derived default until touched). */
+  const effectiveCollapsed = useMemo(() => {
+    if (collapsedProjects) return collapsedProjects;
+    if (groups.length > 2) {
+      return new Set(groups.slice(1).map((g) => g.project.id));
+    }
+    return new Set<string>();
+  }, [collapsedProjects, groups]);
+
+  const toggleProject = (projectId: string) => {
+    setCollapsedProjects(() => {
+      const next = new Set(effectiveCollapsed);
+      if (next.has(projectId)) next.delete(projectId);
+      else next.add(projectId);
+      return next;
+    });
+  };
 
   const move = (projectId: string, fileId: string, delta: number) => {
     const project = state.projects.find((p) => p.id === projectId);
@@ -126,10 +140,8 @@ export function DocumentOrderPanel() {
           id="codice-document-order"
           className="codice-fade-in max-h-56 space-y-2 overflow-y-auto px-2 pb-2"
         >
-          {groups.map(({ project, files }, groupIdx) => {
-            const isCollapsed =
-              collapsedProjects.has(project.id) ||
-              (collapsedProjects.size === 0 && groupIdx > 0 && groups.length > 2);
+          {groups.map(({ project, files }) => {
+            const isCollapsed = effectiveCollapsed.has(project.id);
             return (
             <div key={project.id}>
               <div className="flex items-center gap-1.5 px-1 py-0.5">
@@ -144,6 +156,12 @@ export function DocumentOrderPanel() {
                   {isCollapsed ? <ChevronRight size={11} /> : <ChevronDown size={11} />}
                   <span className="min-w-0 flex-1 truncate text-[10px] font-semibold uppercase tracking-wide text-muted">
                     {project.label}
+                  </span>
+                  <span
+                    className="badge ml-0.5 flex-shrink-0"
+                    title={`${files.length} files in ${project.label}`}
+                  >
+                    {files.length}
                   </span>
                 </button>
                 <button

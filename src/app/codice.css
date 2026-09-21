@@ -594,6 +594,393 @@ button.codice-input-chip:hover {
 }
 
 /* ------------------------------------------------------------------ */
+/* R11 — export-group rows: drag-to-assign drop target, drag-in-flight */
+/* hint, and the inline rename affordance.                             */
+/* ------------------------------------------------------------------ */
+
+/* A group row hovered while a sidebar project is dragged onto it. */
+.codice-group-drop-target {
+  border-color: var(--color-accent) !important;
+  border-style: dashed;
+  background: color-mix(in srgb, var(--color-accent) 7%, transparent);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--color-accent) 35%, transparent);
+}
+
+/* Hint bar shown under "Export groups" while a project drag is active. */
+.codice-groups-hint {
+  border-color: color-mix(in srgb, var(--color-accent) 55%, transparent);
+  background: color-mix(in srgb, var(--color-accent) 8%, transparent);
+  color: var(--color-text-secondary);
+  animation: codice-hint-in 180ms ease;
+}
+
+@keyframes codice-hint-in {
+  from {
+    opacity: 0;
+    transform: translateY(-2px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* Pencil (rename) button on a group row — like the drag handle: quiet by
+   default, revealed on hover or focus. */
+.codice-rename-btn {
+  display: inline-flex;
+  align-items: center;
+  border-radius: 0.25rem;
+  padding: 0.125rem;
+  color: var(--color-text-muted);
+  opacity: 0;
+  transition:
+    opacity 150ms ease,
+    color 150ms ease;
+}
+
+.group-row:hover .codice-rename-btn,
+.codice-rename-btn:focus-visible {
+  opacity: 1;
+}
+
+.codice-rename-btn:hover {
+  color: var(--color-accent);
+}
+
+.codice-rename-btn:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 1px;
+}
+
+/* ------------------------------------------------------------------ */
+/* R14 — project chips INSIDE a group: drag/arrow reorder + quiet      */
+/* controls; and the "Generate all" header button.                     */
+/* ------------------------------------------------------------------ */
+
+.codice-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  border-radius: 0.25rem;
+  border: 1px solid var(--color-border);
+  padding: 0.125rem 0.375rem;
+  font-size: 10px;
+  line-height: 1.4;
+  color: var(--color-text-secondary);
+  cursor: grab;
+  touch-action: none;
+  transition:
+    border-color 150ms ease,
+    background-color 150ms ease,
+    opacity 150ms ease,
+    box-shadow 120ms ease;
+}
+
+.codice-chip:hover {
+  border-color: var(--color-text-muted);
+}
+
+.codice-chip:active {
+  cursor: grabbing;
+}
+
+.codice-chip:focus-within {
+  border-color: color-mix(in srgb, var(--color-accent) 55%, transparent);
+}
+
+.codice-chip-dragging {
+  opacity: 0.45;
+}
+
+/* Half-point drop indicators for a dragged chip (mirrors the row-level
+   codice-drop-above/below, but inset inside the chip's own box). */
+.codice-chip-drop-above {
+  box-shadow: inset 0 2px 0 0 var(--color-accent);
+}
+
+.codice-chip-drop-below {
+  box-shadow: inset 0 -2px 0 0 var(--color-accent);
+}
+
+/* Quiet ↑/↓ reorder buttons on a chip — revealed on chip hover or when
+   the chip (or a control in it) holds focus, exactly like the rename
+   pencil on the group row. */
+.codice-chip-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 0.2rem;
+  padding: 0.05rem;
+  color: var(--color-text-muted);
+  opacity: 0;
+  transition:
+    opacity 150ms ease,
+    color 150ms ease;
+}
+
+.codice-chip:hover .codice-chip-btn,
+.codice-chip:focus-within .codice-chip-btn {
+  opacity: 1;
+}
+
+.codice-chip-btn:hover:not(:disabled) {
+  color: var(--color-accent);
+}
+
+.codice-chip-btn:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 1px;
+}
+
+.codice-chip-btn:disabled {
+  opacity: 0.25;
+  cursor: default;
+}
+
+/* "Generate all" — the accent sibling of codice-bulk-btn in the group
+   header; disabled while an export is already running. */
+.codice-generate-all-btn {
+  color: var(--color-accent);
+  border-color: color-mix(in srgb, var(--color-accent) 45%, transparent);
+}
+
+.codice-generate-all-btn:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--color-accent) 10%, transparent);
+  border-color: var(--color-accent);
+}
+
+.codice-generate-all-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* ------------------------------------------------------------------ */
+/* R15 — groups editor polish: focus-visible row ring, stepper card    */
+/* tint, styled empty state. All via CSS vars → dark/light consistent. */
+/* ------------------------------------------------------------------ */
+
+/* A group row shows a quiet accent ring while ANY control inside it has
+   focus — keyboard users can always tell which group they are editing. */
+.codice-group-row:focus-within {
+  border-color: color-mix(in srgb, var(--color-accent) 55%, transparent);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--color-accent) 25%, transparent);
+}
+
+/* The "Number of export files" stepper + quick-actions card — a soft
+   surface lift so it reads as one controls cluster. */
+.codice-groups-stepper {
+  background: linear-gradient(
+    to bottom,
+    color-mix(in srgb, var(--color-surface) 60%, transparent),
+    transparent
+  );
+}
+
+/* The groups empty state: dashed accent card with icon + copy + CTA
+   (replaces the R9-era bare italic paragraph). */
+.codice-groups-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.25rem;
+  margin-top: 0.125rem;
+  padding: 0.875rem 0.75rem;
+  text-align: center;
+  border: 1px dashed color-mix(in srgb, var(--color-accent) 40%, transparent);
+  border-radius: 0.375rem;
+  color: var(--color-text-muted);
+  background: color-mix(in srgb, var(--color-accent) 4%, transparent);
+  animation: codice-hint-in 180ms ease;
+}
+
+.codice-groups-empty svg {
+  color: color-mix(in srgb, var(--color-accent) 70%, transparent);
+}
+
+.codice-groups-empty p:first-of-type {
+  color: var(--color-text-secondary);
+}
+
+.codice-groups-empty .codice-bulk-btn {
+  margin-top: 0.375rem;
+}
+
+/* ------------------------------------------------------------------ */
+/* R15 — drop-target semantics: an ASSIGN drop (sidebar project drag)  */
+/* and a MOVE drop (chip dragged from another group) light the same    */
+/* row — the two must LOOK different or the gesture lies. Assign keeps */
+/* the dashed outline; move gets a solid accent frame + a corner chip. */
+/* ------------------------------------------------------------------ */
+
+.codice-group-row[data-drop-kind='move'] {
+  border-style: solid !important;
+  border-color: var(--color-accent) !important;
+  background: color-mix(in srgb, var(--color-accent) 11%, transparent);
+  box-shadow: 0 0 0 1.5px color-mix(in srgb, var(--color-accent) 45%, transparent);
+}
+
+/* Corner affordance so the target is legible even mid-drag when the
+   cursor covers the row body ("move here", not "add to"). */
+.codice-group-row[data-drop-kind='move']::after {
+  content: 'move here';
+  position: absolute;
+  top: 0.25rem;
+  right: 0.375rem;
+  padding: 0.05rem 0.4rem;
+  border-radius: 9999px;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--color-accent-foreground, #fff);
+  background: var(--color-accent);
+  pointer-events: none;
+  animation: codice-hint-in 150ms ease;
+}
+
+/* R15 — fresh duplicate flash: the copy is inserted right under the
+   source and can be mistaken for it (or sit below the fold). A short
+   accent wash points at the new row, then fades. */
+.codice-group-row.codice-row-flash {
+  animation: codice-row-flash-in 1.4s ease;
+}
+
+@keyframes codice-row-flash-in {
+  0%,
+  18% {
+    background: color-mix(in srgb, var(--color-accent) 16%, transparent);
+    border-color: var(--color-accent);
+  }
+  55% {
+    background: color-mix(in srgb, var(--color-accent) 7%, transparent);
+  }
+  100% {
+    background: transparent;
+  }
+}
+
+/* R15 — micro-feedback on the header micro-buttons (duplicate / rename):
+   the icon dips slightly on press — tactile confirmation before the
+   state change lands. */
+.codice-rename-btn:active svg {
+  transform: scale(0.82);
+}
+
+.codice-rename-btn svg {
+  transition: transform 120ms ease;
+}
+
+/* R15 — history rows: a quiet accent bar slides in on hover from the
+   left edge, matching the chip/rule hover language elsewhere. */
+.codice-history-row:hover {
+  box-shadow: inset 2px 0 0 var(--color-accent);
+}
+
+/* ------------------------------------------------------------------ */
+/* R16 — "Move to…" strip + per-group summary line.                    */
+/* ------------------------------------------------------------------ */
+
+/* The accessible twin of the cross-group chip drag: an inline strip with
+   a soft accent wash (same visual family as the stepper card), entering
+   with the shared hint animation. */
+.codice-move-strip {
+  border-radius: 0.375rem;
+  background: linear-gradient(
+    to bottom,
+    color-mix(in srgb, var(--color-accent) 7%, transparent),
+    transparent
+  );
+  animation: codice-hint-in 180ms ease;
+}
+
+/* Target buttons inside the strip: the existing input-chip look plus a
+   directional accent — hover lifts the border to full accent. */
+.codice-move-target {
+  transition:
+    border-color 120ms ease,
+    background-color 120ms ease,
+    transform 120ms ease;
+}
+
+.codice-move-target:hover:not(:disabled) {
+  border-color: var(--color-accent);
+  background: color-mix(in srgb, var(--color-accent) 12%, transparent);
+  transform: translateY(-1px);
+}
+
+.codice-move-target:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+  text-decoration: line-through;
+  text-decoration-thickness: 1px;
+}
+
+/* What this export would contain right now — quiet mono digits with a
+   hairline top separation from the chips above. */
+.codice-group-summary {
+  margin: 0.25rem 0.5rem 0;
+  padding-top: 0.25rem;
+  border-top: 1px solid color-mix(in srgb, var(--color-border) 60%, transparent);
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+  color: var(--color-text-muted);
+}
+
+/* ------------------------------------------------------------------ */
+/* R14 — header save indicator (autosave state).                       */
+/* ------------------------------------------------------------------ */
+
+.codice-save-indicator {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  min-height: 1rem;
+  font-size: 10px;
+  color: var(--color-text-muted);
+}
+
+.codice-save-indicator[data-phase='dirty'] {
+  color: var(--color-warning);
+}
+
+.codice-save-dot {
+  width: 0.4rem;
+  height: 0.4rem;
+  border-radius: 9999px;
+  background: var(--color-warning);
+  animation: codice-save-pulse 1s ease-in-out infinite;
+}
+
+@keyframes codice-save-pulse {
+  0%,
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.4;
+    transform: scale(0.75);
+  }
+}
+
+.codice-save-saved {
+  color: var(--color-success);
+  animation: codice-save-in 180ms ease;
+}
+
+@keyframes codice-save-in {
+  from {
+    opacity: 0;
+    transform: translateY(2px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* ------------------------------------------------------------------ */
 /* Export history rows.                                                */
 /* ------------------------------------------------------------------ */
 
@@ -1669,4 +2056,70 @@ input[type='radio']:not(:disabled) {
 /* Toggle rows / file rows: the whole label is the click target. */
 label:has(> input[type='checkbox']:not(:disabled)) {
   cursor: pointer;
+}
+
+/* ------------------------------------------------------------------ */
+/* R2 polish round — topbar glass, pill open-state, motion hygiene     */
+/* ------------------------------------------------------------------ */
+
+/* Topbar: layered glass treatment over the flat surface — a soft vertical
+   gradient plus backdrop blur keeps the header visually distinct from the
+   scrollable app content beneath it without hardening the palette. */
+.codice-topbar {
+  position: relative;
+  z-index: 40;
+  background:
+    linear-gradient(
+      to bottom,
+      color-mix(in srgb, var(--color-surface-elevated) 72%, transparent),
+      color-mix(in srgb, var(--color-surface) 92%, transparent)
+    );
+  backdrop-filter: blur(10px);
+  box-shadow: 0 1px 0 0 color-mix(in srgb, var(--color-border-muted) 70%, transparent);
+}
+
+/* Outline / Statistics pills: a clear OPEN state (aria-expanded) so the
+   toggled-on pill reads as active, not merely hovered. */
+.codice-outline-toggle[aria-expanded='true'] {
+  border-color: var(--color-accent);
+  color: var(--color-accent);
+  background: color-mix(in srgb, var(--color-accent) 12%, var(--color-surface));
+  box-shadow:
+    0 6px 18px -8px rgb(0 0 0 / 0.35),
+    0 0 0 1px color-mix(in srgb, var(--color-accent) 35%, transparent);
+}
+
+/* Layout studio tabs: the selected tab keeps its accent ring; hovering an
+   unselected tab lifts it slightly for discoverability. */
+[role='tablist'][aria-label='Layout settings sections'] button {
+  transition:
+    background 140ms ease,
+    color 140ms ease,
+    box-shadow 140ms ease,
+    transform 100ms ease;
+}
+[role='tablist'][aria-label='Layout settings sections'] button:hover[aria-selected='false'] {
+  transform: translateY(-1px);
+}
+
+/* Studio tab badges (counts) — subtle, monospaced, tabular. */
+.codice-tab-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 1.1rem;
+  padding: 0 0.3rem;
+  margin-left: 0.35rem;
+  border-radius: 999px;
+  border: 1px solid var(--color-border-muted);
+  background: color-mix(in srgb, var(--color-surface-elevated) 80%, transparent);
+  color: var(--color-text-muted);
+  font-size: 9px;
+  font-weight: 700;
+  line-height: 1.4;
+  font-variant-numeric: tabular-nums;
+}
+[role='tab'][aria-selected='true'] .codice-tab-badge {
+  border-color: color-mix(in srgb, var(--color-accent) 45%, transparent);
+  color: var(--color-accent);
 }

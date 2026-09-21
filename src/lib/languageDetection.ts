@@ -288,3 +288,24 @@ export function languageLabel(id: string | null): string {
   };
   return map[id] ?? id;
 }
+
+/**
+ * §44 — the COMPREHENSIVE file-type filter option list, derived from THIS
+ * central mapping (not a hand-duplicated list): every language reachable
+ * through EXTENSION_MAP or FILENAME_MAP becomes a filter option, so adding
+ * a language here automatically adds it to the sidebar filter.
+ */
+export function languageFilterOptions(): Array<{ id: string; label: string }> {
+  const seen = new Map<string, string>();
+  for (const ext of Object.keys(EXTENSION_MAP)) {
+    const id = detectLanguage(`file.${ext}`);
+    if (id && !seen.has(id)) seen.set(id, languageLabel(id));
+  }
+  for (const name of Object.keys(FILENAME_MAP)) {
+    const id = detectLanguage(name);
+    if (id && !seen.has(id)) seen.set(id, languageLabel(id));
+  }
+  return Array.from(seen, ([id, label]) => ({ id, label })).sort((a, b) =>
+    a.label.localeCompare(b.label),
+  );
+}

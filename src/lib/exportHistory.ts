@@ -2,9 +2,10 @@
  * Export history — keeps the last N generated documents around so the user
  * can re-download them without re-running the export pipeline.
  *
- * Blobs live in module memory (they die with the page — nothing is persisted
- * to disk or localStorage). The pure helpers below are unit-tested; the React
- * wiring lives in ExportPanel.
+ * Entries live in module memory AND (R15) in IndexedDB via
+ * exportHistoryStorage, so history survives reloads: the blob is stored
+ * with the metadata and re-downloads work across sessions. The pure
+ * helpers below are unit-tested; the React wiring lives in ExportPanel.
  */
 
 export interface ExportHistoryEntry {
@@ -21,6 +22,10 @@ export interface ExportHistoryEntry {
   at: number;
   /** How the document was packaged (single file / ZIP of N). */
   detail?: string;
+  /** The generated document itself — carried in memory and persisted to
+   * IndexedDB by exportHistoryStorage (structured clone stores Blobs
+   * natively). Not part of the UI contract; never render it. */
+  blob: Blob;
 }
 
 /** Maximum number of retained exports. */
@@ -47,6 +52,7 @@ export function createHistoryEntry(input: {
     url: URL.createObjectURL(input.blob),
     at: input.now ?? Date.now(),
     detail: input.detail,
+    blob: input.blob,
   };
 }
 

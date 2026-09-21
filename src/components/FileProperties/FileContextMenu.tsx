@@ -14,11 +14,13 @@
  */
 
 import { useEffect, useRef } from 'react';
-import { FolderOpen, Settings2, EyeOff, Eye } from '@/components/common/Icons';
+import { FolderOpen, Settings2, EyeOff, Eye, Copy } from '@/components/common/Icons';
 
 export interface FileContextMenuState {
   fileId: string;
   fileName: string;
+  /** §41 — full project-relative path for the copy action. */
+  relativePath?: string;
   selected: boolean;
   x: number;
   y: number;
@@ -67,6 +69,22 @@ export function FileContextMenu({
       action: () => onToggle(!state.selected),
     },
   ];
+
+  // §41 — copy the project-relative path (handy for commit messages,
+  // build scripts and bug reports). Clipboard may be unavailable → toast.
+  if (state.relativePath) {
+    items.push({
+      key: 'copy-path',
+      label: 'Copy relative path',
+      icon: <Copy size={13} />,
+      action: () => {
+        const path = state.relativePath as string;
+        if (typeof navigator !== 'undefined' && navigator.clipboard?.writeText) {
+          void navigator.clipboard.writeText(path);
+        }
+      },
+    });
+  }
 
   // Focus the first item; Escape/arrow-key handling; click-away close.
   useEffect(() => {
